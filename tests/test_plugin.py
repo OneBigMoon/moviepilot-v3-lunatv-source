@@ -124,3 +124,18 @@ def test_tmdb_candidate_search_returns_compact_choices(monkeypatch):
         "season": None,
         "season_counts": {},
     }]
+
+
+def test_host_meta_info_uses_v3_function_signature(monkeypatch):
+    calls = []
+
+    def meta_info(*, title):
+        calls.append(title)
+        return type("Meta", (), {"type": "电影"})()
+
+    monkeypatch.setattr(plugin_module, "_HostMetaInfo", meta_info)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    meta = plugin._host_meta_info("示例作品", "2024")
+    assert calls == ["示例作品 (2024)"]
+    assert meta.type == "电影"
