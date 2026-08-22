@@ -12,6 +12,7 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert status["ai"]["enabled"] is True
     assert status["ai"]["available"] is False
     assert status["media_source"] == "lunatv"
+    assert plugin.get_sidebar_nav() == []
 
 
 def test_manual_download_rejects_non_http_url():
