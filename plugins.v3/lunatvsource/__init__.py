@@ -152,7 +152,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "lunatvsource.svg"
-    plugin_version = "0.3.9"
+    plugin_version = "0.4.0"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1453,9 +1453,12 @@ class LunaTVSource(_PluginBase):
                 title = str(getattr(meta, "title", "") or "").strip()
                 if title:
                     result = (client.search(normalize_search_title(title), limit=1) or [None])[0]
-            if result:
-                result, _ = self._prepare_result(result)
-            return self._sdk_media_info(result) if result else None
+            if not result:
+                return None
+            result, association = self._prepare_result(result)
+            # 原生详情页需要统一 MediaInfo 的完整展示字段；仅返回 SDK 最小对象
+            # 会导致自定义来源详情页无法渲染。
+            return self._media_info(result, association)
         except Exception as exc:
             self._logger.debug("LunaTV 原生识别失败：%s", exc)
             return None
