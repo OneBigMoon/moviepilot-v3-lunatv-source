@@ -152,7 +152,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "lunatvsource.svg"
-    plugin_version = "0.3.8"
+    plugin_version = "0.3.9"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -580,6 +580,15 @@ class LunaTVSource(_PluginBase):
         }
         if association.get("status") == "matched" and association.get("tmdb_id"):
             fields["tmdb_id"] = association["tmdb_id"]
+        for field in (
+            "poster_path",
+            "backdrop_path",
+            "overview",
+            "vote_average",
+            "release_date",
+        ):
+            if association.get(field) not in (None, ""):
+                fields[field] = association[field]
         try:
             return _schemas.MediaInfo(**fields)
         except TypeError:
@@ -706,7 +715,9 @@ class LunaTVSource(_PluginBase):
         cache_key = f"{query}|{result.year}|{result.media_type}"
         with self._tmdb_cache_lock:
             cached = self._tmdb_cache.get(cache_key)
-        if cached is not None:
+        if cached is not None and (
+            cached.get("status") != "matched" or cached.get("poster_path")
+        ):
             association = dict(cached)
             if association.get("status") == "matched" and not association.get("candidates"):
                 candidates = self._search_tmdb_candidates(query, result.year, result.media_type)
@@ -741,6 +752,11 @@ class LunaTVSource(_PluginBase):
                     "title": str(getattr(media, "title", "") or ""),
                     "year": str(getattr(media, "year", "") or ""),
                     "season_counts": self._season_counts(media),
+                    "poster_path": getattr(media, "poster_path", None),
+                    "backdrop_path": getattr(media, "backdrop_path", None),
+                    "overview": getattr(media, "overview", None),
+                    "vote_average": getattr(media, "vote_average", None),
+                    "release_date": getattr(media, "release_date", None),
                 }
                 candidates = self._search_tmdb_candidates(query, result.year, result.media_type)
                 if candidates:
