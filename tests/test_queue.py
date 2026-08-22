@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import lunatvsource_test.downloader as downloader_module
 from lunatvsource_test.downloader import DownloadQueue, DownloadTask
 
@@ -70,3 +72,24 @@ def test_ffmpeg_explicitly_sets_mp4_muxer_for_part_file(monkeypatch, tmp_path: P
     DownloadQueue._run_ffmpeg("ffmpeg", "https://example.test/video.m3u8", tmp_path / "movie.mp4.part")
     command = captured["command"]
     assert command[command.index("-f") + 1] == "mp4"
+
+
+def test_failed_download_removes_only_new_empty_directories(tmp_path: Path, monkeypatch):
+    root = tmp_path / "incoming"
+    root.mkdir()
+    task = DownloadTask(
+        task_id="failed-cleanup", source_key="lunatv", media_id="site:4",
+        title="测试电影", year="2026", media_type="movie", season=1, episode=1,
+        url="https://example.test/video.m3u8", root=str(root),
+    )
+    queue = DownloadQueue(lambda *_: [], lambda *_: None, lambda *_: None)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("source unavailable")
+
+    monkeypatch.setattr(queue, "_run_ffmpeg", fail)
+    with pytest.raises(RuntimeError, match="source unavailable"):
+        queue._execute(task)
+
+    assert root.exists()
+    assert list(root.iterdir()) == []
