@@ -157,7 +157,12 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     response = plugin.api_discover(keyword="示例电影")
     assert response == {"success": True, "data": []}
-    assert calls == [("示例电影", {"limit": 30, "stop_after_first_source": True})]
+    assert calls == [
+        (
+            "示例电影",
+            {"limit": 30, "stop_after_first_source": True, "enrich": False},
+        )
+    ]
 
 
 def test_discover_source_declares_native_search_field(monkeypatch):
