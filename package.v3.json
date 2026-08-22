@@ -1,0 +1,17 @@
+{
+  "LunaTVSource": {
+    "name": "LunaTV 资源订阅",
+    "description": "读取 LunaTV/MoonTV 的苹果 CMS 资源源，接管订阅并串行下载到指定目录，支持 STRM。",
+    "labels": "订阅,苹果CMS,m3u8,下载,媒体库",
+    "version": "0.1.0",
+    "icon": "icons/lunatvsource.svg",
+    "author": "OneBigMoon",
+    "project_url": "https://github.com/OneBigMoon/moviepilot-v3-lunatv-source",
+    "level": 1,
+    "release": false,
+    "system_version": ">=3.0.0",
+    "history": {
+      "0.1.0": "首版：读取 LunaTV-config，串行搜索苹果 CMS 源，支持订阅队列、本地 m3u8 下载和 STRM。"
+    }
+  }
+}

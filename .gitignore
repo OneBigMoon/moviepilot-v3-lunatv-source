@@ -1,0 +1,5 @@
+.DS_Store
+.pytest_cache/
+__pycache__/
+*.py[cod]
+plugins.v3/lunatvsource/node_modules/
