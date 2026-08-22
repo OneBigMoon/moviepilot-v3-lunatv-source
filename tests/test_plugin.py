@@ -165,25 +165,33 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
     ]
 
 
-def test_discover_source_declares_native_search_field(monkeypatch):
-    class DiscoverMediaSource:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
+def test_global_media_search_returns_lunatv_cards_without_explore_tab(monkeypatch):
+    class Client:
+        def search(self, query, **kwargs):
+            assert query == "示例电影"
+            assert kwargs == {"limit": 8, "stop_after_first_source": True, "enrich": False}
+            return [_result_from_item(
+                CmsSource("demo", "演示源", "https://cms.example/vod"),
+                {"vod_id": "42", "vod_name": "示例电影", "type_name": "电影"},
+            )]
 
-    class Schemas:
-        pass
-
-    Schemas.DiscoverMediaSource = DiscoverMediaSource
-    monkeypatch.setattr(plugin_module, "_schemas", Schemas)
-    monkeypatch.setattr(plugin_module, "_HostMediaSource", type("MediaSource", (), {}))
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
-    event_data = type("EventData", (), {"extra_sources": []})()
-    event = type("Event", (), {"event_data": event_data})()
-    plugin._discover_source(event)
-    source = event_data.extra_sources[0]
-    assert source.filter_params == {"keyword": ""}
-    assert source.filter_ui[0]["props"]["model"] == "keyword"
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda result: (result, {}))
+    monkeypatch.setattr(plugin, "_media_info", lambda result, association: result)
+    meta = type("Meta", (), {"name": "示例电影", "year": "", "type": "电影"})()
+    results = plugin.search_medias(meta=meta)
+    assert len(results) == 1
+    assert results[0].title == "示例电影"
+    assert plugin.get_media_source() == []
+
+
+def test_global_media_search_respects_explicit_other_source():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    meta = type("Meta", (), {"name": "示例电影"})()
+    assert plugin.search_medias(meta=meta, media_source=("themoviedb",)) == []
 
 
 def test_native_resource_search_returns_marked_download_items(monkeypatch):

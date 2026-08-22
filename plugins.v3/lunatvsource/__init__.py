@@ -58,8 +58,6 @@ try:  # Optional V3 native media-source/organize bridge.
     from app.chain.mediaserver import MediaServerChain as _HostMediaServerChain
     from app.chain.storage import StorageChain as _HostStorageChain
     from app.chain.transfer import TransferChain as _HostTransferChain
-    from app.schemas.event import DiscoverSourceEventData as _DiscoverSourceEventData
-    from app.schemas.types import ChainEventType as _HostChainEventType
     from app.schemas.types import MediaSource as _HostMediaSource
     from app.schemas.types import MediaType as _HostMediaType
 except Exception:  # pragma: no cover - standalone tests
@@ -67,8 +65,6 @@ except Exception:  # pragma: no cover - standalone tests
     _HostMediaServerChain = None
     _HostStorageChain = None
     _HostTransferChain = None
-    _DiscoverSourceEventData = Any
-    _HostChainEventType = None
     _HostMediaSource = None
     _HostMediaType = None
 
@@ -152,7 +148,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "lunatvsource.svg"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1269,17 +1265,8 @@ class LunaTVSource(_PluginBase):
         return self._queue.run_one()
 
     def get_media_source(self) -> List[Dict[str, Any]]:
-        """声明 V3 全局媒体搜索可选的 LunaTV 来源。"""
-        return [
-            {
-                "name": "LunaTV / 苹果 CMS",
-                "media_source": self._host_media_source(),
-                "media_types": [
-                    getattr(_HostMediaType, "MOVIE", "电影"),
-                    getattr(_HostMediaType, "TV", "电视剧"),
-                ],
-            }
-        ] if self._enabled else []
+        """LunaTV participates in the global search instead of adding an empty Explore tab."""
+        return []
 
     def get_module(self) -> Dict[str, Any]:
         """接入 V3 媒体识别、原生资源搜索与原生下载入口。"""
@@ -1288,10 +1275,56 @@ class LunaTVSource(_PluginBase):
         return {
             "recognize_media": self.recognize_media,
             "async_recognize_media": self.async_recognize_media,
+            "search_medias": self.search_medias,
+            "async_search_medias": self.async_search_medias,
             "search_torrents": self.search_torrents,
             "async_search_torrents": self.async_search_torrents,
             "download": self.download,
         }
+
+    @staticmethod
+    def _search_source_enabled(media_source: Any) -> bool:
+        """Run for an unrestricted global search, or when LunaTV is explicitly selected."""
+        if media_source in (None, "", (), []):
+            return True
+        values = media_source if isinstance(media_source, (list, tuple, set)) else (media_source,)
+        return any(_enum_value(value) == PLUGIN_MEDIA_SOURCE for value in values)
+
+    def search_medias(self, meta: Any, media_source: Any = None, **_: Any) -> List[Any]:
+        """Add CMS media cards to MoviePilot's native global media search."""
+        if not self._enabled or not self._search_source_enabled(media_source):
+            return []
+        query = str(
+            getattr(meta, "name", "")
+            or getattr(meta, "title", "")
+            or getattr(meta, "cn_name", "")
+            or ""
+        ).strip()
+        if not query:
+            return []
+        try:
+            search_query, _ = (self._ai or AiTitleNormalizer(False)).normalize(
+                query,
+                str(getattr(meta, "year", "") or ""),
+                _media_type_value(getattr(meta, "type", "")),
+            )
+            results = self._client().search(
+                search_query,
+                limit=8,
+                stop_after_first_source=True,
+                enrich=False,
+            )
+            medias = []
+            for result in results:
+                prepared, association = self._prepare_result(result)
+                medias.append(self._media_info(prepared, association))
+            return medias
+        except Exception as exc:
+            self._logger.warning("LunaTV 全局媒体搜索失败：%s", exc)
+            return []
+
+    async def async_search_medias(self, **kwargs: Any) -> List[Any]:
+        return await asyncio.to_thread(self.search_medias, **kwargs)
 
     @staticmethod
     def _resource_token(payload: Dict[str, Any]) -> str:
@@ -1465,40 +1498,6 @@ class LunaTVSource(_PluginBase):
 
     async def async_recognize_media(self, *args: Any, **kwargs: Any) -> Any:
         return self.recognize_media(*args, **kwargs)
-
-    @eventmanager.register(getattr(_HostChainEventType, "DiscoverSource", "discover.source"))
-    def _discover_source(self, event: Event) -> None:
-        """把 LunaTV 注册到 V3“探索”数据源，搜索结果可直接进入订阅。"""
-        if not self._enabled or _schemas is None or _HostMediaSource is None:
-            return
-        event_data = getattr(event, "event_data", None)
-        if not event_data:
-            return
-        try:
-            source = _schemas.DiscoverMediaSource(
-                name="LunaTV / 苹果 CMS",
-                media_source=self._host_media_source(),
-                mediaid_prefix=PLUGIN_MEDIA_SOURCE,
-                api_path="plugin/LunaTVSource/discover",
-                filter_params={"keyword": ""},
-                filter_ui=[
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "keyword",
-                            "label": "搜索电影或剧集",
-                            "clearable": True,
-                            "prepend-inner-icon": "mdi-magnify",
-                        },
-                    }
-                ],
-            )
-            if isinstance(event_data, dict):
-                event_data.setdefault("extra_sources", []).append(source)
-            elif hasattr(event_data, "extra_sources"):
-                event_data.extra_sources = list(event_data.extra_sources or []) + [source]
-        except Exception as exc:
-            self._logger.debug("注册 LunaTV 探索源失败：%s", exc)
 
     @eventmanager.register(getattr(EventType, "SubscribeAdded", "subscribe.added"))
     def _on_subscribe_added(self, event: Event) -> None:
