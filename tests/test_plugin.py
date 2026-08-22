@@ -243,3 +243,25 @@ def test_native_download_is_enqueued_into_serial_queue(tmp_path: Path):
     assert len(tasks) == 1
     assert tasks[0]["url"] == "https://example.test/movie.m3u8"
     assert tasks[0]["root"] == str(tmp_path)
+
+
+def test_native_download_reports_duplicate_instead_of_fake_success(tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    token = plugin._resource_token({
+        "url": "https://example.test/movie.m3u8",
+        "title": "示例电影",
+        "year": "2024",
+        "media_type": "movie",
+        "season": 1,
+        "episode": 1,
+        "media_id": "demo:42",
+    })
+
+    first = plugin.download(token, tmp_path)
+    duplicate = plugin.download(token, tmp_path)
+
+    assert first[1]
+    assert duplicate[:3] == ("LunaTVSource", None, None)
+    assert "已在" in duplicate[3]
+    assert len(plugin._queue.list_tasks()) == 1

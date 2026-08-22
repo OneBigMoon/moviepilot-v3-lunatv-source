@@ -69,9 +69,41 @@ def test_ffmpeg_explicitly_sets_mp4_muxer_for_part_file(monkeypatch, tmp_path: P
         return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
 
     monkeypatch.setattr(downloader_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(DownloadQueue, "_prepare_hls_input", lambda url, _temp: url)
     DownloadQueue._run_ffmpeg("ffmpeg", "https://example.test/video.m3u8", tmp_path / "movie.mp4.part")
     command = captured["command"]
     assert command[command.index("-f") + 1] == "mp4"
+    assert command[command.index("-allowed_segment_extensions") + 1] == "ALL"
+    assert command[command.index("-extension_picky") + 1] == "0"
+
+
+def test_prepare_hls_input_decodes_zstd_and_absolutizes_urls(monkeypatch, tmp_path: Path):
+    class Headers:
+        @staticmethod
+        def get(name):
+            return "zstd" if name == "Content-Encoding" else None
+
+    class Response:
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def read():
+            return b"compressed"
+
+    playlist = b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:10,\nsegment.ts\n'
+    monkeypatch.setattr(downloader_module.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr(DownloadQueue, "_decompress_zstd", lambda payload: playlist)
+
+    local = DownloadQueue._prepare_hls_input("https://media.example/path/index.m3u8", tmp_path)
+    content = Path(local).read_text(encoding="utf-8")
+    assert 'URI="https://media.example/path/key.bin"' in content
+    assert "https://media.example/path/segment.ts" in content
 
 
 def test_failed_download_removes_only_new_empty_directories(tmp_path: Path, monkeypatch):
