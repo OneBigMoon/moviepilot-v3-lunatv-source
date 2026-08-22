@@ -85,6 +85,32 @@ def test_search_enriches_sparse_list_item_with_detail_play_urls():
     assert {call.get("ac") for call in calls} == {"list", "detail"}
 
 
+def test_search_can_stop_after_first_source_with_results():
+    sources = [
+        CmsSource(key="first", name="首选", api="https://first.example/vod"),
+        CmsSource(key="second", name="备用", api="https://second.example/vod"),
+    ]
+    client = AppleCmsClient(sources)
+    called = []
+
+    def fake_request(source, **params):
+        called.append(source.key)
+        return {
+            "list": [{
+                "vod_id": source.key,
+                "vod_name": "示例电影",
+                "type_name": "电影",
+                "vod_play_from": "在线播放",
+                "vod_play_url": "正片$https://example.test/movie.m3u8",
+            }]
+        }
+
+    client._request = fake_request
+    results = client.search("示例电影", stop_after_first_source=True)
+    assert [item.source_key for item in results] == ["first"]
+    assert set(called) == {"first"}
+
+
 def test_result_uses_title_season_hint_for_multi_season_bundle():
     result = _result_from_item(
         CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),

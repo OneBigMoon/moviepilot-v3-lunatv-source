@@ -141,3 +141,40 @@ def test_host_meta_info_uses_v3_function_signature(monkeypatch):
     meta = plugin._host_meta_info("示例作品", "2024")
     assert calls == ["示例作品 (2024)"]
     assert meta.type == "电影"
+
+
+def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatch):
+    calls = []
+
+    class Client:
+        def search(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return []
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    response = plugin.api_discover(keyword="示例电影")
+    assert response == {"success": True, "data": []}
+    assert calls == [("示例电影", {"limit": 30, "stop_after_first_source": True})]
+
+
+def test_discover_source_declares_native_search_field(monkeypatch):
+    class DiscoverMediaSource:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Schemas:
+        pass
+
+    Schemas.DiscoverMediaSource = DiscoverMediaSource
+    monkeypatch.setattr(plugin_module, "_schemas", Schemas)
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", type("MediaSource", (), {}))
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    event_data = type("EventData", (), {"extra_sources": []})()
+    event = type("Event", (), {"event_data": event_data})()
+    plugin._discover_source(event)
+    source = event_data.extra_sources[0]
+    assert source.filter_params == {"keyword": ""}
+    assert source.filter_ui[0]["props"]["model"] == "keyword"

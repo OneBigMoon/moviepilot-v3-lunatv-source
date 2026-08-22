@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import lunatvsource_test.downloader as downloader_module
 from lunatvsource_test.downloader import DownloadQueue, DownloadTask
 
 
@@ -56,3 +57,16 @@ def test_queue_recovers_interrupted_running_task(tmp_path: Path):
     tasks = queue.list_tasks()
     assert tasks[0]["state"] == "pending"
     assert "恢复" in tasks[0]["error"]
+
+
+def test_ffmpeg_explicitly_sets_mp4_muxer_for_part_file(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+    monkeypatch.setattr(downloader_module.subprocess, "run", fake_run)
+    DownloadQueue._run_ffmpeg("ffmpeg", "https://example.test/video.m3u8", tmp_path / "movie.mp4.part")
+    command = captured["command"]
+    assert command[command.index("-f") + 1] == "mp4"
