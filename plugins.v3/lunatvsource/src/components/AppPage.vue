@@ -110,6 +110,7 @@ async function sync() {
 }
 
 const pendingTasks = computed(() => tasks.value.filter(task => task.state === 'pending').length)
+const stateLabel = (state) => ({ pending: '排队中', running: '下载中', completed: '已完成', failed: '失败' }[state] || state)
 
 onMounted(load)
 </script>
@@ -120,7 +121,12 @@ onMounted(load)
       <div>
         <div class="lunatv-eyebrow">THIRD-PARTY CMS / M3U8</div>
         <h1>LunaTV 资源订阅</h1>
-        <p>订阅、搜索、串行下载；完成后按 MoviePilot 目录规则整理。</p>
+        <p>订阅、搜索、排队下载；播放交给既有 Emby，插件只负责资源接入和整理。</p>
+      </div>
+      <div class="header-status">
+        <span class="chip">串行队列</span>
+        <span :class="['chip', status.ai?.available ? 'ready' : 'muted-chip']">AI {{ status.ai?.available ? '已就绪' : '未启用' }}</span>
+        <span :class="['chip', status.media_server_sync_running ? 'busy' : 'muted-chip']">媒体库 {{ status.media_server_sync_running ? '同步中' : '自动刷新' }}</span>
       </div>
       <div class="lunatv-actions">
         <button class="button secondary" :disabled="syncing" @click="sync">{{ syncing ? '刷新中…' : '刷新订阅' }}</button>
@@ -147,11 +153,12 @@ onMounted(load)
             <strong>{{ result.title }}<span v-if="result.year"> ({{ result.year }})</span></strong>
             <small>{{ result.source_name }} · {{ result.media_type === 'tv' ? '电视剧' : '电影' }}</small>
           </div>
-          <div class="episode-list">
+          <div v-if="result.episodes?.length" class="episode-list">
             <button v-for="episode in result.episodes" :key="`${episode.season}-${episode.episode}-${episode.url}`" class="episode-button" @click="enqueue(result, episode)">
               {{ result.media_type === 'tv' ? `S${String(episode.season).padStart(2, '0')}E${String(episode.episode).padStart(2, '0')}` : '下载' }}
             </button>
           </div>
+          <small v-else class="muted">该结果没有可用播放地址</small>
         </article>
       </div>
     </section>
@@ -170,7 +177,7 @@ onMounted(load)
         <div v-for="task in tasks.slice(0, 12)" :key="task.task_id" class="task-row">
           <div><strong>{{ task.title }}</strong><small>S{{ String(task.season).padStart(2, '0') }}E{{ String(task.episode).padStart(2, '0') }}</small></div>
           <div class="task-actions">
-            <span :class="['status', task.state]">{{ task.state }}</span>
+            <span :class="['status', task.state]">{{ stateLabel(task.state) }}</span>
             <button v-if="task.state === 'failed'" class="link-button" @click="retry(task)">重试</button>
           </div>
         </div>
@@ -193,6 +200,9 @@ onMounted(load)
 .lunatv-header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
 .lunatv-eyebrow { color: #9d72ff; font-size: 12px; letter-spacing: .14em; font-weight: 700; }
 h1 { margin: 8px 0; font-size: 32px; } p { color: #a5a2b5; margin: 0; }
+.header-status { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.chip { border-radius: 999px; background: #28203e; color: #c4a8ff; padding: 6px 9px; font-size: 12px; white-space: nowrap; }
+.chip.ready { background: #183125; color: #a7efbd; } .chip.busy { background: #3a2c1e; color: #ffc66d; } .chip.muted-chip { color: #9693a7; background: #20202b; }
 .lunatv-actions, .search-row, .episode-list { display: flex; gap: 10px; align-items: center; }
 .button, .episode-button { border: 0; border-radius: 10px; background: #8b5cf6; color: white; padding: 10px 16px; cursor: pointer; font-weight: 650; }
 .button.secondary { background: #28203e; color: #c4a8ff; } .button:disabled { opacity: .55; cursor: default; }

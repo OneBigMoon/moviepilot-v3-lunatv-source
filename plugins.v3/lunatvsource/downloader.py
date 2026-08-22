@@ -212,8 +212,20 @@ class DownloadQueue:
             return str(destination)
 
         temp_path = destination.with_suffix(destination.suffix + ".part")
-        self._run_ffmpeg(task.ffmpeg_path, task.url, temp_path)
+        try:
+            self._run_ffmpeg(task.ffmpeg_path, task.url, temp_path)
+        except Exception:
+            # 失败任务不把残留缓存留在媒体库目录，避免 Emby/监控把半成品当成文件夹内容。
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise IOError("ffmpeg 未生成有效文件")
         os.replace(temp_path, destination)
         return str(destination)

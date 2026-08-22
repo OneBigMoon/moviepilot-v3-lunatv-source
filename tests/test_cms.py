@@ -1,6 +1,6 @@
 import json
 
-from lunatvsource_test.cms import AppleCmsClient, CmsSource, _parse_play_urls, parse_config
+from lunatvsource_test.cms import AppleCmsClient, CmsSource, _parse_play_urls, _result_from_item, parse_config
 
 
 def test_parse_config_filters_by_api_host():
@@ -71,3 +71,43 @@ def test_search_enriches_sparse_list_item_with_detail_play_urls():
     assert len(results) == 1
     assert [episode.episode for episode in results[0].episodes] == [1, 2]
     assert {call.get("ac") for call in calls} == {"list", "detail"}
+
+
+def test_result_uses_title_season_hint_for_multi_season_bundle():
+    result = _result_from_item(
+        CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
+        {
+            "vod_id": "8",
+            "vod_name": "海底小纵队中文版 (1-8季)",
+            "type_name": "电视剧",
+            "vod_play_from": "在线播放",
+            "vod_play_url": "01$https://example.test/01.m3u8#02$https://example.test/02.m3u8",
+        },
+    )
+    assert [(item.season, item.episode) for item in result.episodes] == [(1, 1), (1, 2)]
+
+    season_eight = _result_from_item(
+        CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
+        {
+            "vod_id": "8b",
+            "vod_name": "海底小纵队中文版 第8季",
+            "type_name": "电视剧",
+            "vod_play_from": "在线播放",
+            "vod_play_url": "01$https://example.test/08-01.m3u8",
+        },
+    )
+    assert season_eight.episodes[0].season == 8
+
+
+def test_animation_is_treated_as_series_for_season_naming():
+    result = _result_from_item(
+        CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
+        {
+            "vod_id": "cartoon",
+            "vod_name": "示例动画",
+            "type_name": "动漫",
+            "vod_play_from": "在线播放",
+            "vod_play_url": "01$https://example.test/01.m3u8#02$https://example.test/02.m3u8",
+        },
+    )
+    assert result.media_type == "tv"

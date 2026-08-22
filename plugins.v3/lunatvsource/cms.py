@@ -17,6 +17,11 @@ _EPISODE_RE = re.compile(
     re.IGNORECASE,
 )
 _SEASON_RE = re.compile(r"(?:S|第\s*)(?P<season>\d{1,3})\s*(?:季|SEASON)?", re.IGNORECASE)
+_SEASON_RANGE_RE = re.compile(
+    r"(?:第\s*)?(?P<start>\d{1,3})\s*[-~至]\s*(?P<end>\d{1,3})\s*季|"
+    r"S(?P<sstart>\d{1,3})\s*[-~至]\s*S?(?P<send>\d{1,3})",
+    re.IGNORECASE,
+)
 
 
 def _text(value: Any) -> str:
@@ -48,6 +53,11 @@ def _extract_season_episode(label: str, default_season: int = 1) -> Tuple[int, i
 def _extract_season(label: str, default_season: int = 1) -> int:
     match = _SEASON_RE.search(_text(label))
     return int(match.group("season")) if match else default_season
+
+
+def _season_hint(label: str, default_season: int = 1) -> int:
+    """从线路标题中读取季号；没有季号时保留默认值。"""
+    return _extract_season(label, default_season)
 
 
 def _parse_play_urls(play_from: Any, play_url: Any, default_season: int = 1) -> List["CmsEpisode"]:
@@ -87,7 +97,7 @@ def _parse_play_urls(play_from: Any, play_url: Any, default_season: int = 1) -> 
             url = url.strip()
             if not urllib.parse.urlparse(url).scheme:
                 continue
-            season, episode = _extract_season_episode(label, _extract_season(group_name, default_season))
+            season, episode = _extract_season_episode(label, _season_hint(group_name, default_season))
             episodes.append(CmsEpisode(season=season, episode=episode, label=label.strip(), url=url))
     deduped: Dict[Tuple[int, int, str], CmsEpisode] = {}
     for item in episodes:
@@ -157,7 +167,12 @@ class CmsResult:
 
 def _media_type(item: Mapping[str, Any]) -> str:
     value = f"{item.get('type_name', '')} {item.get('vod_class', '')}".lower()
-    return "tv" if any(token in value for token in ("电视剧", "连续剧", "tv", "剧集")) else "movie"
+    if "电影" in value and "电视剧" not in value:
+        return "movie"
+    return "tv" if any(
+        token in value
+        for token in ("电视剧", "连续剧", "tv", "剧集", "动漫", "动画", "综艺", "纪录", "儿童", "少儿")
+    ) else "movie"
 
 
 def _source_key(api_key: str, item: Mapping[str, Any]) -> str:
@@ -168,7 +183,13 @@ def _result_from_item(source: CmsSource, item: Mapping[str, Any]) -> CmsResult:
     title = _text(item.get("vod_name") or item.get("vod_en"))
     year = _text(item.get("vod_year"))
     media_type = _media_type(item)
-    episodes = tuple(_parse_play_urls(item.get("vod_play_from"), item.get("vod_play_url")))
+    # 有些 CMS 只把“1-8季”写在片名里，线路名和集名都没有季号。
+    # 这时至少保留起始季，避免所有集被误标成 S01；真正分季的线路仍优先使用线路标题。
+    title_season = _extract_season(title, 1)
+    range_match = _SEASON_RANGE_RE.search(title)
+    if range_match and range_match.group("start"):
+        title_season = int(range_match.group("start"))
+    episodes = tuple(_parse_play_urls(item.get("vod_play_from"), item.get("vod_play_url"), title_season))
     if media_type == "movie" and not episodes:
         direct_url = _text(item.get("vod_play_url"))
         if direct_url.startswith("http"):
@@ -272,6 +293,17 @@ class AppleCmsClient:
             # A broken detail endpoint should not hide a valid list result.
             pass
         return item
+
+    def detail(self, source_key: str, vod_id: str) -> Optional[CmsResult]:
+        """按插件媒体身份读取单条详情，供 MoviePilot 原生订阅复用。"""
+        source = next((item for item in self.sources if item.key == str(source_key).lower()), None)
+        if source is None:
+            return None
+        payload = self._request(source, ac="detail", ids=vod_id)
+        items = self._items(payload)
+        if not items:
+            return None
+        return _result_from_item(source, self._enrich_item(source, items[0]))
 
     def search(self, query: str, limit: int = 20) -> List[CmsResult]:
         results: List[CmsResult] = []
