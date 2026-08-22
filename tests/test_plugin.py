@@ -1,6 +1,7 @@
 from lunatvsource_test import LunaTVSource
 import lunatvsource_test as plugin_module
 from lunatvsource_test.cms import CmsSource, _result_from_item
+from pathlib import Path
 
 
 def test_status_exposes_serial_queue_and_ai_fallback():
@@ -178,3 +179,54 @@ def test_discover_source_declares_native_search_field(monkeypatch):
     source = event_data.extra_sources[0]
     assert source.filter_params == {"keyword": ""}
     assert source.filter_ui[0]["props"]["model"] == "keyword"
+
+
+def test_native_resource_search_returns_marked_download_items(monkeypatch):
+    class TorrentInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Client:
+        def search(self, query, **kwargs):
+            return [_result_from_item(
+                CmsSource("demo", "演示源", "https://cms.example/vod", "https://cms.example"),
+                {
+                    "vod_id": "42",
+                    "vod_name": "示例剧",
+                    "vod_year": "2024",
+                    "type_name": "电视剧",
+                    "vod_play_from": "在线播放",
+                    "vod_play_url": "01$https://example.test/01.m3u8",
+                },
+            )]
+
+    monkeypatch.setattr(plugin_module, "_schemas", type("Schemas", (), {"TorrentInfo": TorrentInfo}))
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    items = plugin.search_torrents(site={"id": 1}, keyword="示例剧", page=0)
+    assert len(items) == 1
+    assert items[0].site_name == "LunaTV"
+    assert items[0].title.endswith("S01E01")
+    assert plugin._decode_resource_token(items[0].enclosure)["url"].endswith("01.m3u8")
+
+
+def test_native_download_is_enqueued_into_serial_queue(tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    token = plugin._resource_token({
+        "url": "https://example.test/movie.m3u8",
+        "title": "示例电影",
+        "year": "2024",
+        "media_type": "movie",
+        "season": 1,
+        "episode": 1,
+        "media_id": "demo:42",
+    })
+    result = plugin.download(token, tmp_path)
+    assert result[0] == "LunaTVSource"
+    assert result[1]
+    tasks = plugin._queue.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["url"] == "https://example.test/movie.m3u8"
+    assert tasks[0]["root"] == str(tmp_path)
