@@ -61,6 +61,9 @@ def test_tmdb_association_can_map_flat_seasons(monkeypatch):
         def recognize_media(self, **kwargs):
             return Media()
 
+        def search_medias(self, **kwargs):
+            return [Media()]
+
     monkeypatch.setattr(plugin_module, "_HostMediaSource", Source)
     monkeypatch.setattr(plugin_module, "_HostMetaInfo", Meta)
     monkeypatch.setattr(plugin_module, "_HostMediaChain", MediaChain)
@@ -78,4 +81,46 @@ def test_tmdb_association_can_map_flat_seasons(monkeypatch):
     )
     prepared, association = plugin._prepare_result(result)
     assert association["status"] == "matched"
+    assert association["candidates"][0]["media_id"] == "123"
     assert [(episode.season, episode.episode) for episode in prepared.episodes] == [(1, 1), (1, 2), (2, 1)]
+
+
+def test_tmdb_candidate_search_returns_compact_choices(monkeypatch):
+    class Source:
+        TMDB = "themoviedb"
+
+    class Meta:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Media:
+        media_id = "456"
+        tmdb_id = 456
+        media_source = "themoviedb"
+        title = "候选作品"
+        year = "2023"
+        type = "电影"
+        season = None
+        seasons = {}
+
+    class MediaChain:
+        def search_medias(self, **kwargs):
+            return [Media(), Media()]
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", Source)
+    monkeypatch.setattr(plugin_module, "_HostMetaInfo", Meta)
+    monkeypatch.setattr(plugin_module, "_HostMediaChain", MediaChain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "tmdb_association": True})
+    response = plugin.api_tmdb_search({"title": "候选作品", "media_type": "movie"})
+    assert response["success"] is True
+    assert response["data"] == [{
+        "media_source": "themoviedb",
+        "media_id": "456",
+        "tmdb_id": 456,
+        "title": "候选作品",
+        "year": "2023",
+        "type": "电影",
+        "season": None,
+        "season_counts": {},
+    }]
