@@ -9,6 +9,7 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     status = plugin.api_status()["data"]
     assert status["enabled"] is True
     assert status["queue"]["pending"] == 0
+    assert status["ai"]["enabled"] is True
     assert status["ai"]["available"] is False
     assert status["media_source"] == "lunatv"
 
@@ -36,7 +37,7 @@ def test_directory_settings_are_used_when_plugin_root_is_empty(monkeypatch):
 
     monkeypatch.setattr(plugin_module, "_HostDirectoryHelper", DirectoryHelper)
     plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True, "use_moviepilot_dirs": True})
+    plugin.init_plugin({"enabled": True, "use_moviepilot_dirs": False})
     assert plugin._effective_root(media_type="tv") == "/media/courses"
     assert plugin.api_status()["data"]["directories"]["source"] == "MoviePilot 目录设置"
 
@@ -68,7 +69,7 @@ def test_tmdb_association_can_map_flat_seasons(monkeypatch):
     monkeypatch.setattr(plugin_module, "_HostMetaInfo", Meta)
     monkeypatch.setattr(plugin_module, "_HostMediaChain", MediaChain)
     plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True, "tmdb_association": True})
+    plugin.init_plugin({"enabled": True, "tmdb_association": False})
     result = _result_from_item(
         CmsSource("demo", "演示", "https://cms.example/vod"),
         {
