@@ -247,15 +247,28 @@ class DownloadQueue:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            self._remove_empty_parents(destination.parent, root)
             raise
         if not temp_path.exists() or temp_path.stat().st_size <= 0:
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            self._remove_empty_parents(destination.parent, root)
             raise IOError("ffmpeg 未生成有效文件")
         os.replace(temp_path, destination)
         return str(destination)
+
+    @staticmethod
+    def _remove_empty_parents(path: Path, root: Path) -> None:
+        """Remove only empty directories below the configured download root."""
+        current = path
+        while current != root and root in current.parents:
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
     @staticmethod
     def _run_ffmpeg(ffmpeg_path: str, url: str, output: Path) -> None:
