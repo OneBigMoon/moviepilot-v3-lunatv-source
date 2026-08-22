@@ -617,10 +617,10 @@ class LunaTVSource(_PluginBase):
             self._logger.warning("LunaTV search failed: %s", exc)
             return {"success": False, "message": f"搜索失败：{exc}", "data": []}
 
-    def api_discover(self, query: str = "", page: int = 1, count: int = 30) -> Dict[str, Any]:
+    def api_discover(self, query: str = "", title: str = "", page: int = 1, count: int = 30) -> Dict[str, Any]:
         """V3 探索数据源接口，返回宿主统一 MediaInfo，而非插件自定义播放器。"""
         del page
-        query = str(query or "").strip()
+        query = str(query or title or "").strip()
         if not query:
             return {"success": True, "data": []}
         try:
