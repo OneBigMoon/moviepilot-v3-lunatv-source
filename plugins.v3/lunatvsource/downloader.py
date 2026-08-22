@@ -207,8 +207,15 @@ class DownloadQueue:
 
         if task.mode == "strm":
             temp_path = destination.with_suffix(destination.suffix + ".part")
-            temp_path.write_text(task.url + "\n", encoding="utf-8")
-            os.replace(temp_path, destination)
+            try:
+                temp_path.write_text(task.url + "\n", encoding="utf-8")
+                os.replace(temp_path, destination)
+            except Exception:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
             return str(destination)
 
         temp_path = destination.with_suffix(destination.suffix + ".part")
