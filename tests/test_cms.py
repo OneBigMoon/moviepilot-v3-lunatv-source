@@ -1,6 +1,13 @@
 import json
 
-from lunatvsource_test.cms import AppleCmsClient, CmsSource, _parse_play_urls, _result_from_item, parse_config
+from lunatvsource_test.cms import (
+    AppleCmsClient,
+    CmsSource,
+    _parse_play_urls,
+    _result_from_item,
+    apply_season_counts,
+    parse_config,
+)
 
 
 def test_parse_config_filters_by_api_host():
@@ -33,6 +40,11 @@ def test_parse_play_urls_reads_multiple_episodes_and_seasons():
 def test_parse_play_urls_supports_chinese_episode_label():
     episodes = _parse_play_urls("在线播放", "第8集$https://example.test/08.m3u8")
     assert episodes[0].episode == 8
+
+
+def test_parse_play_urls_rejects_non_http_urls():
+    episodes = _parse_play_urls("在线播放", "01$file:///tmp/episode.m3u8#02$https://example.test/02.m3u8")
+    assert [(item.episode, item.url) for item in episodes] == [(2, "https://example.test/02.m3u8")]
 
 
 def test_parse_play_urls_preserves_season_groups():
@@ -85,6 +97,8 @@ def test_result_uses_title_season_hint_for_multi_season_bundle():
         },
     )
     assert [(item.season, item.episode) for item in result.episodes] == [(1, 1), (1, 2)]
+    assert result.season_range == (1, 8)
+    assert result.season_ambiguous is True
 
     season_eight = _result_from_item(
         CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
@@ -97,6 +111,22 @@ def test_result_uses_title_season_hint_for_multi_season_bundle():
         },
     )
     assert season_eight.episodes[0].season == 8
+
+
+def test_flat_multi_season_bundle_can_be_mapped_by_exact_tmdb_counts():
+    result = _result_from_item(
+        CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
+        {
+            "vod_id": "bundle",
+            "vod_name": "示例合集 1-2季",
+            "type_name": "电视剧",
+            "vod_play_from": "在线播放",
+            "vod_play_url": "01$https://example.test/01.m3u8#02$https://example.test/02.m3u8#03$https://example.test/03.m3u8",
+        },
+    )
+    mapped = apply_season_counts(result, {1: 2, 2: 1})
+    assert mapped.season_ambiguous is False
+    assert [(item.season, item.episode) for item in mapped.episodes] == [(1, 1), (1, 2), (2, 1)]
 
 
 def test_animation_is_treated_as_series_for_season_naming():

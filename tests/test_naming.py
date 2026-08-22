@@ -1,8 +1,13 @@
-from lunatvsource_test.naming import media_path, safe_component
+from lunatvsource_test.naming import media_path, normalize_media_title, normalize_search_title, safe_component
 
 
 def test_safe_component_removes_path_separators():
     assert safe_component("A/B:C") == "A B C"
+
+
+def test_normalize_titles_removes_bundle_metadata_but_keeps_year():
+    assert normalize_media_title("海底小纵队中文版 (1-8季)") == "海底小纵队中文版"
+    assert normalize_search_title("示例剧 [1080P 中文字幕]") == "示例剧"
 
 
 def test_movie_path_uses_year():

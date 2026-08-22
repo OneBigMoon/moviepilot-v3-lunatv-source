@@ -40,3 +40,19 @@ def test_queue_runs_one_task_and_records_completion(tmp_path: Path):
     assert completed == [("one", str(tmp_path / "示例.mp4"))]
     assert queue.summary()["pending"] == 0
     assert queue.summary()["completed"] == 1
+
+
+def test_queue_recovers_interrupted_running_task(tmp_path: Path):
+    data = {
+        "download_tasks_v1": [
+            DownloadTask(
+                task_id="stale", source_key="lunatv", media_id="site:3", title="示例", year="2024",
+                media_type="movie", season=1, episode=1, url="https://example.test/a.m3u8",
+                root=str(tmp_path), state="running",
+            ).to_dict()
+        ]
+    }
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    tasks = queue.list_tasks()
+    assert tasks[0]["state"] == "pending"
+    assert "恢复" in tasks[0]["error"]
