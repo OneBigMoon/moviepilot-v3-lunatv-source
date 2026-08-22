@@ -120,7 +120,7 @@ class LunaTVSource(_PluginBase):
 
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，注册 V3 媒体源，串行下载到指定目录并可刷新 Emby/原生整理链。"
-    plugin_icon = "icons/lunatvsource.svg"
+    plugin_icon = "lunatvsource.svg"
     plugin_version = "0.2.0"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
