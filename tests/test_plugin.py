@@ -1,6 +1,6 @@
 from lunatvsource_test import LunaTVSource
 import lunatvsource_test as plugin_module
-from lunatvsource_test.cms import CmsSource, _result_from_item
+from lunatvsource_test.cms import CmsResult, CmsSource, _result_from_item
 from lunatvsource_test.downloader import DownloadTask
 from lunatvsource_test.naming import media_path
 from pathlib import Path
@@ -135,6 +135,58 @@ def test_tmdb_candidate_search_returns_compact_choices(monkeypatch):
     }]
 
 
+def test_resource_tmdb_association_skips_candidate_lookup_and_reuses_cache(monkeypatch):
+    class Source:
+        TMDB = "themoviedb"
+
+    class Meta:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class Media:
+        media_id = "456"
+        tmdb_id = 456
+        media_source = "themoviedb"
+        title = "示例电影"
+        year = "2024"
+        seasons = {}
+
+    recognize_calls = []
+    candidate_calls = []
+
+    class MediaChain:
+        def recognize_media(self, **kwargs):
+            recognize_calls.append(kwargs)
+            return Media()
+
+        def search_medias(self, **kwargs):
+            candidate_calls.append(kwargs)
+            return [Media()]
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", Source)
+    monkeypatch.setattr(plugin_module, "_HostMetaInfo", Meta)
+    monkeypatch.setattr(plugin_module, "_HostMediaChain", MediaChain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    result = CmsResult(
+        source_key="demo",
+        source_name="演示",
+        vod_id="42",
+        title="示例电影",
+        year="2024",
+        media_type="movie",
+        remark="",
+    )
+
+    first = plugin._associate_tmdb(result, include_candidates=False)
+    second = plugin._associate_tmdb(result, include_candidates=False)
+
+    assert first["media_id"] == "456"
+    assert second["media_id"] == "456"
+    assert len(recognize_calls) == 1
+    assert candidate_calls == []
+
+
 def test_host_meta_info_uses_v3_function_signature(monkeypatch):
     calls = []
 
@@ -226,11 +278,13 @@ def test_native_resource_search_returns_marked_download_items(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin, "_client", lambda: Client())
-    monkeypatch.setattr(
-        plugin,
-        "_prepare_result",
-        lambda result: (result, {"media_source": "themoviedb", "media_id": "123"}),
-    )
+    association_calls = []
+
+    def associate(context, include_candidates=True):
+        association_calls.append((context, include_candidates))
+        return {"media_source": "themoviedb", "media_id": "123"}
+
+    monkeypatch.setattr(plugin, "_associate_tmdb", associate)
     items = plugin.search_torrents(site={"id": 1}, keyword="示例剧", page=0)
     assert len(items) == 1
     assert items[0].site_name == "演示源"
@@ -244,10 +298,16 @@ def test_native_resource_search_returns_marked_download_items(monkeypatch):
     assert payload["source_name"] == "演示源"
     assert payload["host_media_source"] == "themoviedb"
     assert payload["host_media_id"] == "123"
+    assert [(item.title, item.year, item.media_type, include_candidates)
+            for item, include_candidates in association_calls] == [
+        ("示例剧", "2024", "tv", False),
+    ]
 
 
 def test_resource_torrents_dedupes_play_urls_from_multiple_sources(monkeypatch):
     calls = []
+    ai_calls = []
+    association_calls = []
 
     class TorrentInfo:
         def __init__(self, **kwargs):
@@ -296,6 +356,23 @@ def test_resource_torrents_dedupes_play_urls_from_multiple_sources(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin, "_client", lambda: Client())
+
+    class Ai:
+        def normalize(self, title, year="", media_type=""):
+            ai_calls.append((title, year, media_type))
+            return "标准示例剧", "ai"
+
+    def associate(context, include_candidates=True):
+        association_calls.append((context, include_candidates))
+        return {
+            "status": "matched",
+            "media_source": "themoviedb",
+            "media_id": "123",
+            "season_counts": {1: 2},
+        }
+
+    plugin._ai = Ai()
+    monkeypatch.setattr(plugin, "_associate_tmdb", associate)
     items = plugin.search_torrents(site={"id": 1}, keyword="示例剧", page=0, mtype="tv")
     assert len(items) == 2
     urls = sorted([plugin._decode_resource_token(item.enclosure)["url"] for item in items])
@@ -308,6 +385,14 @@ def test_resource_torrents_dedupes_play_urls_from_multiple_sources(monkeypatch):
         "require_playable": True,
         "max_workers": 8,
     }]
+    assert ai_calls == [("示例剧", "", "")]
+    assert [(item.title, item.year, item.media_type, include_candidates)
+            for item, include_candidates in association_calls] == [
+        ("标准示例剧", "", "tv", False),
+    ]
+    payloads = [plugin._decode_resource_token(item.enclosure) for item in items]
+    assert {(payload["host_media_source"], payload["host_media_id"])
+            for payload in payloads} == {("themoviedb", "123")}
 
 
 def test_resource_search_does_not_hold_cache_lock_during_network_request(monkeypatch):
