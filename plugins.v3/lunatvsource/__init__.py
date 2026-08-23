@@ -325,7 +325,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "lunatvsource.png"
-    plugin_version = "0.4.26"
+    plugin_version = "0.4.27"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1160,6 +1160,79 @@ class LunaTVSource(_PluginBase):
         """Compatibility predicate for callers that only need completion state."""
         return self._local_episode_path(task) is not None
 
+    @staticmethod
+    def _history_numbers(value: Any) -> set[int]:
+        """Parse MoviePilot season/episode fields such as ``S01`` or ``1-3,5``."""
+
+        normalized = str(value or "").strip().upper()
+        for marker in ("S", "E", "第", "季", "集", " "):
+            normalized = normalized.replace(marker, "")
+        normalized = (
+            normalized.replace("～", "-")
+            .replace("~", "-")
+            .replace("至", "-")
+            .replace("，", ",")
+            .replace("、", ",")
+        )
+        numbers: set[int] = set()
+        for token in normalized.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if "-" in token:
+                start_text, _, end_text = token.partition("-")
+                try:
+                    start, end = int(start_text), int(end_text)
+                except ValueError:
+                    continue
+                if 0 <= start <= end and end - start <= 10000:
+                    numbers.update(range(start, end + 1))
+                continue
+            try:
+                numbers.add(int(token))
+            except ValueError:
+                continue
+        return numbers
+
+    def _native_history_has_episode(self, task: DownloadTask) -> bool:
+        """Use MoviePilot's durable download history to prevent subscription repeats.
+
+        Queue persistence intentionally keeps only the latest 500 tasks. When
+        MoviePilot moves a completed source file into the media library, the
+        local download path can disappear; native TMDB download history is the
+        durable completion record for older subscription items.
+        """
+
+        media_source, media_id = self._task_media_identity(task)
+        if not media_source or not media_id:
+            return False
+        try:
+            from app.db.oper.downloadhistory import DownloadHistoryOper
+
+            oper = DownloadHistoryOper()
+            get_by_identity = getattr(oper, "get_by_media_identity", None)
+            if not callable(get_by_identity):
+                return False
+            histories = get_by_identity(
+                media_source=self._host_media_source_value(media_source),
+                media_id=media_id,
+            ) or []
+            get_files = getattr(oper, "get_files_by_hash", None)
+            for history in histories:
+                download_hash = str(getattr(history, "download_hash", "") or "").strip()
+                if callable(get_files):
+                    if not download_hash or not (get_files(download_hash, state=1) or []):
+                        continue
+                if task.media_type != "tv":
+                    return True
+                seasons = self._history_numbers(getattr(history, "seasons", ""))
+                episodes = self._history_numbers(getattr(history, "episodes", ""))
+                if task.season in seasons and task.episode in episodes:
+                    return True
+        except Exception as exc:
+            self._logger.debug("读取 MoviePilot 下载历史失败：%s", exc)
+        return False
+
     def _native_transfer(self, task: DownloadTask, output: str) -> str:
         """让 MoviePilot 原生整理链接管已下载文件；不可用时保留直写结果。"""
         if _HostStorageChain is None or _HostTransferChain is None:
@@ -1664,6 +1737,9 @@ class LunaTVSource(_PluginBase):
                         # rows.  Reconcile only that original artifact: do not
                         # run transfer again or fabricate TransferHistory.
                         self._record_native_history(task, str(existing_path))
+                        reconciled += 1
+                        continue
+                    if self._native_history_has_episode(task):
                         reconciled += 1
                         continue
                     if queue.enqueue(task):

@@ -1307,6 +1307,108 @@ def test_refresh_plugin_subscription_reuses_tmdb_identity_for_organize(monkeypat
     assert task["root"] == str(tmp_path)
 
 
+def test_native_history_number_parser_supports_ranges_and_native_markers():
+    assert LunaTVSource._history_numbers("S02") == {2}
+    assert LunaTVSource._history_numbers("E01-E03, E05") == {1, 2, 3, 5}
+    assert LunaTVSource._history_numbers("第8至10集、12") == {8, 9, 10, 12}
+
+
+def test_refresh_does_not_requeue_episode_kept_in_native_tmdb_history(monkeypatch, tmp_path: Path):
+    result = _result_from_item(
+        CmsSource("cms-demo", "演示源", "https://cms.example/vod"),
+        {
+            "vod_id": "42",
+            "vod_name": "示例剧",
+            "vod_year": "2026",
+            "type_name": "电视剧",
+            "vod_play_url": "S02E03$https://example.test/s02e03.m3u8",
+        },
+    )
+    subscribe = SimpleNamespace(
+        state="R",
+        name="示例剧",
+        year="2026",
+        type="电视剧",
+        season=2,
+        media_source="lunatv",
+        media_id="cms-demo:42",
+        save_path=str(tmp_path),
+    )
+    identity_calls = []
+    file_calls = []
+
+    class FakeSubscribeOper:
+        def list(self, state=None):
+            assert state == "R"
+            return [subscribe]
+
+    class FakeDownloadHistoryOper:
+        def get_by_media_identity(self, media_source, media_id):
+            identity_calls.append((str(getattr(media_source, "value", media_source)), media_id))
+            return [
+                SimpleNamespace(
+                    download_hash="",
+                    seasons="S02",
+                    episodes="E01-E03,E05",
+                ),
+                SimpleNamespace(
+                    download_hash="native-history",
+                    seasons="S02",
+                    episodes="E01-E03,E05",
+                ),
+            ]
+
+        def get_files_by_hash(self, download_hash, state=None):
+            file_calls.append((download_hash, state))
+            return [SimpleNamespace(fullpath="/library/示例剧/Season 02/S02E03.mp4", state=1)]
+
+    subscribe_module = ModuleType("app.db.oper.subscribe")
+    subscribe_module.SubscribeOper = FakeSubscribeOper
+    download_module = ModuleType("app.db.oper.downloadhistory")
+    download_module.DownloadHistoryOper = FakeDownloadHistoryOper
+    app_module = ModuleType("app")
+    app_module.__path__ = []
+    app_db_module = ModuleType("app.db")
+    app_db_module.__path__ = []
+    app_db_oper_module = ModuleType("app.db.oper")
+    app_db_oper_module.__path__ = []
+    app_module.db = app_db_module
+    app_db_module.oper = app_db_oper_module
+    app_db_oper_module.subscribe = subscribe_module
+    app_db_oper_module.downloadhistory = download_module
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.db", app_db_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper", app_db_oper_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper.subscribe", subscribe_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper.downloadhistory", download_module)
+
+    class Client:
+        def detail(self, source_key, vod_id):
+            assert (source_key, vod_id) == ("cms-demo", "42")
+            return result
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(
+        plugin,
+        "_prepare_result",
+        lambda item: (item, {
+            "status": "matched",
+            "media_source": "themoviedb",
+            "media_id": "999",
+            "title": "TMDB 示例剧",
+        }),
+    )
+
+    response = plugin.refresh_subscriptions()
+    assert response["queued"] == 0
+    assert response["reconciled"] == 1
+    assert plugin._queue.list_tasks() == []
+    assert identity_calls == [("themoviedb", "999")]
+    assert file_calls == [("native-history", 1)]
+
+
 def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(monkeypatch):
     movie = _result_from_item(
         CmsSource("movie-source", "电影源", "https://movie.example/vod"),
