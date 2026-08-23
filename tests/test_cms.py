@@ -29,6 +29,37 @@ def test_parse_config_filters_by_api_host():
     assert sources[0].api.endswith("/api.php/provide/vod")
 
 
+def test_source_to_dict_derives_non_live_configuration_states():
+    cases = [
+        ("", "ready", "已加载", "supported", "支持"),
+        ("备用源", "warning", "备用", "supported", "支持"),
+        ("线路不稳定", "warning", "不稳定", "supported", "支持"),
+        ("HTTP 403", "error", "异常", "unavailable", "不可用"),
+        ("暂不支持搜索", "ready", "已加载", "unsupported", "不支持"),
+        ("无法搜索", "ready", "已加载", "unsupported", "不支持"),
+        ("禁止搜索", "ready", "已加载", "unsupported", "不支持"),
+        ("无搜索结果", "ready", "已加载", "empty", "无结果"),
+        ("污染搜索结果", "ready", "已加载", "degraded", "结果异常"),
+    ]
+
+    for comment, status, status_label, search_status, search_label in cases:
+        data = CmsSource(
+            key="demo",
+            name="演示源",
+            api="https://api.example/vod",
+            detail="https://detail.example",
+            comment=comment,
+        ).to_dict()
+        assert data["url"] == "https://detail.example"
+        assert data["status"] == status
+        assert data["status_label"] == status_label
+        assert data["search_status"] == search_status
+        assert data["search_label"] == search_label
+
+    fallback = CmsSource("fallback", "回退源", "https://api.example/vod").to_dict()
+    assert fallback["url"] == "https://api.example/vod"
+
+
 def test_parse_play_urls_reads_multiple_episodes_and_seasons():
     episodes = _parse_play_urls(
         "高清$$$备用",
@@ -54,6 +85,20 @@ def test_parse_play_urls_preserves_season_groups():
         "01$https://example.test/s1e01.m3u8$$$01$https://example.test/s2e01.m3u8",
     )
     assert [(item.season, item.episode) for item in episodes] == [(1, 1), (2, 1)]
+
+
+def test_result_from_item_recognizes_chinese_season_title():
+    result = _result_from_item(
+        CmsSource("demo", "演示", "https://cms.example/vod"),
+        {
+            "vod_id": "42",
+            "vod_name": "小猪佩奇 第八季",
+            "type_name": "欧美动漫",
+            "vod_play_url": "第45集$https://example.test/s08e45.m3u8",
+        },
+    )
+    assert result.media_type == "tv"
+    assert [(episode.season, episode.episode, episode.season_known) for episode in result.episodes] == [(8, 45, True)]
 
 
 def test_search_enriches_sparse_list_item_with_detail_play_urls():
