@@ -118,6 +118,8 @@ LOGGER = logging.getLogger("LunaTVSource")
 DEFAULT_CONFIG_URL = (
     "https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json"
 )
+FALLBACK_CONFIG_PATH = Path(__file__).with_name("fallback_sources.json")
+SOURCE_CACHE_KEY = "luna_source_config_v1"
 DEFAULT_SOURCE_ALLOWLIST = (
     "suonizy.net,suoniapi.com,kuaichezy.com,caiji.kuaichezy.org,"
     "www.hongniuzy.com,www.hongniuzy2.com,wujinzy.net,wujinzy.me,"
@@ -317,7 +319,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "lunatvsource.svg"
-    plugin_version = "0.4.24"
+    plugin_version = "0.4.25"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -336,6 +338,8 @@ class LunaTVSource(_PluginBase):
     _tmdb_cache: Dict[str, Dict[str, Any]] = {}
     _resource_search_lock = threading.RLock()
     _resource_search_cache: Dict[str, Tuple[float, List[Any]]] = {}
+    _source_config_origin = "未加载"
+    _source_config_error = ""
 
     def __init__(self) -> None:
         super().__init__()
@@ -344,6 +348,8 @@ class LunaTVSource(_PluginBase):
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         self._config = dict(config or {})
         self._enabled = _bool(self._config.get("enabled"), False)
+        self._source_config_origin = "未加载"
+        self._source_config_error = ""
         # 智能助手始终读取 MoviePilot 全局配置；没有配置时由 AiTitleNormalizer 自动回退。
         # 保留旧版 ai_enabled 仅为兼容历史配置，不再让插件设置覆盖宿主设置。
         self._ai = AiTitleNormalizer(True, LOGGER)
@@ -687,12 +693,86 @@ class LunaTVSource(_PluginBase):
             if not configured_allowlist or configured_allowlist == DEFAULT_SOURCE_ALLOWLIST
             else _source_keys(configured_allowlist)
         )
-        sources = load_sources_from_url(
+        sources = self._load_sources(
             config_url,
             timeout=float(self._config.get("request_timeout") or 15),
             allowlist=allowlist,
         )
         return AppleCmsClient(sources=sources, timeout=float(self._config.get("request_timeout") or 15))
+
+    @staticmethod
+    def _sources_from_cache(value: Any, allowlist: Tuple[str, ...]) -> List[CmsSource]:
+        if not isinstance(value, list):
+            return []
+        allowed = {item.strip().lower() for item in allowlist if item.strip()}
+        sources: List[CmsSource] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip().lower()
+            api = str(item.get("api") or "").strip()
+            if not key or not api:
+                continue
+            host = urllib.parse.urlparse(api).hostname or key
+            if allowed and not ({key, host.lower()} & allowed):
+                continue
+            sources.append(
+                CmsSource(
+                    key=key,
+                    name=str(item.get("name") or key),
+                    api=api,
+                    detail=str(item.get("detail") or ""),
+                    comment=str(item.get("comment") or ""),
+                )
+            )
+        return sources
+
+    @staticmethod
+    def _bundled_sources(allowlist: Tuple[str, ...]) -> List[CmsSource]:
+        try:
+            payload = json.loads(FALLBACK_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        from .cms import parse_config
+
+        return parse_config(payload, allowlist=allowlist)
+
+    def _load_sources(
+        self,
+        config_url: str,
+        *,
+        timeout: float,
+        allowlist: Tuple[str, ...],
+    ) -> List[CmsSource]:
+        """Load sources with a persistent cache and bundled offline fallback.
+
+        UGREEN deployments can run without outbound access to GitHub. A failed
+        refresh must not make the plugin appear to have zero sources when a
+        previous or bundled configuration is available.
+        """
+
+        try:
+            sources = load_sources_from_url(config_url, timeout=timeout, allowlist=allowlist)
+            if not sources:
+                raise ValueError("远程配置未包含有效资源站")
+            self.save_data(SOURCE_CACHE_KEY, [source.to_dict() for source in sources])
+            self._source_config_origin = "远程配置"
+            self._source_config_error = ""
+            return sources
+        except Exception as exc:
+            self._source_config_error = str(exc)
+            cached = self._sources_from_cache(self.get_data(SOURCE_CACHE_KEY), allowlist)
+            if cached:
+                self._source_config_origin = "本地缓存"
+                self._logger.warning("LunaTV config unavailable; using %s cached sources", len(cached))
+                return cached
+            bundled = self._bundled_sources(allowlist)
+            if bundled:
+                self._source_config_origin = "内置快照"
+                self._logger.warning("LunaTV config unavailable; using %s bundled sources", len(bundled))
+                return bundled
+            self._source_config_origin = "加载失败"
+            raise
 
     @staticmethod
     def _host_media_source() -> Any:
@@ -1286,6 +1366,10 @@ class LunaTVSource(_PluginBase):
                     "source": "插件设置" if configured_root else ("MoviePilot 目录设置" if directories else "未配置"),
                 },
                 "tmdb_association": True,
+                "source_config": {
+                    "origin": self._source_config_origin,
+                    "error": self._source_config_error,
+                },
             },
         }
 

@@ -22,6 +22,47 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert plugin.get_sidebar_nav() == []
 
 
+def test_sources_fall_back_to_bundled_snapshot_when_remote_config_is_unreachable(monkeypatch):
+    def unavailable(*_args, **_kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(plugin_module, "load_sources_from_url", unavailable)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    response = plugin.api_sources()
+
+    assert response["success"] is True
+    assert len(response["data"]) == 72
+    assert plugin._source_config_origin == "内置快照"
+    assert plugin.api_status()["data"]["source_config"]["error"] == "network unreachable"
+
+
+def test_sources_use_cached_snapshot_before_bundled_fallback(monkeypatch):
+    def unavailable(*_args, **_kwargs):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(plugin_module, "load_sources_from_url", unavailable)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    plugin.save_data(
+        plugin_module.SOURCE_CACHE_KEY,
+        [{"key": "cached", "name": "缓存源", "api": "https://cached.example/vod"}],
+    )
+
+    response = plugin.api_sources()
+
+    assert response["success"] is True
+    assert response["data"] == [{
+        "key": "cached",
+        "name": "缓存源",
+        "api": "https://cached.example/vod",
+        "detail": "",
+        "comment": "",
+    }]
+    assert plugin._source_config_origin == "本地缓存"
+
+
 def test_manual_download_rejects_non_http_url():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "download_root": "/tmp/lunatv-test"})
