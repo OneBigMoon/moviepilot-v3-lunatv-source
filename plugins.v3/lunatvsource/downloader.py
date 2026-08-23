@@ -297,6 +297,8 @@ class DownloadQueue:
                 self._write(tasks)
                 return True
             if task.state == "running" and self._current_task_id == task_id:
+                if self._control_action == "remove":
+                    return True
                 self._control_action = "pause"
                 self._control_event.set()
                 return True
@@ -376,6 +378,7 @@ class DownloadQueue:
                         self._delete_task_files(task)
                     tasks = [item for item in tasks if item.task_id != task.task_id]
                 elif current is not None:
+                    self._delete_file_tasks.discard(task.task_id)
                     current.state = "paused"
                     current.error = ""
                 self._write(tasks)

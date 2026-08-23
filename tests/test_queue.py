@@ -403,6 +403,57 @@ def test_queue_remove_running_task_cleans_part_after_safe_stop(tmp_path: Path):
     assert queue.list_tasks() == []
 
 
+def test_queue_remove_running_task_wins_over_immediate_pause(tmp_path: Path):
+    root = tmp_path / "downloads"
+    output = root / "Movie 2026.mp4"
+    part = Path(f"{output}.part")
+    started = threading.Event()
+    allow_control = threading.Event()
+
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    task = DownloadTask(
+        task_id="running-remove-pause-race",
+        source_key="lunatv",
+        media_id="site:running-remove-pause-race",
+        title="Movie",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/movie.m3u8",
+        root=str(root),
+    )
+    assert queue.enqueue(task)
+
+    def controlled_execute(current: DownloadTask) -> str:
+        current.output = str(output)
+        output.parent.mkdir(parents=True)
+        output.write_text("media", encoding="utf-8")
+        part.write_text("partial", encoding="utf-8")
+        started.set()
+        assert queue._control_event.wait(timeout=2)
+        assert allow_control.wait(timeout=2)
+        raise downloader_module._QueueControl("controlled")
+
+    queue._execute = controlled_execute
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(queue.run_one()))
+    worker.start()
+    assert started.wait(timeout=2)
+    assert queue.remove(task.task_id, delete_file=True)
+    assert queue.pause(task.task_id)
+    allow_control.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert result["state"] == "remove"
+    assert not output.exists()
+    assert not part.exists()
+    assert queue.list_tasks() == []
+    assert task.task_id not in queue._delete_file_tasks
+
+
 def test_queue_remove_running_task_wins_success_race(tmp_path: Path):
     root = tmp_path / "downloads"
     output = root / "Movie 2026.mp4"
