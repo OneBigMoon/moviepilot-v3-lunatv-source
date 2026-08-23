@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import json
 import re
 import urllib.parse
@@ -344,9 +344,27 @@ def load_sources_from_url(url: str, timeout: float = 15, allowlist: Sequence[str
 
 
 class AppleCmsClient:
-    def __init__(self, sources: Sequence[CmsSource], timeout: float = 15) -> None:
+    def __init__(
+        self,
+        sources: Sequence[CmsSource],
+        timeout: float = 15,
+        parallel_wait_timeout: Optional[float] = None,
+    ) -> None:
         self.sources = list(sources)
         self.timeout = timeout
+        self.parallel_wait_timeout = parallel_wait_timeout
+
+    def _parallel_wait_seconds(self) -> float:
+        """Return the total budget for a parallel source search.
+
+        The optional override keeps the timeout behavior deterministic in
+        tests; production callers use a bounded budget derived from the
+        per-source request timeout.
+        """
+
+        if self.parallel_wait_timeout is not None:
+            return max(0.0, float(self.parallel_wait_timeout))
+        return max(20.0, min(30.0, float(self.timeout) * 2))
 
     def _request(self, source: CmsSource, **params: Any) -> Mapping[str, Any]:
         query = urllib.parse.urlencode({key: value for key, value in params.items() if value not in (None, "")})
@@ -457,7 +475,8 @@ class AppleCmsClient:
             return results[:limit]
 
         futures = []
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(ordered_sources))) as executor:
+        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(ordered_sources)))
+        try:
             for idx, source in enumerate(ordered_sources):
                 futures.append(
                     (
@@ -473,8 +492,19 @@ class AppleCmsClient:
                         ),
                     )
                 )
+            done_futures, pending_futures = wait(
+                [future for _, _, future in futures],
+                timeout=self._parallel_wait_seconds(),
+            )
+            # Do not leave queued sources running after the total search
+            # budget expires. Running requests cannot be forcefully stopped,
+            # but queued futures can be cancelled before executor shutdown.
+            for future in pending_futures:
+                future.cancel()
             source_results: Dict[int, List[CmsResult]] = {}
             for idx, source, future in futures:
+                if future not in done_futures:
+                    continue
                 try:
                     source_results[idx] = future.result()
                 except Exception:
@@ -487,4 +517,8 @@ class AppleCmsClient:
                         results.append(result)
                         if len(results) >= limit:
                             return results
-        return results[:limit]
+            return results[:limit]
+        finally:
+            # ``wait=False`` is intentional: a slow third-party source must
+            # not hold up the native search response after the budget.
+            executor.shutdown(wait=False, cancel_futures=True)
