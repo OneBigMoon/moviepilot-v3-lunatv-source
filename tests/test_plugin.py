@@ -654,7 +654,7 @@ def test_active_queue_projection_uses_host_downloader_torrent_when_available(mon
     assert isinstance(torrents[0], HostDownloaderTorrent)
 
 
-def test_resource_download_event_routes_lunatv_token_to_serial_queue(tmp_path: Path):
+def test_resource_download_event_allows_native_chain_to_call_plugin_download(tmp_path: Path):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     token = plugin._resource_token({
@@ -678,9 +678,9 @@ def test_resource_download_event_routes_lunatv_token_to_serial_queue(tmp_path: P
 
     plugin._on_resource_download(SimpleNamespace(event_data=event_data))
 
-    assert event_data.cancel is True
-    assert "串行下载队列" in event_data.reason
-    assert plugin._queue.list_tasks()[0]["root"] == str(tmp_path)
+    assert event_data.cancel is False
+    assert event_data.source == "LunaTVSource-原生下载模块"
+    assert plugin._queue.list_tasks() == []
 
 
 def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
