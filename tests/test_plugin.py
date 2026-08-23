@@ -828,17 +828,19 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter():
     module = plugin.get_module()
     assert "list_torrents" in module
     torrents = module["list_torrents"](status=SimpleNamespace(value="下载中"))
-    assert [torrent.hash for torrent in torrents] == ["running-task", "pending-task"]
+    assert [torrent.hash for torrent in torrents] == ["paused-task", "running-task", "pending-task"]
     assert all(torrent.downloader == "LunaTVSource" for torrent in torrents)
-    assert all(torrent.state == "downloading" for torrent in torrents)
+    assert next(torrent for torrent in torrents if torrent.hash == "paused-task").state == "paused"
+    assert all(torrent.state == "downloading" for torrent in torrents if torrent.hash != "paused-task")
     assert next(torrent for torrent in torrents if torrent.hash == "running-task").progress == 42.0
-    assert next(torrent for torrent in torrents if torrent.hash == "pending-task").progress == 0.0
-    assert torrents[1].title == "排队电视剧"
-    assert torrents[1].name == "排队电视剧"
-    assert torrents[1].save_path == "/downloads/tv"
-    assert torrents[1].season_episode == "S02E03"
-    assert torrents[1].media["media_source"] == "themoviedb"
-    assert torrents[1].media["media_id"] == "123"
+    pending_torrent = next(torrent for torrent in torrents if torrent.hash == "pending-task")
+    assert pending_torrent.progress == 0.0
+    assert pending_torrent.title == "排队电视剧"
+    assert pending_torrent.name == "排队电视剧"
+    assert pending_torrent.save_path == "/downloads/tv"
+    assert pending_torrent.season_episode == "S02E03"
+    assert pending_torrent.media["media_source"] == "themoviedb"
+    assert pending_torrent.media["media_id"] == "123"
 
     assert sorted(torrent.hash for torrent in plugin.list_torrents(downloader="qBittorrent")) == [
         "paused-task",
@@ -856,12 +858,20 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter():
         "running-task",
     ]
     assert plugin.list_torrents(status="completed") == []
+    assert plugin.list_torrents(status="transfer") == []
     assert [torrent.hash for torrent in plugin.list_torrents(
         downloader="LunaTVSource", hashs=["pending-task"]
     )] == ["pending-task"]
     paused_torrents = plugin.list_torrents(status="paused")
     assert [torrent.hash for torrent in paused_torrents] == ["paused-task"]
     assert paused_torrents[0].state == "paused"
+    assert module["start_torrents"](["paused-task"], downloader="下载器1") is True
+    assert next(item for item in plugin._queue.list_tasks() if item["task_id"] == "paused-task")["state"] == "pending"
+    assert next(
+        torrent
+        for torrent in plugin.list_torrents(status="downloading")
+        if torrent.hash == "paused-task"
+    ).state == "downloading"
 
     assert {"start_torrents", "stop_torrents", "remove_torrents"} <= module.keys()
     assert module["stop_torrents"](["pending-task"], downloader="下载器1") is True
