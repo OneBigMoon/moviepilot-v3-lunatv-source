@@ -1350,7 +1350,7 @@ def test_refresh_reconciles_existing_episode_without_enqueue_or_transfer(monkeyp
 
     class FakeSubscribeOper:
         def list(self, state=None):
-            assert state in {None, "R"}
+            assert state in {None, "R,P"}
             return [subscribe]
 
     subscribe_module.SubscribeOper = FakeSubscribeOper
@@ -1507,7 +1507,7 @@ def test_refresh_does_not_requeue_episode_kept_in_native_tmdb_history(monkeypatc
 
     class FakeSubscribeOper:
         def list(self, state=None):
-            assert state == "R"
+            assert state == "R,P"
             return [subscribe]
 
     class FakeDownloadHistoryOper:
@@ -1602,7 +1602,7 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
     subscriptions = [
         SimpleNamespace(state="R", name="示例电影", year="2026", type="电影", season=0,
                         media_source="lunatv", media_id="", save_path=""),
-        SimpleNamespace(state="R", name="示例剧", year="2026", type="电视剧", season=1,
+        SimpleNamespace(state="P", name="示例剧", year="2026", type="电视剧", season=1,
                         media_source="lunatv", media_id="", save_path=""),
     ]
     subscribe_module = ModuleType("app.db.oper.subscribe")
