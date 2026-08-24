@@ -5,6 +5,7 @@ from lunatvsource_test.downloader import DownloadTask
 from lunatvsource_test.naming import media_path
 from pathlib import Path
 import hashlib
+import pytest
 import sys
 import threading
 from enum import Enum
@@ -138,6 +139,23 @@ def test_manual_download_rejects_non_http_url():
     result = plugin.api_download({"url": "file:///tmp/movie.m3u8"})
     assert result["success"] is False
     assert "http/https" in result["message"]
+
+
+def test_manual_download_wakes_queue_once_only_for_new_task(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    wakeups = []
+    monkeypatch.setattr(plugin, "_start_queue", lambda: wakeups.append(True))
+    payload = {
+        "url": "https://example.test/manual.m3u8",
+        "title": "手动下载",
+        "year": "2026",
+        "media_type": "movie",
+    }
+
+    assert plugin.api_download(payload)["success"] is True
+    assert plugin.api_download(payload)["success"] is False
+    assert wakeups == [True]
 
 
 def test_directory_settings_are_used_when_plugin_root_is_empty(monkeypatch):
@@ -416,6 +434,84 @@ def test_native_resource_search_returns_marked_download_items(monkeypatch):
     assert [(item.title, item.year, item.media_type, include_candidates)
             for item, include_candidates in association_calls] == [
         ("示例剧", "2024", "tv", False),
+    ]
+
+
+def test_resource_torrents_forwards_lunatv_progress_callback(monkeypatch):
+    class TorrentInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    calls = []
+
+    class Client:
+        def search(self, query, **kwargs):
+            calls.append((query, kwargs))
+            callback = kwargs["progress_callback"]
+            callback(finished=1, total=2, text="CMS 1/2")
+            callback(finished=2, total=2, text="CMS 2/2")
+            return []
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    progress = []
+
+    def on_progress(**event):
+        progress.append(event)
+        if event["finished"] == 1:
+            raise RuntimeError("broken host callback")
+
+    monkeypatch.setattr(plugin_module, "_HostTorrentInfo", TorrentInfo)
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_associate_tmdb", lambda *_args, **_kwargs: {})
+
+    assert plugin._resource_torrents("progress demo", progress_callback=on_progress) == []
+    assert calls[0][0] == "progress demo"
+    assert set(calls[0][1]) == {
+        "limit",
+        "source_limit",
+        "stop_after_first_source",
+        "require_playable",
+        "max_workers",
+        "progress_callback",
+    }
+    assert [(event["finished"], event["total"], event["text"]) for event in progress] == [
+        (1, 2, "LunaTV 正在搜索源 1/2"),
+        (2, 2, "LunaTV 正在搜索源 2/2"),
+    ]
+
+
+def test_search_torrent_entrypoints_forward_progress_callback(monkeypatch):
+    import asyncio
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    received = []
+    callback = lambda **_event: None
+
+    def resource_torrents(keyword, mtype=None, progress_callback=None):
+        received.append((keyword, mtype, progress_callback))
+        return ["luna"]
+
+    monkeypatch.setattr(plugin, "_resource_torrents", resource_torrents)
+
+    assert plugin.search_torrents(
+        site={},
+        keyword="sync demo",
+        mtype="tv",
+        progress_callback=callback,
+    ) == ["luna"]
+    assert asyncio.run(
+        plugin.async_search_torrents(
+            site={},
+            keyword="async demo",
+            mtype="movie",
+            progress_callback=callback,
+        )
+    ) == ["luna"]
+    assert received == [
+        ("sync demo", "tv", callback),
+        ("async demo", "movie", callback),
     ]
 
 
@@ -954,6 +1050,36 @@ def test_resource_torrents_filters_by_requested_media_type(monkeypatch):
     ) == ["movie", "tv"]
 
 
+@pytest.mark.parametrize(
+    ("mtype", "first_media_type", "expected_media_type"),
+    [
+        ("欧美剧", "tv", "tv"),
+        ("韩剧", "tv", "tv"),
+        ("movie", "tv", "movie"),
+        ("tv", "movie", "tv"),
+    ],
+)
+def test_resource_search_context_uses_first_result_for_noncanonical_type(
+    mtype: str,
+    first_media_type: str,
+    expected_media_type: str,
+):
+    first = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="42",
+        title="示例作品",
+        year="2024",
+        media_type=first_media_type,
+        remark="",
+        episodes=(),
+    )
+
+    context = LunaTVSource._resource_search_context("示例作品", [first], mtype)
+
+    assert context.media_type == expected_media_type
+
+
 def test_resource_torrents_keep_complete_season_quality_variants_separate(monkeypatch):
     class TorrentInfo:
         def __init__(self, **kwargs):
@@ -1424,93 +1550,375 @@ def test_resource_search_does_not_hold_cache_lock_during_network_request(monkeyp
     assert lock_available == [True]
 
 
-def test_plugin_search_bridge_augments_native_search_and_restores(monkeypatch):
-    class SearchChain:
-        def __search_all_sites(self, **kwargs):
-            return ["native-sync"]
-
-        async def __async_search_all_sites(self, **kwargs):
-            return ["native-async"]
-
-        async def __async_search_all_sites_stream(self, **kwargs):
-            yield {"type": "done", "text": "native done", "items": []}
-
+def _install_search_chain_module(monkeypatch, search_chain):
     app_module = ModuleType("app")
+    app_module.__path__ = []
     chain_module = ModuleType("app.chain")
+    chain_module.__path__ = []
     search_module = ModuleType("app.chain.search")
-    search_module.SearchChain = SearchChain
+    search_module.SearchChain = search_chain
+    app_module.chain = chain_module
+    chain_module.search = search_module
     monkeypatch.setitem(sys.modules, "app", app_module)
     monkeypatch.setitem(sys.modules, "app.chain", chain_module)
     monkeypatch.setitem(sys.modules, "app.chain.search", search_module)
-    plugin_module._SEARCH_BRIDGE.update({"owner": None, "chain": None, "originals": {}})
 
-    sync_original = SearchChain._SearchChain__search_all_sites
-    plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True})
-    monkeypatch.setattr(plugin, "search_torrents", lambda **kwargs: ["plugin-sync"])
 
-    async def async_plugin_search(**kwargs):
-        return ["plugin-async"]
-
-    monkeypatch.setattr(plugin, "async_search_torrents", async_plugin_search)
-    chain = SearchChain()
-    assert chain._SearchChain__search_all_sites(keyword="demo") == [
-        "native-sync", "plugin-sync"
-    ]
-
+def test_plugin_search_bridge_augments_legacy_search_and_restores(monkeypatch):
     import asyncio
 
-    assert asyncio.run(chain._SearchChain__async_search_all_sites(keyword="demo")) == [
-        "native-async", "plugin-async"
-    ]
-
-    async def collect_stream():
-        return [
-            event async for event in chain._SearchChain__async_search_all_sites_stream(
-                keyword="demo"
-            )
-        ]
-
-    events = asyncio.run(collect_stream())
-    assert [event["type"] for event in events] == ["append", "done"]
-    assert events[0]["items"] == ["plugin-async"]
-
-    disabled = LunaTVSource()
-    disabled.init_plugin({"enabled": False})
-    assert SearchChain._SearchChain__search_all_sites is sync_original
-
-
-def test_plugin_search_bridge_defers_to_new_native_dispatch(monkeypatch):
     class SearchChain:
-        def search_plugin_torrents(self, **kwargs):
+        def __search_all_sites(self, **_kwargs):
+            return ["native-sync"]
+
+        async def __async_search_all_sites(self, **_kwargs):
+            return ["native-async"]
+
+        async def __async_search_all_sites_stream(self, **_kwargs):
+            yield {"type": "heartbeat", "items": [], "text": "native heartbeat"}
+            yield {
+                "type": "done",
+                "stage": "searching",
+                "items": [],
+                "text": "native done",
+            }
+
+    _install_search_chain_module(monkeypatch, SearchChain)
+    plugin_module._SEARCH_BRIDGE.update(
+        {"owner": None, "chain": None, "originals": {}, "mode": None}
+    )
+    sync_original = SearchChain._SearchChain__search_all_sites
+    async_original = SearchChain._SearchChain__async_search_all_sites
+    stream_original = SearchChain._SearchChain__async_search_all_sites_stream
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "search_torrents", lambda **_kwargs: ["plugin-sync"])
+
+    async def plugin_async_search(**_kwargs):
+        return ["plugin-async"]
+
+    monkeypatch.setattr(plugin, "async_search_torrents", plugin_async_search)
+    try:
+        chain = SearchChain()
+        assert chain._SearchChain__search_all_sites(keyword="demo") == [
+            "native-sync",
+            "plugin-sync",
+        ]
+        assert asyncio.run(
+            chain._SearchChain__async_search_all_sites(keyword="demo")
+        ) == ["native-async", "plugin-async"]
+
+        async def collect_stream():
+            return [
+                event
+                async for event in chain._SearchChain__async_search_all_sites_stream(
+                    keyword="demo"
+                )
+            ]
+
+        events = asyncio.run(collect_stream())
+        assert [event["type"] for event in events] == ["heartbeat", "append", "done"]
+        assert events[1]["items"] == ["plugin-async"]
+        assert events[1]["text"] == "LunaTV 返回 1 条资源"
+        assert events[-1]["text"] == "资源搜索完成，LunaTV 返回 1 条资源"
+    finally:
+        plugin.init_plugin({"enabled": False})
+
+    assert SearchChain._SearchChain__search_all_sites is sync_original
+    assert SearchChain._SearchChain__async_search_all_sites is async_original
+    assert SearchChain._SearchChain__async_search_all_sites_stream is stream_original
+
+
+def test_async_search_torrents_uses_context_callback_unless_explicit(monkeypatch):
+    import asyncio
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    callbacks = []
+    context_callback = lambda **_event: None
+    explicit_callback = lambda **_event: None
+
+    def fake_search_torrents(**kwargs):
+        callbacks.append(kwargs.get("progress_callback"))
+        return []
+
+    monkeypatch.setattr(plugin, "search_torrents", fake_search_torrents)
+
+    async def run():
+        token = plugin_module._SEARCH_PROGRESS_CALLBACK.set(context_callback)
+        try:
+            await plugin.async_search_torrents(site={}, keyword="context")
+            await plugin.async_search_torrents(
+                site={},
+                keyword="explicit",
+                progress_callback=explicit_callback,
+            )
+        finally:
+            plugin_module._SEARCH_PROGRESS_CALLBACK.reset(token)
+
+    asyncio.run(run())
+    assert callbacks == [context_callback, explicit_callback]
+
+
+def test_native_search_stream_progress_precedes_native_append_and_done(monkeypatch):
+    import asyncio
+
+    native_calls = []
+    plugin_search_calls = []
+
+    class SearchChain:
+        def search_plugin_torrents(self, **_kwargs):
             return ["native-plugin-sync"]
 
         async def async_search_plugin_torrents(self, **kwargs):
-            return ["native-plugin-async"]
+            native_calls.append(kwargs["keyword"])
+            return await plugin.async_search_torrents(
+                site={},
+                keyword=kwargs["keyword"],
+                page=kwargs.get("page", 0),
+            )
 
-        def __search_all_sites(self, **kwargs):
+        def __search_all_sites(self, **_kwargs):
             return ["native-sync"]
 
-    app_module = ModuleType("app")
-    chain_module = ModuleType("app.chain")
-    search_module = ModuleType("app.chain.search")
-    search_module.SearchChain = SearchChain
-    monkeypatch.setitem(sys.modules, "app", app_module)
-    monkeypatch.setitem(sys.modules, "app.chain", chain_module)
-    monkeypatch.setitem(sys.modules, "app.chain.search", search_module)
-    plugin_module._SEARCH_BRIDGE.update({"owner": None, "chain": None, "originals": {}})
+        async def __async_search_all_sites(self, **_kwargs):
+            return ["native-async"]
 
-    original = SearchChain._SearchChain__search_all_sites
+        async def __async_search_all_sites_stream(self, **kwargs):
+            items = await self.async_search_plugin_torrents(**kwargs)
+            yield {"type": "append", "items": items, "text": "native append"}
+            yield {"type": "done", "items": [], "text": "native done"}
+
+    _install_search_chain_module(monkeypatch, SearchChain)
+    plugin_module._SEARCH_BRIDGE.update(
+        {"owner": None, "chain": None, "originals": {}, "mode": None}
+    )
+    native_sync_original = SearchChain.search_plugin_torrents
+    native_async_original = SearchChain.async_search_plugin_torrents
+    sync_original = SearchChain._SearchChain__search_all_sites
+    async_original = SearchChain._SearchChain__async_search_all_sites
+    stream_original = SearchChain._SearchChain__async_search_all_sites_stream
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
 
-    assert SearchChain._SearchChain__search_all_sites is original
-    assert plugin_module._SEARCH_BRIDGE == {"owner": None, "chain": None, "originals": {}}
+    def fake_search_torrents(**kwargs):
+        plugin_search_calls.append(kwargs["keyword"])
+        callback = kwargs["progress_callback"]
+        callback(finished=1, total=2, text="LunaTV 正在搜索源 1/2")
+        callback(finished=2, total=2, text="LunaTV 正在搜索源 2/2")
+        return ["luna"]
+
+    monkeypatch.setattr(plugin, "search_torrents", fake_search_torrents)
+    try:
+        wrapped_stream = SearchChain._SearchChain__async_search_all_sites_stream
+        plugin.init_plugin({"enabled": True})
+        assert SearchChain._SearchChain__async_search_all_sites_stream is wrapped_stream
+        assert SearchChain.search_plugin_torrents is native_sync_original
+        assert SearchChain.async_search_plugin_torrents is native_async_original
+        assert SearchChain._SearchChain__search_all_sites is sync_original
+        assert SearchChain._SearchChain__async_search_all_sites is async_original
+
+        async def collect_stream():
+            return [
+                event
+                async for event in SearchChain()._SearchChain__async_search_all_sites_stream(
+                    keyword="demo",
+                    page=3,
+                )
+            ]
+
+        events = asyncio.run(collect_stream())
+        assert native_calls == ["demo"]
+        assert plugin_search_calls == ["demo"]
+        assert [event["type"] for event in events] == [
+            "progress",
+            "progress",
+            "append",
+            "done",
+        ]
+        assert [
+            (
+                event["finished"],
+                event["total"],
+                event["value"],
+                event["text"],
+                event["stage"],
+                event["items"],
+                event["site"],
+                event["site_id"],
+                event["page"],
+            )
+            for event in events[:2]
+        ] == [
+            (1, 2, 50, "LunaTV 正在搜索源 1/2", "searching", [], "LunaTV", None, 3),
+            (2, 2, 100, "LunaTV 正在搜索源 2/2", "searching", [], "LunaTV", None, 3),
+        ]
+        assert events[2] == {
+            "type": "append",
+            "items": ["luna"],
+            "text": "native append",
+        }
+        assert events[3] == {"type": "done", "items": [], "text": "native done"}
+    finally:
+        plugin.init_plugin({"enabled": False})
+
+    assert SearchChain.search_plugin_torrents is native_sync_original
+    assert SearchChain.async_search_plugin_torrents is native_async_original
+    assert SearchChain._SearchChain__search_all_sites is sync_original
+    assert SearchChain._SearchChain__async_search_all_sites is async_original
+    assert SearchChain._SearchChain__async_search_all_sites_stream is stream_original
 
 
-def test_native_download_is_enqueued_into_serial_queue(tmp_path: Path):
+def test_native_search_stream_progress_isolated_between_requests(monkeypatch):
+    import asyncio
+
+    rendezvous = threading.Barrier(2, timeout=1)
+    plugin_search_calls = []
+
+    class SearchChain:
+        def search_plugin_torrents(self, **_kwargs):
+            return []
+
+        async def async_search_plugin_torrents(self, **kwargs):
+            return await plugin.async_search_torrents(
+                site={},
+                keyword=kwargs["keyword"],
+                page=kwargs.get("page", 0),
+            )
+
+        async def __async_search_all_sites_stream(self, **kwargs):
+            items = await self.async_search_plugin_torrents(**kwargs)
+            yield {"type": "append", "items": items, "text": kwargs["keyword"]}
+            yield {"type": "done", "items": [], "text": kwargs["keyword"]}
+
+    _install_search_chain_module(monkeypatch, SearchChain)
+    plugin_module._SEARCH_BRIDGE.update(
+        {"owner": None, "chain": None, "originals": {}, "mode": None}
+    )
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
+
+    def fake_search_torrents(**kwargs):
+        keyword = kwargs["keyword"]
+        plugin_search_calls.append(keyword)
+        callback = kwargs["progress_callback"]
+        callback(finished=1, total=2, text=f"{keyword} 1/2")
+        rendezvous.wait()
+        callback(finished=2, total=2, text=f"{keyword} 2/2")
+        return [keyword]
+
+    monkeypatch.setattr(plugin, "search_torrents", fake_search_torrents)
+    try:
+        async def collect(keyword):
+            return [
+                event
+                async for event in SearchChain()._SearchChain__async_search_all_sites_stream(
+                    keyword=keyword
+                )
+            ]
+
+        async def collect_both():
+            return await asyncio.gather(collect("first"), collect("second"))
+
+        first, second = asyncio.run(collect_both())
+    finally:
+        plugin.init_plugin({"enabled": False})
+
+    assert sorted(plugin_search_calls) == ["first", "second"]
+    for keyword, events in (("first", first), ("second", second)):
+        assert [event["type"] for event in events] == [
+            "progress",
+            "progress",
+            "append",
+            "done",
+        ]
+        assert [event["text"] for event in events[:2]] == [
+            f"{keyword} 1/2",
+            f"{keyword} 2/2",
+        ]
+        assert events[2]["items"] == [keyword]
+
+
+def test_native_search_stream_discards_late_progress_after_cancellation(monkeypatch):
+    import asyncio
+    from threading import Event
+
+    slow_started = Event()
+    release_slow = Event()
+    slow_finished = Event()
+
+    class SearchChain:
+        def search_plugin_torrents(self, **_kwargs):
+            return []
+
+        async def async_search_plugin_torrents(self, **kwargs):
+            return await plugin.async_search_torrents(
+                site={},
+                keyword=kwargs["keyword"],
+            )
+
+        async def __async_search_all_sites_stream(self, **kwargs):
+            items = await self.async_search_plugin_torrents(**kwargs)
+            yield {"type": "append", "items": items}
+            yield {"type": "done", "items": []}
+
+    _install_search_chain_module(monkeypatch, SearchChain)
+    plugin_module._SEARCH_BRIDGE.update(
+        {"owner": None, "chain": None, "originals": {}, "mode": None}
+    )
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    def fake_search_torrents(**kwargs):
+        callback = kwargs["progress_callback"]
+        callback(finished=1, total=2, text="LunaTV 正在搜索源 1/2")
+        slow_started.set()
+        release_slow.wait(1)
+        callback(finished=2, total=2, text="LunaTV 正在搜索源 2/2")
+        slow_finished.set()
+        return ["luna"]
+
+    monkeypatch.setattr(plugin, "search_torrents", fake_search_torrents)
+    try:
+        async def collect_until_cancelled():
+            events = []
+
+            async def consume():
+                async for event in SearchChain()._SearchChain__async_search_all_sites_stream(
+                    keyword="demo"
+                ):
+                    events.append(event)
+
+            consumer = asyncio.create_task(consume())
+            for _ in range(100):
+                if slow_started.is_set() and events:
+                    break
+                await asyncio.sleep(0.01)
+            assert [event["type"] for event in events] == ["progress"]
+            consumer.cancel()
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                pass
+            release_slow.set()
+            assert await asyncio.to_thread(slow_finished.wait, 1)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return events
+
+        events = asyncio.run(collect_until_cancelled())
+    finally:
+        release_slow.set()
+        plugin.init_plugin({"enabled": False})
+
+    assert [event["type"] for event in events] == ["progress"]
+
+
+def test_native_download_is_enqueued_into_serial_queue(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    wakeups = []
+    monkeypatch.setattr(plugin, "_start_queue", lambda: wakeups.append(True))
     token = plugin._resource_token({
         "url": "https://example.test/movie.m3u8",
         "title": "示例电影",
@@ -1533,11 +1941,14 @@ def test_native_download_is_enqueued_into_serial_queue(tmp_path: Path):
     assert tasks[0]["media_id"] == "demo:42"
     assert tasks[0]["host_media_source"] == "themoviedb"
     assert tasks[0]["host_media_id"] == "123"
+    assert wakeups == [True]
 
 
-def test_native_season_download_expands_to_serial_episode_tasks(tmp_path: Path):
+def test_native_season_download_expands_to_serial_episode_tasks(monkeypatch, tmp_path: Path):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
+    wakeups = []
+    monkeypatch.setattr(plugin, "_start_queue", lambda: wakeups.append(True))
     token = plugin._resource_token({
         "url": "https://example.test/s01e01.m3u8",
         "title": "小猪佩奇",
@@ -1589,11 +2000,15 @@ def test_native_season_download_expands_to_serial_episode_tasks(tmp_path: Path):
         (1, 1, "https://example.test/s01e01.m3u8"),
         (1, 2, "https://example.test/s01e02.m3u8"),
     ]
+    assert wakeups == [True]
+    assert plugin.download(token, tmp_path)[1] is None
+    assert wakeups == [True]
 
 
-def test_native_download_reports_duplicate_instead_of_fake_success(tmp_path: Path):
+def test_native_download_reports_duplicate_instead_of_fake_success(monkeypatch, tmp_path: Path):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     token = plugin._resource_token({
         "url": "https://example.test/movie.m3u8",
         "title": "示例电影",
@@ -2315,6 +2730,8 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    wakeups = []
+    monkeypatch.setattr(plugin, "_start_queue", lambda: wakeups.append(True))
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     monkeypatch.setattr(plugin, "_prepare_result", lambda result: (result, {}))
 
@@ -2324,6 +2741,9 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
     assert searches
     assert response["queued"] == 2
     assert [(task["season"], task["episode"]) for task in tasks] == [(1, 1), (1, 2)]
+    assert wakeups == [True]
+    assert plugin.refresh_subscriptions()["queued"] == 0
+    assert wakeups == [True]
 
 
 def test_refresh_plugin_season_subscription_queues_highest_resolution_for_same_episode(

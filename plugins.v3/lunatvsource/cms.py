@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import http.client
 import ipaddress
 import json
@@ -11,6 +11,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -31,6 +32,35 @@ _SEASON_RE = re.compile(
 _CN_SEASON_RE = re.compile(
     r"(?:第\s*)(?P<season>[一二两三四五六七八九十百千万]+)\s*季",
     re.IGNORECASE,
+)
+_TV_TYPE_NAMES = frozenset(
+    {
+        "电视剧",
+        "连续剧",
+        "剧集",
+        "国产剧",
+        "大陆剧",
+        "内地剧",
+        "华语剧",
+        "欧美剧",
+        "美剧",
+        "英剧",
+        "韩剧",
+        "日剧",
+        "泰剧",
+        "港剧",
+        "香港剧",
+        "台剧",
+        "台湾剧",
+        "日韩剧",
+        "海外剧",
+        "其他剧",
+        "短剧",
+        "微短剧",
+        "网络剧",
+        "情景剧",
+        "动画剧",
+    }
 )
 _SEASON_RANGE_RE = re.compile(
     r"(?:第\s*)?(?P<start>\d{1,3})\s*[-~至]\s*(?P<end>\d{1,3})\s*季|"
@@ -675,9 +705,15 @@ class CmsResult:
 
 
 def _media_type(item: Mapping[str, Any]) -> str:
-    value = f"{item.get('type_name', '')} {item.get('vod_class', '')}".lower()
+    type_name = _text(item.get("type_name")).strip().lower()
+    value = f"{type_name} {_text(item.get('vod_class'))}".lower()
     if "电影" in value and "电视剧" not in value:
         return "movie"
+    # Regional drama categories such as 欧美剧/韩剧 are used by some CMS
+    # providers without the literal 电视剧 label. Use an explicit type-name
+    # allowlist so movie categories such as 喜剧/悲剧 remain movies.
+    if type_name in _TV_TYPE_NAMES:
+        return "tv"
     if any(token in value for token in ("电视剧", "连续剧", "tv", "剧集", "综艺", "儿童", "少儿")):
         return "tv"
     # 动漫/动画/纪录片在 CMS 中同时承载电影和剧集。 只有出现季集
@@ -920,77 +956,126 @@ class AppleCmsClient:
         require_playable: bool = False,
         source_limit: Optional[int] = None,
         max_workers: int = 1,
+        progress_callback: Optional[Callable[..., None]] = None,
     ) -> List[CmsResult]:
+        ordered_sources = list(self.sources)
+        total_sources = len(ordered_sources)
+        results: List[CmsResult] = []
+        seen: set[Tuple[str, str]] = set()
+        completed_sources: set[int] = set()
+        finished = 0
+
+        def notify_progress() -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(
+                    finished=finished,
+                    total=total_sources,
+                    text=f"正在搜索源 {finished}/{total_sources}",
+                )
+            except Exception:
+                # UI/event handlers must not affect third-party CMS search.
+                pass
+
+        def settle_source(index: int) -> None:
+            nonlocal finished
+            if index in completed_sources:
+                return
+            completed_sources.add(index)
+            finished += 1
+            notify_progress()
+
+        def settle_unfinished_sources() -> None:
+            for index in range(total_sources):
+                settle_source(index)
+            if total_sources == 0:
+                notify_progress()
+
+        def merge_source_results(source_results: Iterable[CmsResult]) -> None:
+            for result in source_results:
+                key = (result.source_key, result.vod_id)
+                if result.title and key not in seen:
+                    seen.add(key)
+                    results.append(result)
+
         if limit <= 0:
+            settle_unfinished_sources()
             return []
         per_source_limit = max(1, min(int(source_limit or limit), int(limit)))
-        results: List[CmsResult] = []
-        ordered_sources = list(self.sources)
-        seen: set[Tuple[str, str]] = set()
         max_workers = max(1, int(max_workers))
         if stop_after_first_source or max_workers == 1 or len(ordered_sources) <= 1:
-            for source in ordered_sources:
+            for index, source in enumerate(ordered_sources):
                 source_result_count = len(results)
-                for result in self._search_source(
-                    source,
+                try:
+                    source_results = self._search_source(
+                        source,
+                        query=query,
+                        limit=per_source_limit,
+                        enrich=enrich,
+                        require_playable=require_playable,
+                    )
+                except Exception:
+                    source_results = []
+                finally:
+                    settle_source(index)
+                merge_source_results(source_results)
+                if stop_after_first_source and len(results) > source_result_count:
+                    # The remaining sources are intentionally skipped; settle
+                    # each one so progress always reaches total/total.
+                    settle_unfinished_sources()
+                    break
+            settle_unfinished_sources()
+            return results[:limit]
+
+        futures: Dict[Any, int] = {}
+        pending_futures = set()
+        source_results: Dict[int, List[CmsResult]] = {}
+        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(ordered_sources)))
+        try:
+            for idx, source in enumerate(ordered_sources):
+                future = executor.submit(
+                    self._search_source,
+                    source=source,
                     query=query,
                     limit=per_source_limit,
                     enrich=enrich,
                     require_playable=require_playable,
-                ):
-                    key = (result.source_key, result.vod_id)
-                    if result.title and key not in seen:
-                        seen.add(key)
-                        results.append(result)
-                if stop_after_first_source and len(results) > source_result_count:
-                    break
-            return results[:limit]
-
-        futures = []
-        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(ordered_sources)))
-        try:
-            for idx, source in enumerate(ordered_sources):
-                futures.append(
-                    (
-                        idx,
-                        source,
-                        executor.submit(
-                            self._search_source,
-                            source=source,
-                            query=query,
-                            limit=per_source_limit,
-                            enrich=enrich,
-                            require_playable=require_playable,
-                        ),
-                    )
                 )
-            done_futures, pending_futures = wait(
-                [future for _, _, future in futures],
-                timeout=self._parallel_wait_seconds(),
-            )
+                futures[future] = idx
+                pending_futures.add(future)
+
+            deadline = time.monotonic() + self._parallel_wait_seconds()
+            while pending_futures:
+                done_futures, pending_futures = wait(
+                    pending_futures,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done_futures:
+                    break
+                for future in done_futures:
+                    idx = futures[future]
+                    try:
+                        source_results[idx] = future.result()
+                    except Exception:
+                        source_results[idx] = []
+                    finally:
+                        settle_source(idx)
+
             # Do not leave queued sources running after the total search
             # budget expires. Running requests cannot be forcefully stopped,
             # but queued futures can be cancelled before executor shutdown.
             for future in pending_futures:
                 future.cancel()
-            source_results: Dict[int, List[CmsResult]] = {}
-            for idx, source, future in futures:
-                if future not in done_futures:
-                    continue
-                try:
-                    source_results[idx] = future.result()
-                except Exception:
-                    source_results[idx] = []
+            settle_unfinished_sources()
             for idx in sorted(source_results):
-                for result in source_results[idx]:
-                    key = (result.source_key, result.vod_id)
-                    if result.title and key not in seen:
-                        seen.add(key)
-                        results.append(result)
-                        if len(results) >= limit:
-                            return results
+                merge_source_results(source_results[idx])
+                if len(results) >= limit:
+                    return results[:limit]
             return results[:limit]
         finally:
-            # ``wait=False`` is intentional: a slow third-party source must
+            settle_unfinished_sources()
+            # ``wait=False`` is intentional: slow third-party source calls do
             # not hold up the native search response after the budget.
             executor.shutdown(wait=False, cancel_futures=True)

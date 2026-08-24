@@ -66,6 +66,7 @@ def test_search_movie_resources_are_sorted_and_download_queues_highest_resolutio
         for item in resources
     ] == ["1080P", "480P"]
 
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     result = plugin.download(resources[0].enclosure, tmp_path)
 
     assert result[0] == "LunaTVSource"
@@ -117,6 +118,7 @@ def test_search_tv_resources_are_season_cards_and_download_runs_episodes_seriall
     high_payload = plugin._decode_resource_token(resources[0].enclosure)
     assert [episode["episode"] for episode in high_payload["episodes"]] == [1, 2]
 
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     result = plugin.download(resources[0].enclosure, tmp_path)
 
     assert result[0] == "LunaTVSource"
@@ -213,6 +215,7 @@ def test_long_season_cards_probe_every_episode_and_keep_full_hd_download(
     ]
     assert all("480" not in episode["url"] for episode in full_hd_payload["episodes"])
 
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     result = plugin.download(resources[0].enclosure, tmp_path)
 
     assert result[0] == "LunaTVSource"

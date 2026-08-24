@@ -10,8 +10,10 @@ from __future__ import annotations
 import json
 import base64
 import hashlib
+import inspect
 import logging
 import asyncio
+from contextvars import ContextVar
 import re
 import threading
 import time
@@ -145,7 +147,16 @@ _RESOURCE_SEARCH_CACHE_TTL = 30.0
 # MoviePilot 3.0.0 returns before module resource providers are called when no
 # PT/indexer site is enabled. Keep this compatibility bridge inside the plugin.
 # Existing MoviePilot plugins use the same reversible runtime-wrapper pattern.
-_SEARCH_BRIDGE: Dict[str, Any] = {"owner": None, "chain": None, "originals": {}}
+_SEARCH_BRIDGE: Dict[str, Any] = {
+    "owner": None,
+    "chain": None,
+    "originals": {},
+    "mode": None,
+}
+_SEARCH_PROGRESS_CALLBACK: ContextVar[Optional[Callable[..., None]]] = ContextVar(
+    "lunatv_search_progress_callback",
+    default=None,
+)
 
 
 class _CompatDownloaderTorrent:
@@ -176,39 +187,241 @@ def _bridge_search_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _progress_stream_event(
+    *,
+    finished: int,
+    total: int,
+    text: str,
+    page: Any,
+) -> Optional[Dict[str, Any]]:
+    try:
+        total_value = max(0, int(total))
+        finished_value = max(0, int(finished))
+    except (TypeError, ValueError):
+        return None
+    if total_value:
+        finished_value = min(finished_value, total_value)
+        value = min(100, int(finished_value * 100 / total_value))
+    else:
+        finished_value = 0
+        value = 100
+    return {
+        "type": "progress",
+        "stage": "searching",
+        "value": value,
+        "text": str(text or f"LunaTV 正在搜索源 {finished_value}/{total_value}"),
+        "items": [],
+        "site": "LunaTV",
+        "site_id": None,
+        "page": page,
+        "finished": finished_value,
+        "total": total_value,
+    }
+
+
+def _is_compatible_search_stream(callback: Any) -> bool:
+    return callable(callback) and inspect.isasyncgenfunction(callback)
+
+
+def _make_search_stream_wrapper(
+    owner: "LunaTVSource",
+    stream_original: Callable[..., Any],
+    *,
+    native_plugin_fanout: bool,
+) -> Callable[..., Any]:
+    @wraps(stream_original)
+    async def stream_wrapper(chain: Any, *args: Any, **kwargs: Any):
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        state = {"active": True, "closed": False}
+        page = kwargs.get("page") or 0
+        legacy_plugin = _bridge_owner() if not native_plugin_fanout else None
+
+        def progress_callback(*, finished: int, total: int, text: str) -> None:
+            if not state["active"] or state["closed"]:
+                return
+            event = _progress_stream_event(
+                finished=finished,
+                total=total,
+                text=text,
+                page=page,
+            )
+            if event is None:
+                return
+
+            def enqueue() -> None:
+                if state["active"] and not state["closed"]:
+                    queue.put_nowait(("event", event))
+
+            try:
+                loop.call_soon_threadsafe(enqueue)
+            except RuntimeError:
+                # The event loop may already be closed during shutdown.
+                return
+
+        async def flush_progress_callbacks() -> None:
+            # CMS callbacks come from asyncio.to_thread. Yield once before a
+            # host event so every already-scheduled X/N remains ordered ahead
+            # of append/done.
+            await asyncio.sleep(0)
+
+        async def emit(event: Any, *, close_progress: bool = False) -> None:
+            await flush_progress_callbacks()
+            if close_progress:
+                state["active"] = False
+            queue.put_nowait(("event", event))
+
+        async def pump() -> None:
+            token = _SEARCH_PROGRESS_CALLBACK.set(progress_callback)
+            try:
+                if native_plugin_fanout:
+                    async for event in stream_original(chain, *args, **kwargs):
+                        await emit(
+                            event,
+                            close_progress=isinstance(event, dict)
+                            and event.get("type") == "done",
+                        )
+                else:
+                    done_event = None
+                    async for event in stream_original(chain, *args, **kwargs):
+                        if isinstance(event, dict) and event.get("type") == "done":
+                            done_event = event
+                            continue
+                        await emit(event)
+
+                    plugin_items: List[Any] = []
+                    if legacy_plugin:
+                        try:
+                            plugin_items = await legacy_plugin.async_search_torrents(
+                                **_bridge_search_kwargs(kwargs)
+                            )
+                        except Exception as exc:
+                            legacy_plugin._logger.warning(
+                                "LunaTV 原生流式资源搜索追加失败：%s",
+                                exc,
+                            )
+
+                    if plugin_items:
+                        await emit(
+                            {
+                                "type": "append",
+                                "stage": "searching",
+                                "value": 100,
+                                "text": f"LunaTV 返回 {len(plugin_items)} 条资源",
+                                "site": "LunaTV",
+                                "site_id": None,
+                                "page": page,
+                                "finished": 0,
+                                "total": 0,
+                                "total_items": len(plugin_items),
+                                "items": plugin_items,
+                            }
+                        )
+                    final = dict(done_event or {})
+                    final.update(
+                        {
+                            "type": "done",
+                            "stage": final.get("stage", "searching"),
+                            "value": 100,
+                            "items": [],
+                        }
+                    )
+                    if plugin_items:
+                        final["text"] = (
+                            f"资源搜索完成，LunaTV 返回 {len(plugin_items)} 条资源"
+                        )
+                    await emit(final, close_progress=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                owner._logger.warning("LunaTV 原生流式资源搜索失败：%s", exc)
+                queue.put_nowait(("error", exc))
+            finally:
+                _SEARCH_PROGRESS_CALLBACK.reset(token)
+                state["active"] = False
+                queue.put_nowait(("end", None))
+
+        pump_task = asyncio.create_task(pump())
+        try:
+            while True:
+                kind, payload = await queue.get()
+                if kind == "end":
+                    break
+                if kind == "error":
+                    raise payload
+                yield payload
+        finally:
+            state["active"] = False
+            state["closed"] = True
+            if not pump_task.done():
+                pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+
+    return stream_wrapper
+
+
 def _install_search_bridge(owner: "LunaTVSource") -> None:
-    _SEARCH_BRIDGE["owner"] = owner
     try:
         from app.chain.search import SearchChain
     except Exception as exc:  # pragma: no cover - MoviePilot runtime only
         owner._logger.warning("LunaTV 原生资源搜索桥接不可用：%s", exc)
         return
-    # Newer MoviePilot V3 releases dispatch plugin resource providers once via
-    # SearchChain.search_plugin_torrents/async_search_plugin_torrents. Wrapping
-    # the private fan-out methods there would query this plugin twice. Keep the
-    # reversible wrapper only for early V3 releases that lacked that native
-    # dispatch path.
-    if (
+
+    native_plugin_fanout = (
         callable(getattr(SearchChain, "search_plugin_torrents", None))
         and callable(getattr(SearchChain, "async_search_plugin_torrents", None))
-    ):
-        _restore_search_bridge(owner, force=True)
-        owner._logger.info("MoviePilot 已原生支持插件资源搜索，无需启用兼容桥")
-        return
+    )
+    mode = "native_stream" if native_plugin_fanout else "legacy"
     if _SEARCH_BRIDGE.get("chain") is SearchChain and _SEARCH_BRIDGE.get("originals"):
-        return
+        if _SEARCH_BRIDGE.get("mode") == mode:
+            _SEARCH_BRIDGE["owner"] = owner
+            return
+        _restore_search_bridge(owner, force=True)
+    elif _SEARCH_BRIDGE.get("chain") is not None and _SEARCH_BRIDGE.get("originals"):
+        _restore_search_bridge(owner, force=True)
 
-    originals: Dict[str, Callable[..., Any]] = {}
+    _SEARCH_BRIDGE["owner"] = owner
     sync_name = "_SearchChain__search_all_sites"
     async_name = "_SearchChain__async_search_all_sites"
     stream_name = "_SearchChain__async_search_all_sites_stream"
+    stream_original = getattr(SearchChain, stream_name, None)
 
+    if native_plugin_fanout:
+        if not _is_compatible_search_stream(stream_original):
+            owner._logger.info(
+                "MoviePilot 原生插件资源搜索已启用，但搜索流接口不兼容；保持原生行为"
+            )
+            return
+        originals = {stream_name: stream_original}
+        setattr(
+            SearchChain,
+            stream_name,
+            _make_search_stream_wrapper(
+                owner,
+                stream_original,
+                native_plugin_fanout=True,
+            ),
+        )
+        _SEARCH_BRIDGE.update(
+            {
+                "chain": SearchChain,
+                "originals": originals,
+                "mode": mode,
+            }
+        )
+        owner._logger.info("LunaTV 已接入 MoviePilot 原生搜索流进度")
+        return
+
+    originals: Dict[str, Callable[..., Any]] = {}
     sync_original = getattr(SearchChain, sync_name, None)
     if callable(sync_original):
         originals[sync_name] = sync_original
 
         @wraps(sync_original)
-        def sync_wrapper(chain, *args, **kwargs):
+        def sync_wrapper(chain: Any, *args: Any, **kwargs: Any) -> List[Any]:
             native = list(sync_original(chain, *args, **kwargs) or [])
             plugin = _bridge_owner()
             if plugin:
@@ -225,70 +438,66 @@ def _install_search_bridge(owner: "LunaTVSource") -> None:
         originals[async_name] = async_original
 
         @wraps(async_original)
-        async def async_wrapper(chain, *args, **kwargs):
+        async def async_wrapper(chain: Any, *args: Any, **kwargs: Any) -> List[Any]:
             native = list(await async_original(chain, *args, **kwargs) or [])
             plugin = _bridge_owner()
             if plugin:
                 try:
-                    native.extend(await plugin.async_search_torrents(**_bridge_search_kwargs(kwargs)))
+                    native.extend(
+                        await plugin.async_search_torrents(
+                            **_bridge_search_kwargs(kwargs)
+                        )
+                    )
                 except Exception as exc:
                     plugin._logger.warning("LunaTV 原生异步资源搜索追加失败：%s", exc)
             return native
 
         setattr(SearchChain, async_name, async_wrapper)
 
-    stream_original = getattr(SearchChain, stream_name, None)
-    if callable(stream_original):
+    if _is_compatible_search_stream(stream_original):
         originals[stream_name] = stream_original
+        setattr(
+            SearchChain,
+            stream_name,
+            _make_search_stream_wrapper(
+                owner,
+                stream_original,
+                native_plugin_fanout=False,
+            ),
+        )
+    elif callable(stream_original):
+        owner._logger.warning(
+            "LunaTV 原生流式资源搜索桥接未安装：目标不是异步生成器"
+        )
 
-        @wraps(stream_original)
-        async def stream_wrapper(chain, *args, **kwargs):
-            done_event = None
-            async for event in stream_original(chain, *args, **kwargs):
-                if event.get("type") == "done":
-                    done_event = event
-                    continue
-                yield event
-            plugin = _bridge_owner()
-            plugin_items = []
-            if plugin:
-                try:
-                    plugin_items = await plugin.async_search_torrents(
-                        **_bridge_search_kwargs(kwargs)
-                    )
-                except Exception as exc:
-                    plugin._logger.warning("LunaTV 原生流式资源搜索追加失败：%s", exc)
-            if plugin_items:
-                yield {
-                    "type": "append", "stage": "searching", "value": 100,
-                    "text": f"LunaTV 返回 {len(plugin_items)} 条资源",
-                    "items": plugin_items, "site": "LunaTV", "site_id": None,
-                    "page": kwargs.get("page") or 0, "finished": 0, "total": 0,
-                    "total_items": len(plugin_items),
-                }
-            final = dict(done_event or {})
-            final.update({"type": "done", "stage": final.get("stage", "searching"),
-                          "value": 100, "items": []})
-            if plugin_items:
-                final["text"] = f"资源搜索完成，LunaTV 返回 {len(plugin_items)} 条资源"
-            yield final
-
-        setattr(SearchChain, stream_name, stream_wrapper)
-
-    _SEARCH_BRIDGE.update({"chain": SearchChain, "originals": originals})
-    if originals:
-        owner._logger.info("LunaTV 原生资源搜索桥接已启用（%s）", ", ".join(originals))
+    if not originals:
+        return
+    _SEARCH_BRIDGE.update(
+        {
+            "chain": SearchChain,
+            "originals": originals,
+            "mode": mode,
+        }
+    )
+    owner._logger.info("LunaTV 已启用 MoviePilot 搜索兼容桥：%s", ", ".join(originals))
 
 
 def _restore_search_bridge(owner: "LunaTVSource", force: bool = False) -> None:
     if not force and _SEARCH_BRIDGE.get("owner") is not owner:
         return
     chain = _SEARCH_BRIDGE.get("chain")
-    for name, original in dict(_SEARCH_BRIDGE.get("originals") or {}).items():
-        if chain is not None:
+    originals = dict(_SEARCH_BRIDGE.get("originals") or {})
+    if chain:
+        for name, original in originals.items():
             setattr(chain, name, original)
-    _SEARCH_BRIDGE.update({"owner": None, "chain": None, "originals": {}})
-
+    _SEARCH_BRIDGE.update(
+        {
+            "owner": None,
+            "chain": None,
+            "originals": {},
+            "mode": None,
+        }
+    )
 
 def _bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -332,7 +541,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.38"
+    plugin_version = "0.4.39"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1758,6 +1967,7 @@ class LunaTVSource(_PluginBase):
         )
         if not queue.enqueue(task):
             return {"success": False, "message": "任务重复，或未配置下载目录", "data": {}}
+        self._start_queue()
         return {"success": True, "message": "已加入串行下载队列", "data": {"task_id": task.task_id}}
 
     def _record_completion(self, task: DownloadTask, output: str) -> None:
@@ -2029,6 +2239,8 @@ class LunaTVSource(_PluginBase):
                         continue
                     if queue.enqueue(task):
                         queued += 1
+        if queued:
+            self._start_queue()
         return {
             "subscriptions": len(active_subscribes),
             "queued": queued,
@@ -2040,19 +2252,14 @@ class LunaTVSource(_PluginBase):
     def run_queue(self) -> Dict[str, Any]:
         if not self._queue:
             return {"processed": 0}
-        return self._queue.run_one()
+        return {"processed": 0, "scheduled": self._queue.wake()}
 
     def _start_queue(self) -> bool:
         """立即唤醒一次串行队列，避免原生继续操作等待下个定时周期。"""
         queue = self._queue
         if queue is None:
             return False
-        threading.Thread(
-            target=queue.run_one,
-            name="lunatvsource-download",
-            daemon=True,
-        ).start()
-        return True
+        return queue.wake()
 
     def get_media_source(self) -> List[Dict[str, Any]]:
         """LunaTV participates in the global search instead of adding an empty Explore tab."""
@@ -2400,9 +2607,20 @@ class LunaTVSource(_PluginBase):
 
         first = results[0] if results else None
         requested_type = _enum_value(mtype)
+        explicit_type = requested_type in {
+            "电视剧",
+            "tv",
+            "series",
+            "show",
+            "tvshow",
+            "电影",
+            "movie",
+            "film",
+            "movies",
+        }
         media_type = (
             _media_type_value(mtype)
-            if requested_type
+            if explicit_type
             else (first.media_type if first else "movie")
         )
         return CmsResult(
@@ -2541,7 +2759,12 @@ class LunaTVSource(_PluginBase):
         )
         return [item for _, item in ranked]
 
-    def _resource_torrents(self, keyword: str, mtype: Any = None) -> List[Any]:
+    def _resource_torrents(
+        self,
+        keyword: str,
+        mtype: Any = None,
+        progress_callback: Optional[Callable[..., None]] = None,
+    ) -> List[Any]:
         """把 CMS m3u8 条目投影为 MoviePilot 原生 TorrentInfo。"""
         torrent_info_type = _HostTorrentInfo or (
             getattr(_schemas, "TorrentInfo", None) if _schemas is not None else None
@@ -2559,20 +2782,41 @@ class LunaTVSource(_PluginBase):
         with self._resource_search_lock:
             self._prune_resource_search_cache(now)
             cached = self._resource_search_cache.get(cache_key)
-            if cached and now - cached[0] < _RESOURCE_SEARCH_CACHE_TTL:
+            # A progress callback requires a real source pass; cached results
+            # cannot truthfully report per-source completion.
+            if (
+                progress_callback is None
+                and cached
+                and now - cached[0] < _RESOURCE_SEARCH_CACHE_TTL
+            ):
                 return list(cached[1])
 
         # 第三方 CMS、AI 与 TMDB 请求可能较慢，不能在请求期间占用缓存锁；
         # 否则插件更新/停用时会一直等待正在进行的原生资源搜索。
         search_query, _ = (self._ai or AiTitleNormalizer(False)).normalize(keyword)
-        results = self._client().search(
-            search_query,
-            limit=50,
-            source_limit=3,
-            stop_after_first_source=False,
-            require_playable=True,
-            max_workers=8,
-        )
+        def on_progress(*, finished: int, total: int, text: str) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(
+                    finished=int(finished),
+                    total=int(total),
+                    text=f"LunaTV 正在搜索源 {int(finished)}/{int(total)}",
+                )
+            except Exception:
+                # Host progress handlers must never break CMS search.
+                pass
+
+        search_kwargs: Dict[str, Any] = {
+            "limit": 50,
+            "source_limit": 3,
+            "stop_after_first_source": False,
+            "require_playable": True,
+            "max_workers": 8,
+        }
+        if progress_callback is not None:
+            search_kwargs["progress_callback"] = on_progress
+        results = self._client().search(search_query, **search_kwargs)
         requested_media_type = (
             "tv"
             if requested_type in {"电视剧", "tv", "series", "show", "tvshow"}
@@ -2851,6 +3095,7 @@ class LunaTVSource(_PluginBase):
         keyword: str,
         mtype: Any = None,
         page: Optional[int] = 0,
+        progress_callback: Optional[Callable[..., None]] = None,
         **_: Any,
     ) -> List[Any]:
         """参与每次原生站点搜索；固定站点名使多站点调用结果可由宿主去重。"""
@@ -2858,12 +3103,22 @@ class LunaTVSource(_PluginBase):
         if not self._enabled or int(page or 0) > 0 or not str(keyword or "").strip():
             return []
         try:
-            return self._resource_torrents(str(keyword).strip(), mtype=mtype)
+            if progress_callback is None:
+                return self._resource_torrents(str(keyword).strip(), mtype=mtype)
+            return self._resource_torrents(
+                str(keyword).strip(),
+                mtype=mtype,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             self._logger.warning("LunaTV 原生资源搜索失败：%s", exc)
             return []
 
     async def async_search_torrents(self, **kwargs: Any) -> List[Any]:
+        if "progress_callback" not in kwargs:
+            progress_callback = _SEARCH_PROGRESS_CALLBACK.get()
+            if progress_callback is not None:
+                kwargs["progress_callback"] = progress_callback
         return await asyncio.to_thread(self.search_torrents, **kwargs)
 
     def download(
@@ -2952,6 +3207,7 @@ class LunaTVSource(_PluginBase):
             if invalid_count:
                 return "LunaTVSource", None, None, "LunaTV 下载参数无效"
             return "LunaTVSource", None, None, "任务已在串行队列或历史记录中"
+        self._start_queue()
         total = len(enqueued_ids)
         message = f"已排队 {total} 集" if total > 1 else ""
         if duplicate_count:
