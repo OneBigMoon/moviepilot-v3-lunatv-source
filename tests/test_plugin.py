@@ -401,7 +401,9 @@ def test_native_resource_search_returns_marked_download_items(monkeypatch):
     assert items[0].to_dict()["site_name"] == "演示源"
     assert items[0].media_source == "themoviedb"
     assert items[0].media_id == "123"
-    assert items[0].title.endswith("S01 · 1集")
+    assert items[0].title.endswith("S01 · 1集 · 未知")
+    assert items[0].description == "LunaTV · 未知 · m3u8 · 1集"
+    assert "未知" in items[0].labels
     payload = plugin._decode_resource_token(items[0].enclosure)
     assert payload["url"].endswith("01.m3u8")
     assert len(payload["episodes"]) == 1
@@ -543,9 +545,88 @@ def test_resource_torrents_collapses_episode_named_cms_rows_into_one_season(monk
 
     items = plugin.search_torrents(site={"id": 1}, keyword="小猪佩奇", page=0, mtype="tv")
     assert len(items) == 1
-    assert items[0].title == "小猪佩奇 · S01 · 2集"
+    assert items[0].title == "小猪佩奇 · S01 · 2集 · 未知"
     payload = plugin._decode_resource_token(items[0].enclosure)
     assert [episode["episode"] for episode in payload["episodes"]] == [1, 2]
+
+
+def test_resource_torrents_label_and_prefer_verified_resolution(monkeypatch):
+    class TorrentInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    low = _result_from_item(
+        CmsSource("low", "标清源", "https://low.example/vod"),
+        {
+            "vod_id": "1",
+            "vod_name": "示例电影",
+            "type_name": "电影",
+            "vod_play_url": "正片$https://video.example/480.m3u8",
+        },
+    )
+    high = _result_from_item(
+        CmsSource("high", "高清源", "https://high.example/vod"),
+        {
+            "vod_id": "2",
+            "vod_name": "示例电影",
+            "type_name": "电影",
+            "vod_play_url": "正片$https://video.example/1080.m3u8",
+        },
+    )
+
+    monkeypatch.setattr(plugin_module, "_HostTorrentInfo", TorrentInfo)
+    monkeypatch.setattr(
+        plugin_module,
+        "probe_stream_height",
+        lambda url, **_kwargs: 1080 if "1080" in url else 480,
+    )
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: type("Client", (), {
+        "search": lambda self, *_args, **_kwargs: [low, high],
+    })())
+    monkeypatch.setattr(plugin, "_associate_tmdb", lambda *_args, **_kwargs: {})
+
+    items = plugin.search_torrents(site={"id": 1}, keyword="示例电影", page=0, mtype="movie")
+
+    assert [item.site_name for item in items] == ["高清源", "标清源"]
+    assert [item.pri_order for item in items] == [1080, 480]
+    assert items[0].title.endswith("· 1080P")
+    assert items[0].description == "LunaTV · 1080P · m3u8"
+    assert "1080P" in items[0].labels
+    assert plugin._decode_resource_token(items[0].enclosure)["resolution"] == "1080P"
+
+
+def test_subscription_candidates_prefer_verified_resolution(monkeypatch):
+    low = _result_from_item(
+        CmsSource("low", "标清源", "https://low.example/vod"),
+        {
+            "vod_id": "1",
+            "vod_name": "示例剧",
+            "type_name": "电视剧",
+            "vod_play_url": "01$https://video.example/480.m3u8",
+        },
+    )
+    high = _result_from_item(
+        CmsSource("high", "高清源", "https://high.example/vod"),
+        {
+            "vod_id": "2",
+            "vod_name": "示例剧",
+            "type_name": "电视剧",
+            "vod_play_url": "01$https://video.example/1080.m3u8",
+        },
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "probe_stream_height",
+        lambda url, **_kwargs: 1080 if "1080" in url else 480,
+    )
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    ranked = plugin._rank_subscription_results([(low, {}), (high, {})], season=1)
+
+    assert [result.source_name for result, _ in ranked] == ["高清源", "标清源"]
 
 
 def test_resource_search_does_not_hold_cache_lock_during_network_request(monkeypatch):

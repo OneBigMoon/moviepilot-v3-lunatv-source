@@ -2,6 +2,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PLUGIN_DIR = Path(__file__).parents[1] / "plugins.v3" / "lunatvsource"
 PACKAGE_NAME = "lunatvsource_test"
@@ -17,3 +19,10 @@ if PACKAGE_NAME not in sys.modules:
     sys.modules[PACKAGE_NAME] = module
     spec.loader.exec_module(module)
 
+
+@pytest.fixture(autouse=True)
+def disable_live_stream_probe(monkeypatch):
+    """Unit tests must never contact the public CMS video endpoints."""
+
+    plugin_module = sys.modules[PACKAGE_NAME]
+    monkeypatch.setattr(plugin_module, "probe_stream_height", lambda *_args, **_kwargs: 0)
