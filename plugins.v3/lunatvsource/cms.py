@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+import http.client
+import ipaddress
 import json
 import re
+import socket
+import ssl
 import subprocess
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
@@ -33,6 +38,20 @@ _SEASON_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 _STREAM_RESOLUTION_RE = re.compile(r"(?P<width>\d{2,5})x(?P<height>\d{2,5})", re.IGNORECASE)
+_MASTER_RESOLUTION_RE = re.compile(
+    r"^#EXT-X-STREAM-INF:[^\r\n]*\bRESOLUTION\s*=\s*"
+    r"(?P<width>\d{2,5})x(?P<height>\d{2,5})",
+    re.IGNORECASE | re.MULTILINE,
+)
+_HLS_URI_RE = re.compile(
+    r"\bURI\s*=\s*(?:\"(?P<quoted>[^\"]+)\"|(?P<plain>[^,\s]+))",
+    re.IGNORECASE,
+)
+_HLS_BANDWIDTH_RE = re.compile(r"\bBANDWIDTH\s*=\s*(?P<value>\d+)", re.IGNORECASE)
+_PROBE_REDIRECT_CODES = {301, 302, 303, 307, 308}
+_PROBE_MAX_REDIRECTS = 5
+_PROBE_PLAYLIST_BYTES = 256 * 1024
+_PROBE_MEDIA_BYTES = 4 * 1024 * 1024
 
 
 def _season_range(label: str) -> Tuple[int, int]:
@@ -86,7 +105,9 @@ def stream_quality_label(height: int) -> str:
     """Return a compact quality label from the actual video height."""
 
     value = max(0, int(height or 0))
-    if value >= 2160:
+    if value == 4320:
+        return "8K"
+    if value == 2160:
         return "4K"
     if value > 0:
         return f"{value}P"
@@ -102,19 +123,240 @@ def _resolution_height(value: str) -> int:
     return max(heights, default=0)
 
 
-def _playlist_resolution_height(url: str, timeout: float) -> int:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "LunaTVSource/0.1 MoviePilot",
-            "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
-        },
+def _master_playlist_height(playlist: str) -> int:
+    heights = [
+        int(match.group("height"))
+        for match in _MASTER_RESOLUTION_RE.finditer(playlist or "")
+        if 100 <= int(match.group("height")) <= 10000
+    ]
+    return max(heights, default=0)
+
+
+def _resolve_public_probe_target(
+    url: str,
+    allowed_private_ranges: Iterable[str] = (),
+) -> Tuple[urllib.parse.ParseResult, str, int]:
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("unsupported probe URL")
+    if parsed.username or parsed.password:
+        raise ValueError("probe URL credentials are not allowed")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("invalid probe URL port") from exc
+
+    hostname = parsed.hostname.split("%", 1)[0]
+    try:
+        addresses = [ipaddress.ip_address(hostname)]
+    except ValueError:
+        try:
+            address_infos = socket.getaddrinfo(
+                hostname,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        except OSError as exc:
+            raise ValueError("probe host cannot be resolved") from exc
+        addresses = []
+        for address_info in address_infos:
+            candidate = str(address_info[4][0]).split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if address not in addresses:
+                addresses.append(address)
+    private_networks = []
+    for value in allowed_private_ranges or ():
+        try:
+            private_networks.append(ipaddress.ip_network(str(value).strip(), strict=False))
+        except ValueError:
+            continue
+    allowed_addresses = [address for address in addresses if address.is_global]
+    allowed_addresses.extend(
+        address
+        for address in addresses
+        if any(address in network for network in private_networks)
+        and address not in allowed_addresses
     )
-    with urllib.request.urlopen(request, timeout=min(max(timeout, 1.0), 3.0)) as response:
-        playlist = response.read(256 * 1024).decode("utf-8", errors="replace")
+    if not allowed_addresses:
+        raise ValueError("probe URL resolves to a non-public address")
+    return parsed, str(allowed_addresses[0]), port
+
+
+def _is_public_probe_url(url: str, allowed_private_ranges: Iterable[str] = ()) -> bool:
+    try:
+        _resolve_public_probe_target(url, allowed_private_ranges)
+    except ValueError:
+        return False
+    return True
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to the address already approved by DNS policy."""
+
+    def __init__(self, hostname: str, address: str, port: int, timeout: float):
+        super().__init__(
+            hostname,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._probe_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._probe_address, self.port),
+            self.timeout,
+        )
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _probe_host_header(parsed: urllib.parse.ParseResult, port: int) -> str:
+    hostname = parsed.hostname or ""
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+    default_port = 443 if parsed.scheme == "https" else 80
+    return hostname if port == default_port else f"{hostname}:{port}"
+
+
+def _fetch_public_url(
+    url: str,
+    timeout: float,
+    limit: int,
+    allowed_private_ranges: Iterable[str] = (),
+) -> Tuple[bytes, str]:
+    """Fetch a bounded public URL while pinning DNS and validating redirects."""
+
+    current_url = str(url or "").strip()
+    request_timeout = min(max(float(timeout or 8.0), 1.0), 15.0)
+    for _ in range(_PROBE_MAX_REDIRECTS + 1):
+        parsed, address, port = _resolve_public_probe_target(
+            current_url,
+            allowed_private_ranges,
+        )
+        connection: http.client.HTTPConnection
+        if parsed.scheme == "https":
+            connection = _PinnedHTTPSConnection(
+                parsed.hostname or "",
+                address,
+                port,
+                request_timeout,
+            )
+        else:
+            connection = http.client.HTTPConnection(address, port, timeout=request_timeout)
+        path = urllib.parse.urlunparse(
+            ("", "", parsed.path or "/", parsed.params, parsed.query, "")
+        )
+        try:
+            connection.request(
+                "GET",
+                path,
+                headers={
+                    "Host": _probe_host_header(parsed, port),
+                    "User-Agent": "LunaTVSource/0.1 MoviePilot",
+                    "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+                    "Connection": "close",
+                },
+            )
+            response = connection.getresponse()
+            if response.status in _PROBE_REDIRECT_CODES:
+                location = response.getheader("Location")
+                if not location:
+                    raise OSError("probe redirect has no target")
+                current_url = urllib.parse.urljoin(current_url, location)
+                continue
+            if response.status < 200 or response.status >= 400:
+                raise OSError(f"probe request returned HTTP {response.status}")
+            return response.read(max(1, int(limit)) + 1)[:limit], current_url
+        finally:
+            connection.close()
+    raise OSError("too many probe redirects")
+
+
+def _playlist_followup_urls(playlist: str, base_url: str) -> Tuple[List[str], bool]:
+    lines = [line.strip() for line in (playlist or "").splitlines()]
+    variants: List[Tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        if not line.upper().startswith("#EXT-X-STREAM-INF:"):
+            continue
+        bandwidth_match = _HLS_BANDWIDTH_RE.search(line)
+        bandwidth = int(bandwidth_match.group("value")) if bandwidth_match else 0
+        for candidate in lines[index + 1:]:
+            if not candidate or candidate.startswith("#"):
+                continue
+            variants.append((bandwidth, urllib.parse.urljoin(base_url, candidate)))
+            break
+    if variants:
+        return [max(variants, key=lambda item: item[0])[1]], True
+
+    urls: List[str] = []
+    for line in lines:
+        if line.upper().startswith("#EXT-X-MAP:"):
+            match = _HLS_URI_RE.search(line)
+            if match:
+                urls.append(
+                    urllib.parse.urljoin(
+                        base_url,
+                        match.group("quoted") or match.group("plain") or "",
+                    )
+                )
+            break
+    for line in lines:
+        if line and not line.startswith("#"):
+            urls.append(urllib.parse.urljoin(base_url, line))
+            break
+    return list(dict.fromkeys(url for url in urls if url)), False
+
+
+def _probe_media_sample(
+    url: str,
+    timeout: float,
+    depth: int = 0,
+    allowed_private_ranges: Iterable[str] = (),
+) -> Tuple[int, bytes, str]:
+    payload, final_url = _fetch_public_url(
+        url,
+        timeout,
+        _PROBE_PLAYLIST_BYTES,
+        allowed_private_ranges,
+    )
+    playlist = payload.decode("utf-8", errors="replace")
     if "#EXTM3U" not in playlist:
-        return 0
-    return _resolution_height(playlist)
+        suffix = urllib.parse.urlparse(final_url).path.rpartition(".")[2]
+        return 0, payload, f".{suffix}" if suffix else ".bin"
+
+    height = _master_playlist_height(playlist)
+    if height:
+        return height, b"", ""
+    followups, is_variant = _playlist_followup_urls(playlist, final_url)
+    if is_variant:
+        if depth >= 1 or not followups:
+            return 0, b"", ""
+        return _probe_media_sample(
+            followups[0],
+            timeout,
+            depth + 1,
+            allowed_private_ranges,
+        )
+    if not followups:
+        return 0, b"", ""
+
+    chunks: List[bytes] = []
+    suffix = ".bin"
+    for media_url in followups[:2]:
+        chunk, final_media_url = _fetch_public_url(
+            media_url,
+            timeout,
+            _PROBE_MEDIA_BYTES,
+            allowed_private_ranges,
+        )
+        chunks.append(chunk)
+        extension = urllib.parse.urlparse(final_media_url).path.rpartition(".")[2]
+        if extension:
+            suffix = f".{extension}"
+    return 0, b"".join(chunks), suffix
 
 
 def _ffprobe_path(ffmpeg_path: str) -> str:
@@ -128,7 +370,12 @@ def _ffprobe_path(ffmpeg_path: str) -> str:
     return "ffprobe"
 
 
-def probe_stream_height(url: str, ffmpeg_path: str = "ffmpeg", timeout: float = 8.0) -> int:
+def probe_stream_height(
+    url: str,
+    ffmpeg_path: str = "ffmpeg",
+    timeout: float = 8.0,
+    allowed_private_ranges: Iterable[str] = (),
+) -> int:
     """Read an HLS master playlist or the first video stream to get its height.
 
     Apple CMS metadata rarely carries a trustworthy quality field.  Reading the
@@ -136,63 +383,71 @@ def probe_stream_height(url: str, ffmpeg_path: str = "ffmpeg", timeout: float = 
     the first segment to expose the video dimensions without saving a frame.
     """
 
-    parsed = urllib.parse.urlparse(str(url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    value = str(url or "").strip()
+    if not _is_public_probe_url(value, allowed_private_ranges):
         return 0
     try:
-        height = _playlist_resolution_height(parsed.geturl(), timeout)
+        height, media_sample, suffix = _probe_media_sample(
+            value,
+            timeout,
+            allowed_private_ranges=allowed_private_ranges,
+        )
         if height:
             return height
     except Exception:
-        pass
+        return 0
+    if not media_sample:
+        return 0
 
     probe_timeout = min(max(float(timeout or 8.0), 3.0), 15.0)
-    try:
-        result = subprocess.run(
-            [
-                _ffprobe_path(ffmpeg_path),
-                "-v",
-                "error",
-                "-rw_timeout",
-                str(int(probe_timeout * 1_000_000)),
-                "-analyzeduration",
-                "1000000",
-                "-probesize",
-                "1000000",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height",
-                "-of",
-                "csv=s=x:p=0",
-                parsed.geturl(),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=probe_timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return 0
-    except (OSError, subprocess.SubprocessError, ValueError):
-        result = None
-    height = _resolution_height(result.stdout if result else "")
-    if height:
-        return height
+    with tempfile.NamedTemporaryFile(prefix="lunatv-probe-", suffix=suffix) as sample:
+        sample.write(media_sample)
+        sample.flush()
+        try:
+            result = subprocess.run(
+                [
+                    _ffprobe_path(ffmpeg_path),
+                    "-v",
+                    "error",
+                    "-protocol_whitelist",
+                    "file,pipe",
+                    "-analyzeduration",
+                    "1000000",
+                    "-probesize",
+                    "1000000",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "csv=s=x:p=0",
+                    sample.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=probe_timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return 0
+        except (OSError, subprocess.SubprocessError, ValueError):
+            result = None
+        height = _resolution_height(result.stdout if result else "")
+        if height:
+            return height
 
-    # Some HLS servers expose dimensions only after the first frame is
-    # decoded.  Decode one frame to the null muxer; no image is persisted.
-    try:
-        frame = subprocess.run(
+        # Some streams expose dimensions only after the first frame is decoded.
+        try:
+            frame = subprocess.run(
             [
                 str(ffmpeg_path or "ffmpeg"),
                 "-hide_banner",
                 "-loglevel",
                 "info",
-                "-rw_timeout",
-                str(int(probe_timeout * 1_000_000)),
+                "-protocol_whitelist",
+                "file,pipe",
                 "-i",
-                parsed.geturl(),
+                sample.name,
                 "-map",
                 "0:v:0",
                 "-frames:v",
@@ -205,10 +460,10 @@ def probe_stream_height(url: str, ffmpeg_path: str = "ffmpeg", timeout: float = 
             text=True,
             timeout=probe_timeout,
             check=False,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return 0
-    return _resolution_height(frame.stderr)
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return 0
+        return _resolution_height(frame.stderr)
 
 
 def _split_player_values(value: str) -> List[str]:

@@ -1,9 +1,15 @@
 import json
+import socket
 import time
+
+import pytest
 
 from lunatvsource_test.cms import (
     AppleCmsClient,
     CmsSource,
+    _fetch_public_url,
+    _is_public_probe_url,
+    _master_playlist_height,
     _parse_play_urls,
     _result_from_item,
     apply_season_counts,
@@ -14,6 +20,8 @@ from lunatvsource_test.cms import (
 
 
 def test_stream_quality_label_uses_actual_video_height():
+    assert stream_quality_label(4320) == "8K"
+    assert stream_quality_label(2304) == "2304P"
     assert stream_quality_label(2160) == "4K"
     assert stream_quality_label(1080) == "1080P"
     assert stream_quality_label(720) == "720P"
@@ -23,63 +31,179 @@ def test_stream_quality_label_uses_actual_video_height():
     assert stream_quality_label(0) == "未知"
 
 
-def test_probe_stream_height_reads_master_playlist_resolution(monkeypatch):
-    class Response:
-        def __enter__(self):
-            return self
+def test_master_playlist_height_only_reads_stream_inf_resolution():
+    playlist = (
+        "#EXTM3U\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\n"
+        "https://cdn.example/video-3840x2160.m3u8\n"
+    )
 
-        def __exit__(self, *_args):
+    assert _master_playlist_height(playlist) == 1080
+    assert _master_playlist_height(
+        "#EXTM3U\n#EXTINF:6,\nsegment-3840x2160.ts\n"
+    ) == 0
+
+
+def test_public_probe_url_rejects_private_and_mixed_dns(monkeypatch):
+    assert _is_public_probe_url("http://127.0.0.1/metadata") is False
+    assert _is_public_probe_url("http://169.254.169.254/latest/meta-data") is False
+    assert _is_public_probe_url("http://192.168.1.10/video.m3u8") is False
+    assert _is_public_probe_url("http://[::1]/video.m3u8") is False
+    assert _is_public_probe_url(
+        "http://10.0.0.8/video.m3u8",
+        ("10.0.0.0/8",),
+    ) is True
+
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    assert _is_public_probe_url("https://video.example/media.m3u8") is True
+
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
+        ],
+    )
+    assert _is_public_probe_url("https://video.example/media.m3u8") is True
+
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.148", 443)),
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fdfe:dcba:9876::241", 443, 0, 0)),
+        ],
+    )
+    assert _is_public_probe_url("https://video.example/media.m3u8") is False
+    assert _is_public_probe_url(
+        "https://video.example/media.m3u8",
+        ("198.18.0.0/15", "fdfe:dcba:9876::/48"),
+    ) is True
+    assert _is_public_probe_url("http://video.example/media.m3u8") is False
+
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
+        ],
+    )
+    assert _is_public_probe_url("https://video.example/media.m3u8") is False
+
+
+def test_public_fetch_pins_dns_and_rejects_private_redirect(monkeypatch):
+    requests = []
+    responses = iter(
+        [
+            type(
+                "RedirectResponse",
+                (),
+                {
+                    "status": 302,
+                    "getheader": lambda self, name: (
+                        "http://127.0.0.1/metadata" if name == "Location" else None
+                    ),
+                },
+            )(),
+        ]
+    )
+
+    class Connection:
+        def __init__(self, address, port, timeout):
+            requests.append({"address": address, "port": port, "timeout": timeout})
+
+        def request(self, method, path, headers):
+            requests[-1].update({"method": method, "path": path, "headers": headers})
+
+        def getresponse(self):
+            return next(responses)
+
+        def close(self):
             return None
 
-        def read(self, _limit):
-            return (
-                b"#EXTM3U\n"
-                b"#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720\n720.m3u8\n"
-                b"#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\n1080.m3u8\n"
-            )
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+        ],
+    )
+    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
 
-    monkeypatch.setattr("lunatvsource_test.cms.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    with pytest.raises(ValueError, match="non-public"):
+        _fetch_public_url("http://video.example/start.m3u8", 3.0, 1024)
+
+    assert requests == [
+        {
+            "address": "93.184.216.34",
+            "port": 80,
+            "timeout": 3.0,
+            "method": "GET",
+            "path": "/start.m3u8",
+            "headers": {
+                "Host": "video.example",
+                "User-Agent": "LunaTVSource/0.1 MoviePilot",
+                "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+                "Connection": "close",
+            },
+        }
+    ]
+
+
+def test_probe_stream_height_reads_master_playlist_resolution(monkeypatch):
+    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr(
+        "lunatvsource_test.cms._probe_media_sample",
+        lambda *_args, **_kwargs: (1080, b"", ""),
+    )
     assert probe_stream_height("https://example.test/master.m3u8") == 1080
 
 
 def test_probe_stream_height_falls_back_to_first_video_stream(monkeypatch):
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _limit):
-            return b"#EXTM3U\n#EXTINF:6,\nsegment-001.ts\n"
-
     class ProcessResult:
         stdout = "854x480\n"
 
-    monkeypatch.setattr("lunatvsource_test.cms.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
-    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", lambda *_args, **_kwargs: ProcessResult())
+    def run(args, **_kwargs):
+        assert "-protocol_whitelist" in args
+        assert args[args.index("-protocol_whitelist") + 1] == "file,pipe"
+        assert not args[-1].startswith(("http://", "https://"))
+        return ProcessResult()
+
+    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr(
+        "lunatvsource_test.cms._probe_media_sample",
+        lambda *_args, **_kwargs: (0, b"segment", ".ts"),
+    )
+    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", run)
     assert probe_stream_height("https://example.test/media.m3u8") == 480
 
 
 def test_probe_stream_height_decodes_one_frame_when_ffprobe_has_no_dimensions(monkeypatch):
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _limit):
-            return b"#EXTM3U\n#EXTINF:6,\nsegment-001.ts\n"
-
     results = iter([
         type("ProbeResult", (), {"stdout": "", "stderr": ""})(),
         type("FrameResult", (), {"stdout": "", "stderr": "Video: h264, 1280x720"})(),
     ])
-    monkeypatch.setattr("lunatvsource_test.cms.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
-    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", lambda *_args, **_kwargs: next(results))
+    calls = []
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        return next(results)
+
+    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr(
+        "lunatvsource_test.cms._probe_media_sample",
+        lambda *_args, **_kwargs: (0, b"segment", ".ts"),
+    )
+    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", run)
 
     assert probe_stream_height("https://example.test/media.m3u8") == 720
+    assert len(calls) == 2
+    for args in calls:
+        assert "-protocol_whitelist" in args
+        assert args[args.index("-protocol_whitelist") + 1] == "file,pipe"
+        assert not any(str(value).startswith(("http://", "https://")) for value in args)
 
 
 def test_parse_config_filters_by_api_host():

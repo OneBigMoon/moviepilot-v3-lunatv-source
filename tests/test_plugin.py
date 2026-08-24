@@ -688,6 +688,120 @@ def test_global_media_search_keeps_each_ambiguous_range_season(monkeypatch):
     assert all(item["season_ambiguous"] is True for item in cards)
 
 
+def test_season_media_cards_are_not_order_dependent_when_precise_row_exists():
+    ambiguous = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="bundle",
+        title="示例剧",
+        year="2024",
+        media_type="tv",
+        remark="",
+        episodes=(),
+        season_range=(1, 1),
+        season_ambiguous=True,
+    )
+    precise = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="episode-1",
+        title="示例剧",
+        year="2024",
+        media_type="tv",
+        remark="",
+        episodes=(
+            CmsEpisode(1, 1, "第1集", "https://video.example/s01e01.m3u8"),
+        ),
+        season_range=(0, 0),
+        season_ambiguous=False,
+    )
+
+    for rows in ([ambiguous, precise], [precise, ambiguous]):
+        cards = LunaTVSource._season_media_cards(rows)
+
+        assert len(cards) == 1
+        assert cards[0].season_ambiguous is False
+        assert [(item.season, item.episode) for item in cards[0].episodes] == [(1, 1)]
+
+
+def test_quality_cache_prunes_expired_entries_and_enforces_capacity(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(plugin_module, "probe_stream_height", lambda *_args, **_kwargs: 1080)
+    plugin._quality_cache = {
+        "expired": (0.0, 1080),
+        **{
+            f"https://video.example/{index}.m3u8": (999.0 - index / 10000, 1080)
+            for index in range(plugin_module._QUALITY_CACHE_MAX_ENTRIES + 20)
+        },
+    }
+
+    assert plugin._probe_quality("https://video.example/new.m3u8") == 1080
+    assert "expired" not in plugin._quality_cache
+    assert len(plugin._quality_cache) <= plugin_module._QUALITY_CACHE_MAX_ENTRIES
+
+
+def test_quality_probe_passes_explicit_private_network_allowlist(monkeypatch):
+    captured = {}
+
+    def probe(*_args, **kwargs):
+        captured.update(kwargs)
+        return 1080
+
+    plugin = LunaTVSource()
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "probe_allowed_private_ranges": "10.0.0.0/8, 192.168.0.0/16",
+        }
+    )
+    monkeypatch.setattr(plugin_module, "probe_stream_height", probe)
+
+    assert plugin._probe_quality("http://10.0.0.8/video.m3u8") == 1080
+    assert captured["allowed_private_ranges"] == (
+        "10.0.0.0/8",
+        "192.168.0.0/16",
+    )
+
+
+def test_resource_search_cache_prunes_expired_entries_and_enforces_capacity():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    plugin._resource_search_cache = {
+        "expired": (0.0, []),
+        **{
+            f"fresh-{index}": (999.0 - index / 10000, [])
+            for index in range(plugin_module._RESOURCE_SEARCH_CACHE_MAX_ENTRIES + 20)
+        },
+    }
+
+    plugin._prune_resource_search_cache(1000.0)
+
+    assert "expired" not in plugin._resource_search_cache
+    assert (
+        len(plugin._resource_search_cache)
+        <= plugin_module._RESOURCE_SEARCH_CACHE_MAX_ENTRIES
+    )
+
+
+def test_tmdb_cache_enforces_capacity_and_keeps_latest_entry():
+    plugin = LunaTVSource()
+    plugin._tmdb_cache = {
+        f"old-{index}": {"status": "matched", "media_id": str(index)}
+        for index in range(plugin_module._TMDB_CACHE_MAX_ENTRIES + 20)
+    }
+
+    plugin._store_tmdb_cache_entry(
+        "latest",
+        {"status": "matched", "media_id": "latest"},
+    )
+
+    assert len(plugin._tmdb_cache) == plugin_module._TMDB_CACHE_MAX_ENTRIES
+    assert "old-0" not in plugin._tmdb_cache
+    assert plugin._tmdb_cache["latest"]["media_id"] == "latest"
+
+
 def test_media_info_keeps_precise_episode_details_outside_search_projection(monkeypatch):
     monkeypatch.setattr(plugin_module, "_schemas", None)
     result = CmsResult(

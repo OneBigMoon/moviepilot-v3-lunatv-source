@@ -121,6 +121,11 @@ except Exception:  # pragma: no cover - standalone tests
     _HostMediaChain = None
     _HostMetaInfo = None
 
+try:  # Runtime security exception shared with MoviePilot's outbound URL policy.
+    from app.application.configuration import get_runtime_settings as _get_runtime_settings
+except Exception:  # pragma: no cover - standalone tests
+    _get_runtime_settings = None
+
 
 LOGGER = logging.getLogger("LunaTVSource")
 
@@ -137,6 +142,10 @@ DEFAULT_SOURCE_ALLOWLIST = (
     "ukuzy0.com,api.ukuapi88.com,www.xinlangzy.com,xinlangapi.com,okzyw.cc"
 )
 PLUGIN_MEDIA_SOURCE = "lunatv"
+_TMDB_CACHE_MAX_ENTRIES = 512
+_QUALITY_CACHE_MAX_ENTRIES = 512
+_RESOURCE_SEARCH_CACHE_MAX_ENTRIES = 128
+_RESOURCE_SEARCH_CACHE_TTL = 30.0
 
 
 # MoviePilot 3.0.0 returns before module resource providers are called when no
@@ -374,7 +383,10 @@ class LunaTVSource(_PluginBase):
             on_complete=self._record_completion,
         )
         with self._tmdb_cache_lock:
-            self._tmdb_cache = dict(self.get_data("tmdb_match_cache_v1") or {})
+            loaded_tmdb_cache = dict(self.get_data("tmdb_match_cache_v1") or {})
+            self._tmdb_cache = dict(
+                list(loaded_tmdb_cache.items())[-_TMDB_CACHE_MAX_ENTRIES:]
+            )
         with self._resource_search_lock:
             self._resource_search_cache = {}
         if self._enabled:
@@ -475,6 +487,16 @@ class LunaTVSource(_PluginBase):
                             "model": "source_allowlist",
                             "label": "启用资源站（逗号分隔）",
                             "placeholder": DEFAULT_SOURCE_ALLOWLIST,
+                        },
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "probe_allowed_private_ranges",
+                            "label": "清晰度探测允许网段（可选）",
+                            "placeholder": "10.0.0.0/8,192.168.0.0/16",
+                            "hint": "默认拒绝内网播放地址；仅当可信 CMS 返回内网媒体时填写 CIDR。",
+                            "persistentHint": True,
                         },
                     },
                     {
@@ -595,6 +617,7 @@ class LunaTVSource(_PluginBase):
             "enabled": False,
             "config_url": DEFAULT_CONFIG_URL,
             "source_allowlist": "",
+            "probe_allowed_private_ranges": "",
             "mode": "download",
             "source_strategy": "first",
             "download_root": "",
@@ -634,6 +657,16 @@ class LunaTVSource(_PluginBase):
                         },
                     },
                     {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "probe_allowed_private_ranges",
+                            "label": "清晰度探测允许网段（可选）",
+                            "placeholder": "10.0.0.0/8,192.168.0.0/16",
+                            "hint": "默认拒绝内网播放地址；仅当可信 CMS 返回内网媒体时填写 CIDR。",
+                            "persistentHint": True,
+                        },
+                    },
+                    {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
@@ -647,6 +680,7 @@ class LunaTVSource(_PluginBase):
             "enabled": False,
             "config_url": DEFAULT_CONFIG_URL,
             "source_allowlist": "",
+            "probe_allowed_private_ranges": "",
             "source_strategy": "first",
             "download_root": "",
             "use_moviepilot_dirs": True,
@@ -952,9 +986,17 @@ class LunaTVSource(_PluginBase):
                 key = (result.source_key, result.source_name, title, result.year, season)
                 group = groups.get(key)
                 if group is None:
-                    group = {"result": result, "episodes": {}}
+                    group = {
+                        "result": result,
+                        "episodes": {},
+                        "season_ambiguous": bool(result.season_ambiguous),
+                    }
                     groups[key] = group
                     order.append(("group", key))
+                else:
+                    group["season_ambiguous"] = bool(
+                        group["season_ambiguous"] and result.season_ambiguous
+                    )
                 for episode in result.episodes:
                     if season and (not episode.season_known or episode.season != season):
                         continue
@@ -990,7 +1032,7 @@ class LunaTVSource(_PluginBase):
                     episodes=episodes,
                     detail=base.detail,
                     season_range=(season, season) if season else (0, 0),
-                    season_ambiguous=base.season_ambiguous,
+                    season_ambiguous=bool(group["season_ambiguous"]),
                 )
             )
         return cards
@@ -1136,9 +1178,7 @@ class LunaTVSource(_PluginBase):
                 candidates = self._search_tmdb_candidates(query, result.year, result.media_type)
                 if candidates:
                     association["candidates"] = candidates
-                    with self._tmdb_cache_lock:
-                        self._tmdb_cache[cache_key] = dict(association)
-                        self.save_data("tmdb_match_cache_v1", dict(self._tmdb_cache))
+                    self._store_tmdb_cache_entry(cache_key, association)
             return association
         if _HostMediaChain is None or _HostMetaInfo is None or self._tmdb_source() is None:
             return {"status": "unavailable", "query": query}
@@ -1180,10 +1220,22 @@ class LunaTVSource(_PluginBase):
         except Exception as exc:
             self._logger.debug("TMDB 默认关联失败 title=%s: %s", query, exc)
             association = {"status": "error", "query": query, "message": str(exc)}
-        with self._tmdb_cache_lock:
-            self._tmdb_cache[cache_key] = dict(association)
-            self.save_data("tmdb_match_cache_v1", dict(self._tmdb_cache))
+        self._store_tmdb_cache_entry(cache_key, association)
         return association
+
+    def _store_tmdb_cache_entry(
+        self,
+        cache_key: str,
+        association: Dict[str, Any],
+    ) -> None:
+        with self._tmdb_cache_lock:
+            self._tmdb_cache.pop(cache_key, None)
+            self._tmdb_cache[cache_key] = dict(association)
+            overflow = len(self._tmdb_cache) - _TMDB_CACHE_MAX_ENTRIES
+            for key in list(self._tmdb_cache)[:max(0, overflow)]:
+                self._tmdb_cache.pop(key, None)
+            snapshot = dict(self._tmdb_cache)
+        self.save_data("tmdb_match_cache_v1", snapshot)
 
     @staticmethod
     def _media_candidate(media: Any) -> Optional[Dict[str, Any]]:
@@ -2366,6 +2418,7 @@ class LunaTVSource(_PluginBase):
 
         now = time.monotonic()
         with self._quality_cache_lock:
+            self._prune_quality_cache(now)
             cached = self._quality_cache.get(url)
             if cached and now - cached[0] < (3600 if cached[1] else 300):
                 return cached[1]
@@ -2377,10 +2430,64 @@ class LunaTVSource(_PluginBase):
             url,
             ffmpeg_path=str(self._config.get("ffmpeg_path") or "ffmpeg"),
             timeout=timeout,
+            allowed_private_ranges=self._probe_allowed_private_ranges(),
         )
         with self._quality_cache_lock:
             self._quality_cache[url] = (time.monotonic(), height)
+            self._prune_quality_cache(time.monotonic())
         return height
+
+    def _probe_allowed_private_ranges(self) -> Tuple[str, ...]:
+        configured = self._config.get("probe_allowed_private_ranges")
+        if not configured and _get_runtime_settings is not None:
+            try:
+                configured = _get_runtime_settings().get(
+                    "IMAGE_PROXY_ALLOWED_PRIVATE_RANGES",
+                    [],
+                )
+            except Exception:
+                configured = []
+        if isinstance(configured, str):
+            values = re.split(r"[,;\s]+", configured)
+        elif isinstance(configured, (list, tuple, set)):
+            values = list(configured)
+        else:
+            values = []
+        return tuple(str(value).strip() for value in values if str(value).strip())
+
+    def _prune_quality_cache(self, now: float) -> None:
+        expired = [
+            key
+            for key, (created_at, height) in self._quality_cache.items()
+            if now - created_at >= (3600 if height else 300)
+        ]
+        for key in expired:
+            self._quality_cache.pop(key, None)
+        overflow = len(self._quality_cache) - _QUALITY_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(
+                self._quality_cache,
+                key=lambda key: self._quality_cache[key][0],
+            )[:overflow]
+            for key in oldest:
+                self._quality_cache.pop(key, None)
+
+    def _prune_resource_search_cache(self, now: float) -> None:
+        expired = [
+            key
+            for key, (created_at, _) in self._resource_search_cache.items()
+            if now - created_at >= _RESOURCE_SEARCH_CACHE_TTL
+        ]
+        for key in expired:
+            self._resource_search_cache.pop(key, None)
+        overflow = len(self._resource_search_cache) - _RESOURCE_SEARCH_CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(
+                self._resource_search_cache,
+                key=lambda key: self._resource_search_cache[key][0],
+            )[:overflow]
+            for key in oldest:
+                self._resource_search_cache.pop(key, None)
 
     def _probe_resource_urls(self, urls: List[str]) -> Dict[str, int]:
         unique_urls = list(dict.fromkeys(url for url in urls if url))
@@ -2445,8 +2552,9 @@ class LunaTVSource(_PluginBase):
         )
         now = time.monotonic()
         with self._resource_search_lock:
+            self._prune_resource_search_cache(now)
             cached = self._resource_search_cache.get(cache_key)
-            if cached and now - cached[0] < 30:
+            if cached and now - cached[0] < _RESOURCE_SEARCH_CACHE_TTL:
                 return list(cached[1])
 
         # 第三方 CMS、AI 与 TMDB 请求可能较慢，不能在请求期间占用缓存锁；
@@ -2746,6 +2854,7 @@ class LunaTVSource(_PluginBase):
         torrents.sort(key=lambda item: int(getattr(item, "pri_order", 0) or 0), reverse=True)
         with self._resource_search_lock:
             self._resource_search_cache[cache_key] = (time.monotonic(), torrents)
+            self._prune_resource_search_cache(time.monotonic())
         return list(torrents)
 
     def search_torrents(
