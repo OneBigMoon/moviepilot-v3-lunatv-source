@@ -121,12 +121,6 @@ except Exception:  # pragma: no cover - standalone tests
     _HostMediaChain = None
     _HostMetaInfo = None
 
-try:  # Runtime security exception shared with MoviePilot's outbound URL policy.
-    from app.application.configuration import get_runtime_settings as _get_runtime_settings
-except Exception:  # pragma: no cover - standalone tests
-    _get_runtime_settings = None
-
-
 LOGGER = logging.getLogger("LunaTVSource")
 
 
@@ -2439,14 +2433,6 @@ class LunaTVSource(_PluginBase):
 
     def _probe_allowed_private_ranges(self) -> Tuple[str, ...]:
         configured = self._config.get("probe_allowed_private_ranges")
-        if not configured and _get_runtime_settings is not None:
-            try:
-                configured = _get_runtime_settings().get(
-                    "IMAGE_PROXY_ALLOWED_PRIVATE_RANGES",
-                    [],
-                )
-            except Exception:
-                configured = []
         if isinstance(configured, str):
             values = re.split(r"[,;\s]+", configured)
         elif isinstance(configured, (list, tuple, set)):
