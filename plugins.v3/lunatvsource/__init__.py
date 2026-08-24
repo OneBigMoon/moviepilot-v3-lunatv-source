@@ -1637,8 +1637,26 @@ class LunaTVSource(_PluginBase):
                 str(payload.get("year") or ""),
                 str(payload.get("media_type") or ""),
             )
-            results = self._client().search(search_query, stop_after_first_source=True)
-            return {"success": True, "data": [self._result_payload(item) for item in results]}
+            results = self._season_media_cards(
+                self._client().search(search_query, stop_after_first_source=True)
+            )
+            data = []
+            for result in results:
+                item = self._result_payload(result)
+                if result.media_type == "tv":
+                    seasons = sorted(
+                        {
+                            int(episode.season or 1)
+                            for episode in result.episodes
+                            if episode.season_known
+                        }
+                    )
+                    if len(seasons) == 1:
+                        item["title"] = (
+                            f"{normalize_media_title(result.title)} · 第{seasons[0]}季"
+                        )
+                data.append(item)
+            return {"success": True, "data": data}
         except Exception as exc:
             self._logger.warning("LunaTV search failed: %s", exc)
             return {"success": False, "message": f"搜索失败：{exc}", "data": []}
@@ -1743,7 +1761,8 @@ class LunaTVSource(_PluginBase):
         return {"success": True, "message": "已加入串行下载队列", "data": {"task_id": task.task_id}}
 
     def _record_completion(self, task: DownloadTask, output: str) -> None:
-        organize_state = self._native_transfer(task, output)
+        if self._config.get("moviepilot_organize", True):
+            self._native_transfer(task, output)
         # 下载历史始终记录 ffmpeg 的原始产物。若原生整理成功，TransferChain
         # 会自行记录 TransferHistory；这里不能把整理目标伪装成下载源文件。
         self._record_native_history(task, output)

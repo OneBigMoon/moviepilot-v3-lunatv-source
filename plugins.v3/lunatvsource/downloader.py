@@ -469,10 +469,6 @@ class DownloadQueue:
             task.output = output
             task.completed_at = current.completed_at
             self._write(tasks)
-            self._running = False
-            self._current_task_id = ""
-            self._control_action = ""
-            self._control_event.clear()
         if self._on_complete is not None:
             try:
                 self._on_complete(task, output)
@@ -480,6 +476,11 @@ class DownloadQueue:
                 # History/host integration must never turn a completed file
                 # into a failed download.
                 pass
+        with self._lock:
+            self._running = False
+            self._current_task_id = ""
+            self._control_action = ""
+            self._control_event.clear()
         self._notify("LunaTV 已完成", self._notification_text(task))
         return {"processed": 1, "task_id": task.task_id, "state": "completed", "output": output}
 
