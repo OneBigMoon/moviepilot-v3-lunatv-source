@@ -139,3 +139,81 @@ def test_search_tv_resources_are_season_cards_and_download_runs_episodes_seriall
         (1, "https://video.example/1080-e1.m3u8"),
         (2, "https://video.example/1080-e2.m3u8"),
     ]
+
+
+def test_long_season_cards_probe_every_episode_and_keep_full_hd_download(
+    monkeypatch, tmp_path: Path
+):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    mixed_urls = [
+        f"https://video.example/mixed-{'480' if episode == 2 else '1080'}-e{episode}.m3u8"
+        for episode in range(1, 7)
+    ]
+    full_hd_urls = [
+        f"https://video.example/full-1080-e{episode}.m3u8"
+        for episode in range(1, 7)
+    ]
+    mixed = _result_from_item(
+        source,
+        {
+            "vod_id": "season-mixed",
+            "vod_name": "长季剧",
+            "type_name": "电视剧",
+            "vod_play_url": "#".join(
+                f"第{episode}集${url}" for episode, url in enumerate(mixed_urls, start=1)
+            ),
+        },
+    )
+    full_hd = _result_from_item(
+        source,
+        {
+            "vod_id": "season-full-hd",
+            "vod_name": "长季剧",
+            "type_name": "电视剧",
+            "vod_play_url": "#".join(
+                f"第{episode}集${url}"
+                for episode, url in enumerate(full_hd_urls, start=1)
+            ),
+        },
+    )
+    plugin = _configured_plugin(monkeypatch, [mixed, full_hd])
+    probed_urls = []
+
+    def probe(url, *_args, **_kwargs):
+        probed_urls.append(url)
+        return 480 if "mixed-480-e2" in url else 1080
+
+    monkeypatch.setattr(plugin_module, "probe_stream_height", probe)
+
+    resources = plugin.search_torrents(
+        {"id": "demo"}, "长季剧", mtype="电视剧"
+    )
+
+    assert [item.pri_order for item in resources] == [1080, 480]
+    assert [item.title for item in resources] == [
+        "长季剧 · 第1季 · 1080P",
+        "长季剧 · 第1季 · 480P",
+    ]
+    assert all("抽样" not in item.description for item in resources)
+    assert all("全6集实测" in item.description for item in resources)
+    assert sorted(probed_urls) == sorted(mixed_urls + full_hd_urls)
+
+    full_hd_payload = plugin._decode_resource_token(resources[0].enclosure)
+    mixed_payload = plugin._decode_resource_token(resources[1].enclosure)
+    assert full_hd_payload["resolution_scope"] == "full"
+    assert full_hd_payload["resolution_probed_episode_count"] == 6
+    assert mixed_payload["resolution_height"] == 480
+    assert [episode["resolution_height"] for episode in mixed_payload["episodes"]] == [
+        1080,
+        480,
+        1080,
+        1080,
+        1080,
+        1080,
+    ]
+    assert all("480" not in episode["url"] for episode in full_hd_payload["episodes"])
+
+    result = plugin.download(resources[0].enclosure, tmp_path)
+
+    assert result[0] == "LunaTVSource"
+    assert all("480" not in task.url for task in plugin._queue._read())

@@ -1085,8 +1085,8 @@ def test_resource_torrents_choose_highest_url_for_conflicting_episode(monkeypatc
         for episode in payload["episodes"]
     ] == [("1080P", 1080), ("480P", 480)]
     assert payload["resolution_scope"] == "full"
-    assert payload["resolution_sample_count"] == 2
-    assert payload["resolution_sampled_episodes"] == [1, 2]
+    assert payload["resolution_probed_episode_count"] == 2
+    assert payload["resolution_probed_episodes"] == [1, 2]
     assert "https://video.example/480-e2.m3u8" in probed
 
 
@@ -1137,7 +1137,7 @@ def test_resource_torrents_marks_season_unknown_when_any_episode_probe_fails(mon
     ] == [("1080P", 1080), ("未知", 0)]
 
 
-def test_resource_torrents_samples_large_seasons_at_first_middle_and_last(monkeypatch):
+def test_resource_torrents_probes_all_episodes_in_large_seasons(monkeypatch):
     class TorrentInfo:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -1149,7 +1149,7 @@ def test_resource_torrents_samples_large_seasons_at_first_middle_and_last(monkey
         def search(self, *_args, **_kwargs):
             return [self._result]
 
-    for count, expected_episodes in ((52, [1, 27, 52]), (208, [1, 105, 208])):
+    for count in (52, 208):
         result = CmsResult(
             source_key=f"sample-{count}",
             source_name="抽样源",
@@ -1183,30 +1183,27 @@ def test_resource_torrents_samples_large_seasons_at_first_middle_and_last(monkey
 
         item = plugin._resource_torrents(f"抽样剧{count}")[0]
         payload = plugin._decode_resource_token(item.enclosure)
+        expected_episodes = list(range(1, count + 1))
         expected_urls = [
             f"https://video.example/sample-{count}-e{episode}.m3u8"
             for episode in expected_episodes
         ]
 
         assert [urls for urls in probe_calls if urls] == [expected_urls]
-        assert len(expected_urls) <= 3
+        assert len(expected_urls) == count
         assert item.pri_order == 1080
-        assert "抽样3集实测" in item.description
-        assert payload["resolution_scope"] == "sampled"
-        assert payload["resolution_sample_count"] == 3
-        assert payload["resolution_sampled_episodes"] == expected_episodes
+        assert f"全{count}集实测" in item.description
+        assert payload["resolution_scope"] == "full"
+        assert payload["resolution_probed_episode_count"] == count
+        assert payload["resolution_probed_episodes"] == expected_episodes
         assert [
             (payload["episodes"][episode - 1]["resolution"],
              payload["episodes"][episode - 1]["resolution_height"])
             for episode in expected_episodes
-        ] == [("1080P", 1080)] * 3
-        assert (
-            payload["episodes"][1]["resolution"],
-            payload["episodes"][1]["resolution_height"],
-        ) == ("未探测", 0)
+        ] == [("1080P", 1080)] * count
 
 
-def test_resource_torrents_probes_all_conflicts_and_marks_large_samples(monkeypatch):
+def test_resource_torrents_probes_all_conflicts_and_large_seasons(monkeypatch):
     class TorrentInfo:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -1293,14 +1290,14 @@ def test_resource_torrents_probes_all_conflicts_and_marks_large_samples(monkeypa
     assert payload["resolution"] == "未知"
     assert payload["resolution_height"] == item.pri_order == 0
     assert "未知" in item.title
-    assert "抽样3集实测" in item.description
-    assert payload["resolution_scope"] == "sampled"
-    assert payload["resolution_sample_count"] == 3
-    assert payload["resolution_sampled_episodes"] == [1, 27, 52]
+    assert "全52集实测" in item.description
+    assert payload["resolution_scope"] == "full"
+    assert payload["resolution_probed_episode_count"] == 52
+    assert payload["resolution_probed_episodes"] == list(range(1, 53))
     assert (
         payload["episodes"][1]["resolution"],
         payload["episodes"][1]["resolution_height"],
-    ) == ("未探测", 0)
+    ) == ("720P", 720)
     assert (
         payload["episodes"][26]["resolution"],
         payload["episodes"][26]["resolution_height"],

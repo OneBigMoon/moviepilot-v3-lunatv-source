@@ -2729,27 +2729,22 @@ class LunaTVSource(_PluginBase):
         for row in single_rows:
             row["probe_url"] = row["payload"]["url"]
 
-        sampled_urls: List[str] = []
+        season_probe_urls: List[str] = []
         for group in group_rows:
-            group_episodes = group["sorted_episodes"]
-            sample_indexes = (
-                range(len(group_episodes))
-                if len(group_episodes) <= 5
-                else (0, len(group_episodes) // 2, len(group_episodes) - 1)
+            season_probe_urls.extend(
+                episode["url"]
+                for episode in group["sorted_episodes"]
+                if episode["url"]
             )
-            seen_sample_urls: set[str] = set()
-            for index in sample_indexes:
-                episode = group_episodes[index]
-                url = episode["url"]
-                if not url or url in seen_sample_urls:
-                    continue
-                seen_sample_urls.add(url)
-                sampled_urls.append(url)
 
         quality_heights = dict(conflict_heights)
         quality_heights.update(
             self._probe_resource_urls(
-                [url for url in dict.fromkeys(sampled_urls) if url not in quality_heights]
+                [
+                    url
+                    for url in dict.fromkeys(season_probe_urls)
+                    if url not in quality_heights
+                ]
             )
         )
         quality_heights.update(
@@ -2762,27 +2757,19 @@ class LunaTVSource(_PluginBase):
             )
         )
 
-        season_probed_urls = set(conflict_probe_urls)
-        season_probed_urls.update(sampled_urls)
         for group in group_rows:
             episode_heights: List[int] = []
-            sampled_episodes: List[int] = []
+            probed_episodes: List[int] = []
             for episode in group["sorted_episodes"]:
-                if episode["url"] in season_probed_urls:
-                    episode_height = quality_heights.get(episode["url"], 0)
-                    episode["resolution"] = stream_quality_label(episode_height)
-                    episode["resolution_height"] = episode_height
-                    episode_heights.append(episode_height)
-                    sampled_episodes.append(int(episode["episode"]))
-                else:
-                    episode["resolution"] = "未探测"
-                    episode["resolution_height"] = 0
+                episode_height = quality_heights.get(episode["url"], 0)
+                episode["resolution"] = stream_quality_label(episode_height)
+                episode["resolution_height"] = episode_height
+                episode_heights.append(episode_height)
+                probed_episodes.append(int(episode["episode"]))
             group["resolution_height"] = min(episode_heights, default=0)
-            group["resolution_scope"] = (
-                "full" if len(group["sorted_episodes"]) <= 5 else "sampled"
-            )
-            group["resolution_sample_count"] = len(sampled_episodes)
-            group["resolution_sampled_episodes"] = sampled_episodes
+            group["resolution_scope"] = "full"
+            group["resolution_probed_episode_count"] = len(probed_episodes)
+            group["resolution_probed_episodes"] = probed_episodes
 
         torrents: List[Any] = []
         for group in group_rows:
@@ -2797,19 +2784,15 @@ class LunaTVSource(_PluginBase):
             payload["resolution"] = quality
             payload["resolution_height"] = height
             payload["resolution_scope"] = group["resolution_scope"]
-            payload["resolution_sample_count"] = group["resolution_sample_count"]
-            payload["resolution_sampled_episodes"] = group[
-                "resolution_sampled_episodes"
+            payload["resolution_probed_episode_count"] = group[
+                "resolution_probed_episode_count"
             ]
+            payload["resolution_probed_episodes"] = group["resolution_probed_episodes"]
             title = group["title"]
             if group["year"]:
                 title = f"{title} ({group['year']})"
             title = f"{title} · 第{season}季 · {quality}"
-            measurement = (
-                f"全{count}集实测"
-                if group["resolution_sample_count"] == count
-                else f"抽样{group['resolution_sample_count']}集实测"
-            )
+            measurement = f"全{count}集实测"
             torrents.append(torrent_info_type(
                 site_name=group["site_name"],
                 title=title,
