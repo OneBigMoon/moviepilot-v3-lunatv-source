@@ -29,7 +29,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.44"
+    expected_version = "0.4.45"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -38,6 +38,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.45"] == (
+        "修复双引擎发布阶段的容器、缓存和权限边界：N_m3u8DL-RE 固定混流 MP4，"
+        "VSD 删除任务时清理阶段目录，跨文件系统移动保留源文件权限。"
+    )
     assert history["0.4.44"] == (
         "电视剧整季资源改为每个来源只抽测一个代表集，并移除全季实测提示；"
         "接入受管 N_m3u8DL-RE 与 VSD 双引擎，失败时回退 ffmpeg，支持缓存续传、进度、暂停与安全清理；"
