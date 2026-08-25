@@ -29,7 +29,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.45"
+    expected_version = "0.4.46"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -38,6 +38,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.46"] == (
+        "将受管二进制真实性校验改为代码内固定可执行摘要，阻断程序与可写清单同时篡改；"
+        "完善 POSIX 进程组有界终止，确保 leader 退出后仍清理残留子进程。"
+    )
     assert history["0.4.45"] == (
         "修复双引擎发布阶段的容器、缓存和权限边界：N_m3u8DL-RE 固定混流 MP4，"
         "VSD 删除任务时清理阶段目录，跨文件系统移动保留源文件权限。"

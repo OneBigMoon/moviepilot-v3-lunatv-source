@@ -328,8 +328,10 @@ def test_terminate_escalates_to_sigkill_when_group_lingers(monkeypatch) -> None:
             self.terminated = False
             self.killed = False
             self.wait_calls = 0
+            self.poll_calls = 0
 
         def poll(self):
+            self.poll_calls += 1
             return None
 
         def terminate(self) -> None:
@@ -376,6 +378,7 @@ def test_terminate_escalates_to_sigkill_when_group_lingers(monkeypatch) -> None:
     assert process.terminated is False
     assert process.killed is False
     assert process.wait_calls == 0
+    assert process.poll_calls > 0
 
 
 def test_engine_cancellation_prevents_binary_install(monkeypatch, tmp_path: Path):

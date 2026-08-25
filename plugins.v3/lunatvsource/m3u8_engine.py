@@ -694,7 +694,7 @@ class _BaseM3U8Engine:
                     return False
                 if error.errno == errno.EPERM:
                     return True
-                return False
+                return True
 
         def _signal_group(signal_number: int) -> bool:
             if os.name != "posix":
@@ -714,6 +714,9 @@ class _BaseM3U8Engine:
         def _wait_group(deadline: float) -> bool:
             """Return True when group is gone before deadline."""
             while True:
+                # Reap the session leader when it exits; otherwise a zombie
+                # can keep killpg(..., 0) reporting the group as alive.
+                process.poll()
                 if not _group_exists(process.pid):
                     return True
                 if time.monotonic() >= deadline:
