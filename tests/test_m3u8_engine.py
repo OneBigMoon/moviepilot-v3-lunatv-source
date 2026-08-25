@@ -289,20 +289,39 @@ def test_terminate_uses_process_group_even_if_leader_exited(monkeypatch) -> None
         def wait(self, timeout: float | None = None) -> None:
             self.waited += 1
 
+    monotonic_state = {"value": 0.0}
+
+    def fake_monotonic() -> float:
+        value = monotonic_state["value"]
+        monotonic_state["value"] += 0.1
+        return value
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
     seen: list[int] = []
 
     def fake_killpg(_pid: int, signal_number: int) -> None:
         seen.append(signal_number)
+        if signal_number == 0:
+            raise ProcessLookupError(3, "disappeared")
 
     process = FakeProcess()
+    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.sleep", fake_sleep)
     monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", fake_killpg)
+
     N_m3u8DLEngine._terminate(process)
-    assert seen == [signal.SIGTERM]
+
+    assert seen == [signal.SIGTERM, 0]
     assert process.terminated is False
     assert process.killed is False
+    assert sleep_calls == []
 
 
-def test_terminate_escalates_to_sigkill(monkeypatch) -> None:
+def test_terminate_escalates_to_sigkill_when_group_lingers(monkeypatch) -> None:
     class FakeProcess:
         def __init__(self) -> None:
             self.pid = 333
@@ -324,17 +343,41 @@ def test_terminate_escalates_to_sigkill(monkeypatch) -> None:
             raise subprocess.TimeoutExpired("cmd", timeout if timeout is not None else 0)
 
     seen: list[int] = []
+    monotonic_state = {"value": 0.0}
+    kill_state = {"sigkill": False}
+
+    def fake_monotonic() -> float:
+        value = monotonic_state["value"]
+        monotonic_state["value"] += 0.25
+        return value
+
+    def fake_sleep(seconds: float) -> None:
+        pass
 
     def fake_killpg(_pid: int, signal_number: int) -> None:
         seen.append(signal_number)
+        if signal_number == signal.SIGTERM:
+            return
+        if signal_number == signal.SIGKILL:
+            kill_state["sigkill"] = True
+        if signal_number == 0 and kill_state["sigkill"]:
+            raise ProcessLookupError(3, "disappeared")
 
     process = FakeProcess()
+    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.sleep", fake_sleep)
     monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", fake_killpg)
+
     N_m3u8DLEngine._terminate(process)
-    assert seen == [signal.SIGTERM, signal.SIGKILL]
+
+    assert seen[0] == signal.SIGTERM
+    assert signal.SIGKILL in seen
+    assert seen.count(signal.SIGKILL) == 1
     assert process.terminated is False
     assert process.killed is False
-    assert process.wait_calls == 2
+    assert process.wait_calls == 0
+
+
 def test_engine_cancellation_prevents_binary_install(monkeypatch, tmp_path: Path):
     engine = N_m3u8DLEngine(tmp_path)
     control_event = threading.Event()

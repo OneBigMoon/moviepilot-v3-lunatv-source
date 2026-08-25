@@ -677,39 +677,67 @@ class _BaseM3U8Engine:
     @staticmethod
     def _terminate(process: subprocess.Popen[str]) -> None:
         """Terminate engine and, on POSIX, its entire process group."""
-        process_exited = process.poll() is not None
+        _TERMINATE_WINDOW_SECONDS = 5.0
+        _TERMINATE_POLL_SECONDS = 0.1
 
-        def signal_group(signal_number: int) -> bool:
+        def _group_exists(pgid: int) -> bool:
+            """Return True when process group still exists."""
+            if os.name != "posix":
+                return True
+            try:
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except OSError as error:
+                if error.errno == errno.ESRCH:
+                    return False
+                if error.errno == errno.EPERM:
+                    return True
+                return False
+
+        def _signal_group(signal_number: int) -> bool:
             if os.name != "posix":
                 return False
             try:
                 os.killpg(process.pid, signal_number)
                 return True
-            except (AttributeError, OSError, ProcessLookupError):
+            except (AttributeError, ProcessLookupError):
+                return False
+            except OSError as error:
+                if error.errno == errno.ESRCH:
+                    return False
+                if error.errno == errno.EPERM:
+                    return True
                 return False
 
-        if not signal_group(signal.SIGTERM):
-            if not process_exited:
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
-        try:
-            process.wait(timeout=5)
-            return
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        def _wait_group(deadline: float) -> bool:
+            """Return True when group is gone before deadline."""
+            while True:
+                if not _group_exists(process.pid):
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(min(_TERMINATE_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
-        if not signal_group(signal.SIGKILL):
-            if not process_exited:
+        if os.name != "posix":
+            try:
+                process.terminate()
+                process.wait(timeout=_TERMINATE_WINDOW_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
                 try:
                     process.kill()
                 except OSError:
                     pass
-        try:
-            process.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+            return
+
+        if _signal_group(signal.SIGTERM):
+            if _wait_group(time.monotonic() + _TERMINATE_WINDOW_SECONDS):
+                return
+        if not _signal_group(signal.SIGKILL):
+            return
+        _wait_group(time.monotonic() + _TERMINATE_WINDOW_SECONDS)
+
 
     @staticmethod
     def _raise_if_cancelled(control_event: Optional[threading.Event]) -> None:
