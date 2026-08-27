@@ -29,7 +29,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.48"
+    expected_version = "0.4.49"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -38,6 +38,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.49"] == (
+        "电视剧原生资源按标准作品、年份和季聚合，同季来源保持清晰度降序并保留整季下载身份；"
+        "插件工作台仅保留状态与配置，不再提供独立搜索旁路；清晰度探测兼容中文 URL 和无扩展名分片。"
+    )
     assert history["0.4.48"] == (
         "修复 LunaTV 资源下载被 MoviePilot 目录白名单提前拦截，现由插件在校验前接管并进入"
         "串行队列；N_m3u8DL-RE 解析 ffmpeg 绝对路径，稳定启用 16 线程下载；受管引擎包"
