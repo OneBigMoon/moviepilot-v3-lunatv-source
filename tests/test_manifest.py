@@ -29,7 +29,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.52"
+    expected_version = "0.4.53"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -38,6 +38,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.53"] == (
+        "插件工作台跟随 MoviePilot/Vuetify 的主题色、深浅色与透明效果，移除 1200px 固定宽度以修复"
+        "宽屏弹窗两侧漏白；构建时过滤共享 Vuetify 基础样式，避免覆盖宿主主题。"
+    )
     assert history["0.4.50"] == (
         "LunaTV 下载队列接入 MoviePilot 原生下载管理，支持进度展示及暂停、继续、删除；"
         "客户端仅在内存中注册且按下载器隔离，未显式配置目录时复用 MoviePilot 本地下载目录。"
@@ -100,6 +104,28 @@ def test_app_page_shows_loading_state_before_empty_sources():
     assert loading_state in app_page
     assert empty_state in app_page
     assert app_page.index(loading_state) < app_page.index(empty_state)
+
+
+def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
+    project_root = Path(__file__).resolve().parents[1]
+    app_page = (
+        project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
+    ).read_text(encoding="utf-8")
+    vite_config = (
+        project_root / "plugins.v3" / "lunatvsource" / "vite.config.js"
+    ).read_text(encoding="utf-8")
+
+    assert "width: 100%" in app_page
+    assert "max-width: none" in app_page
+    assert "rgb(var(--v-theme-background" in app_page
+    assert "rgb(var(--v-theme-primary" in app_page
+    assert "#101018" not in app_page
+    assert "postcssPlugin: 'vuetify-filter'" in vite_config
+    assert not list(
+        (project_root / "plugins.v3" / "lunatvsource" / "dist" / "assets").glob(
+            "__federation_shared_vuetify/styles-*.css"
+        )
+    )
 
 
 def test_config_exposes_and_preserves_single_download_directory():
