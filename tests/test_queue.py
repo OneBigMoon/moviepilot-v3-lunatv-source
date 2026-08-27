@@ -256,7 +256,7 @@ def test_queue_recovers_after_running_state_persistence_failure(tmp_path: Path):
     assert queue.summary()["completed"] == 1
 
 
-def test_queue_wake_during_drain_failure_is_not_lost(tmp_path: Path):
+def test_queue_wake_during_worker_failure_is_not_lost(tmp_path: Path):
     data = {}
     completed = threading.Event()
     queue = DownloadQueue(
@@ -266,9 +266,9 @@ def test_queue_wake_during_drain_failure_is_not_lost(tmp_path: Path):
         on_complete=lambda *_: completed.set(),
     )
     task = DownloadTask(
-        task_id="wake-during-drain-failure",
+        task_id="wake-during-worker-failure",
         source_key="lunatv",
-        media_id="site:wake-during-drain-failure",
+        media_id="site:wake-during-worker-failure",
         title="示例",
         year="2026",
         media_type="movie",
@@ -283,20 +283,20 @@ def test_queue_wake_during_drain_failure_is_not_lost(tmp_path: Path):
     first_attempt = threading.Event()
     release_failure = threading.Event()
     retried = threading.Event()
-    original_drain = queue._drain_until_idle
+    original_run_one = queue.run_one
     attempts = 0
 
-    def flaky_drain() -> None:
+    def flaky_run_one():
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             first_attempt.set()
             assert release_failure.wait(timeout=2)
-            raise RuntimeError("temporary drain failure")
+            raise RuntimeError("temporary worker failure")
         retried.set()
-        original_drain()
+        return original_run_one()
 
-    queue._drain_until_idle = flaky_drain
+    queue.run_one = flaky_run_one
     assert queue.wake() is True
     assert first_attempt.wait(timeout=2)
     assert queue.wake() is True
@@ -305,6 +305,7 @@ def test_queue_wake_during_drain_failure_is_not_lost(tmp_path: Path):
     assert retried.wait(timeout=2)
     assert completed.wait(timeout=2)
     assert queue.summary()["completed"] == 1
+
 
 
 @pytest.mark.parametrize(
@@ -421,7 +422,6 @@ def test_queue_retry_clears_stale_failed_progress(tmp_path: Path):
         url="https://example.test/failed-stale.m3u8",
         root=str(tmp_path),
     )
-
     assert queue.enqueue(task) is True
 
     def fail_download(current_task):
@@ -432,11 +432,25 @@ def test_queue_retry_clears_stale_failed_progress(tmp_path: Path):
     assert queue.run_one()["state"] == "failed"
     assert queue.list_tasks()[0]["progress"] == pytest.approx(0.3846)
 
+    retry_started = threading.Event()
+    release_retry = threading.Event()
+
+    def retry_download(current_task):
+        retry_started.set()
+        assert release_retry.wait(timeout=2)
+        return str(tmp_path / f"{current_task.task_id}.mp4")
+
+    queue._execute = retry_download
     assert queue.retry(task.task_id) is True
+    assert retry_started.wait(timeout=2)
     retried = queue.list_tasks()[0]
-    assert retried["state"] == "pending"
+    assert retried["state"] == "running"
     assert retried["progress"] == 0.0
     assert retried["error"] == ""
+    release_retry.set()
+    assert queue.wait_until_idle(timeout=2)
+    assert queue.list_tasks()[0]["state"] == "completed"
+
 
 
 def test_queue_pause_resume_and_remove_pending_task(tmp_path: Path):
@@ -465,7 +479,7 @@ def test_queue_clears_stale_progress_during_pending_pause_and_resume(tmp_path: P
         task_id="pending-stale",
         source_key="lunatv",
         media_id="site:pending-stale",
-        title="排队示例",
+        title="暂停示例",
         year="2024",
         media_type="movie",
         season=1,
@@ -474,52 +488,73 @@ def test_queue_clears_stale_progress_during_pending_pause_and_resume(tmp_path: P
         root=str(tmp_path),
         progress=0.3846,
     )
-
     assert queue.enqueue(task) is True
     assert queue.pause(task.task_id) is True
     assert queue.list_tasks()[0]["state"] == "paused"
     assert queue.list_tasks()[0]["progress"] == 0.0
 
     data["download_tasks_v1"][0]["progress"] = 0.3846
+    resume_started = threading.Event()
+    release_resume = threading.Event()
+
+    def resumed_download(current_task):
+        resume_started.set()
+        assert release_resume.wait(timeout=2)
+        return str(tmp_path / f"{current_task.task_id}.mp4")
+
+    queue._execute = resumed_download
     assert queue.resume(task.task_id) is True
-    assert queue.list_tasks()[0]["state"] == "pending"
-    assert queue.list_tasks()[0]["progress"] == 0.0
+    assert resume_started.wait(timeout=2)
+    resumed = queue.list_tasks()[0]
+    assert resumed["state"] == "running"
+    assert resumed["progress"] == 0.0
+    release_resume.set()
+    assert queue.wait_until_idle(timeout=2)
+    assert queue.list_tasks()[0]["state"] == "completed"
+
 
 
 def test_queue_safely_pauses_running_task(tmp_path: Path, monkeypatch):
     data = {}
     queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
     task = DownloadTask(
-        task_id="running-control", source_key="lunatv", media_id="site:running",
-        title="示例", year="2026", media_type="movie", season=1, episode=1,
-        url="https://example.test/running.m3u8", root=str(tmp_path),
+        task_id="running-control",
+        source_key="lunatv",
+        media_id="site:running",
+        title="示例",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/running.m3u8",
+        root=str(tmp_path),
     )
     assert queue.enqueue(task) is True
     executing = threading.Event()
 
-    def controlled_ffmpeg(_ffmpeg_path, _url, output, control_event, progress_callback):
+    def controlled_engine(current, output):
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text("partial", encoding="utf-8")
-        assert progress_callback is not None
-        progress_callback(0.3846)
+        queue._update_progress(current.task_id, 0.3846)
         executing.set()
-        assert control_event is not None
-        assert control_event.wait(timeout=2)
+        assert queue._control_event.wait(timeout=2)
         raise downloader_module._QueueControl("controlled")
 
-    monkeypatch.setattr(DownloadQueue, "_run_ffmpeg", staticmethod(controlled_ffmpeg))
+    monkeypatch.setattr(queue, "_run_m3u8_engines", controlled_engine)
     result = {}
     worker = threading.Thread(target=lambda: result.update(queue.run_one()))
     worker.start()
     assert executing.wait(timeout=2)
     assert queue.pause(task.task_id) is True
     worker.join(timeout=2)
+
     assert not worker.is_alive()
     assert result["state"] == "pause"
-    paused_task = queue.list_tasks()[0]
-    assert paused_task["state"] == "paused"
-    assert paused_task["progress"] == 0.0
-    assert list(tmp_path.rglob("*.part")) == []
+    stored = queue.list_tasks()[0]
+    assert stored["state"] == "paused"
+    assert stored["progress"] == 0.0
+    assert not list(tmp_path.rglob("*.part"))
+
 
 
 def test_queue_safely_removes_running_task(tmp_path: Path):
@@ -550,7 +585,7 @@ def test_queue_safely_removes_running_task(tmp_path: Path):
     assert queue.list_tasks() == []
 
 
-def test_queue_persists_active_ffmpeg_progress(tmp_path: Path):
+def test_queue_persists_active_engine_progress(tmp_path: Path):
     data = {}
     queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
     task = DownloadTask(
@@ -569,114 +604,11 @@ def test_queue_persists_active_ffmpeg_progress(tmp_path: Path):
     assert queue.list_tasks()[0]["progress"] == 0.99
 
 
-def test_ffmpeg_uses_hls_http_options_and_mp4_muxer(monkeypatch, tmp_path: Path):
-    captured = {}
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        return type("Completed", (), {"returncode": 0, "stderr": "", "stdout": ""})()
-
-    monkeypatch.setattr(downloader_module.subprocess, "run", fake_run)
-    monkeypatch.setattr(DownloadQueue, "_prepare_hls_input", lambda url, _temp, *_args: url)
-    DownloadQueue._run_ffmpeg("ffmpeg", "https://example.test/video.m3u8", tmp_path / "movie.mp4.part")
-    command = captured["command"]
-    assert command[command.index("-f") + 1] == "mp4"
-    assert command[command.index("-allowed_segment_extensions") + 1] == "ALL"
-    assert command[command.index("-extension_picky") + 1] == "0"
-    assert command[command.index("-seg_max_retry") + 1] == "2"
-    assert command[command.index("-http_persistent") + 1] == "1"
-    assert command[command.index("-http_multiple") + 1] == "1"
-    assert command[command.index("-http_seekable") + 1] == "0"
-    assert "-multiple_requests" not in command
-    assert "-seekable" not in command
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
-def test_run_ffmpeg_materializes_http_playlist_with_hls_http_options(
-    monkeypatch,
-    tmp_path: Path,
-):
-    ffmpeg_path = shutil.which("ffmpeg")
-    assert ffmpeg_path is not None
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    source_playlist = source_dir / "index.m3u8"
-    created = downloader_module.subprocess.run(
-        [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=1000:sample_rate=48000",
-            "-t",
-            "0.25",
-            "-c:a",
-            "aac",
-            "-f",
-            "hls",
-            "-hls_time",
-            "1",
-            "-hls_list_size",
-            "0",
-            str(source_playlist),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert created.returncode == 0, created.stderr
-
-    class SourceHandler(http.server.SimpleHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(source_dir), **kwargs)
-
-        def log_message(self, _format: str, *_args) -> None:
-            return
-
-    source = _LoopbackHTTPServer(("127.0.0.1", 0), SourceHandler)
-    source_thread = threading.Thread(target=source.serve_forever, daemon=True)
-    source_thread.start()
-    captured = {}
-    original_run = downloader_module.subprocess.run
-
-    def capture_run(command, **kwargs):
-        captured["command"] = list(command)
-        return original_run(command, **kwargs)
-
-    monkeypatch.setattr(downloader_module.subprocess, "run", capture_run)
-    output = tmp_path / "output.mp4"
-    try:
-        remote_url = f"http://127.0.0.1:{source.server_address[1]}/index.m3u8"
-        DownloadQueue._run_ffmpeg(ffmpeg_path, remote_url, output)
-    finally:
-        source.shutdown()
-        source.server_close()
-        source_thread.join(timeout=2)
-
-    command = captured["command"]
-    input_url = command[command.index("-i") + 1]
-    assert Path(input_url).name.startswith("playlist-")
-    assert input_url.endswith(".m3u8")
-    assert command[command.index("-http_persistent") + 1] == "1"
-    assert command[command.index("-http_multiple") + 1] == "1"
-    assert command[command.index("-http_seekable") + 1] == "0"
-    assert "-multiple_requests" not in command
-    assert "-seekable" not in command
-    assert output.stat().st_size > 0
 
 
-def test_playlist_duration_estimates_media_playlist_for_progress(tmp_path: Path):
-    playlist = tmp_path / "index.m3u8"
-    playlist.write_text(
-        "#EXTM3U\n#EXTINF:10.5,\nsegment-1.ts\n#EXTINF:12,\nsegment-2.ts\n",
-        encoding="utf-8",
-    )
-    assert DownloadQueue._playlist_duration(playlist) == 22.5
 
 
 def test_mpegts_payload_offset_removes_fake_jpeg_header():
@@ -816,21 +748,26 @@ def test_failed_download_removes_only_new_empty_directories(tmp_path: Path, monk
     root = tmp_path / "incoming"
     root.mkdir()
     task = DownloadTask(
-        task_id="failed-cleanup", source_key="lunatv", media_id="site:4",
-        title="测试电影", year="2026", media_type="movie", season=1, episode=1,
-        url="https://example.test/video.m3u8", root=str(root),
+        task_id="failed-cleanup",
+        source_key="lunatv",
+        media_id="site:4",
+        title="测试电影",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/video.m3u8",
+        root=str(root),
     )
     queue = DownloadQueue(lambda *_: [], lambda *_: None, lambda *_: None)
+    monkeypatch.setattr(queue, "_run_m3u8_engines", lambda *_args, **_kwargs: False)
 
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("source unavailable")
-
-    monkeypatch.setattr(queue, "_run_ffmpeg", fail)
-    with pytest.raises(RuntimeError, match="source unavailable"):
+    with pytest.raises(RuntimeError, match="N_m3u8DL-RE"):
         queue._execute(task)
 
     assert root.exists()
-    assert list(root.iterdir()) == []
+    assert not list(root.iterdir())
+
 
 
 def test_queue_remove_delete_file_flag_and_root_boundary(tmp_path: Path):
@@ -1299,74 +1236,11 @@ def test_queue_remove_running_task_wins_failure_race(tmp_path: Path):
     assert queue.list_tasks() == []
 
 
-def test_queue_m3u8_engine_fallback_order_and_control(monkeypatch, tmp_path: Path):
-    playlist = tmp_path / "input.m3u8"
-    playlist.write_text("#EXTM3U\n#EXTINF:1,\nsegment.ts\n", encoding="utf-8")
-
-    class Engine:
-        def __init__(self, name: str, outcome: str, calls: list[str]):
-            self.name = name
-            self.outcome = outcome
-            self.calls = calls
-
-        def download(self, _url, output, **_kwargs):
-            self.calls.append(self.name)
-            if self.outcome == "error":
-                raise downloader_module.M3U8EngineError(self.name)
-            if self.outcome == "cancel":
-                raise downloader_module.M3U8EngineCancelled(self.name)
-            output.write_bytes(b"engine media")
-            return output
-
-        def cleanup_task(self, *_args):
-            return None
-
-    def execute(outcomes: tuple[str, str]):
-        data = {}
-        calls: list[str] = []
-        queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None, data_path=tmp_path / "data")
-        queue._m3u8_engines = (
-            Engine("n_m3u8dl", outcomes[0], calls),
-            Engine("vsd", outcomes[1], calls),
-        )
-        monkeypatch.setattr(queue, "_prepare_hls_input", lambda *_args: str(playlist))
-        task = DownloadTask(
-            task_id=f"engine-{'-'.join(outcomes)}",
-            source_key="lunatv",
-            media_id="site:engine",
-            title=f"Movie {' '.join(outcomes)}",
-            year="2026",
-            media_type="movie",
-            season=1,
-            episode=1,
-            url="https://example.test/movie.m3u8",
-            root=str(tmp_path / "downloads"),
-        )
-
-        def ffmpeg(_path, _url, output, *_args):
-            calls.append("ffmpeg")
-            output.write_bytes(b"ffmpeg media")
-
-        monkeypatch.setattr(queue, "_run_ffmpeg", ffmpeg)
-        return queue, task, calls
-
-    queue, task, calls = execute(("error", "success"))
-    assert Path(queue._execute(task)).is_file()
-    assert calls == ["n_m3u8dl", "vsd"]
-
-    queue, task, calls = execute(("error", "error"))
-    assert Path(queue._execute(task)).is_file()
-    assert calls == ["n_m3u8dl", "vsd", "ffmpeg"]
-
-    queue, task, calls = execute(("cancel", "success"))
-    with pytest.raises(downloader_module._QueueControl):
-        queue._execute(task)
-    assert calls == ["n_m3u8dl"]
 
 
 def test_queue_engine_cache_lifecycle_and_resume(monkeypatch, tmp_path: Path):
     playlist = tmp_path / "input.m3u8"
-    playlist.write_text("#EXTM3U\n#EXTINF:1,\nsegment.ts\n", encoding="utf-8")
+    playlist.write_text("#EXTM3U\\n#EXTINF:1,\\nsegment.ts\\n", encoding="utf-8")
 
     class CacheEngine:
         name = "cache-engine"
@@ -1376,12 +1250,13 @@ def test_queue_engine_cache_lifecycle_and_resume(monkeypatch, tmp_path: Path):
             self.outcome = outcome
             self.cleaned = 0
 
-        def download(self, _url, output, **_kwargs):
+        def download(self, _url, output, **kwargs):
             self.cache.mkdir(parents=True, exist_ok=True)
             (self.cache / "segment-1").write_bytes(b"partial")
             if self.outcome == "failure":
                 raise downloader_module.M3U8EngineError("failed")
             if self.outcome == "pause":
+                kwargs["control_event"].set()
                 raise downloader_module.M3U8EngineCancelled("paused")
             output.write_bytes(b"complete")
             return output
@@ -1412,26 +1287,29 @@ def test_queue_engine_cache_lifecycle_and_resume(monkeypatch, tmp_path: Path):
         return queue, task, engine, cache
 
     queue, task, engine, cache = setup("failure")
-    queue.enqueue(task)
-    monkeypatch.setattr(queue, "_run_ffmpeg", lambda *_args: (_ for _ in ()).throw(RuntimeError("ffmpeg failed")))
+    assert queue.enqueue(task) is True
     assert queue.run_one()["state"] == "failed"
-    assert cache.is_dir() and engine.cleaned == 0
+    assert cache.is_dir()
+    assert engine.cleaned == 0
     assert queue.retry(task.task_id) is True
     assert cache.is_dir()
 
     queue, task, engine, cache = setup("pause")
-    queue.enqueue(task)
-    assert queue.run_one()["state"] == "controlled"
+    assert queue.enqueue(task) is True
+    assert queue.run_one()["state"] == "pause"
     assert queue.list_tasks()[0]["state"] == "paused"
-    assert cache.is_dir() and engine.cleaned == 0
+    assert cache.is_dir()
+    assert engine.cleaned == 0
 
     queue, task, engine, cache = setup("success")
-    queue.enqueue(task)
+    assert queue.enqueue(task) is True
     assert queue.run_one()["state"] == "completed"
-    assert not cache.exists() and engine.cleaned == 1
+    assert not cache.exists()
+    assert engine.cleaned == 1
 
     queue, task, engine, cache = setup("delete")
     cache.mkdir(parents=True)
-    queue.enqueue(task)
+    assert queue.enqueue(task) is True
     assert queue.remove(task.task_id) is True
-    assert not cache.exists() and engine.cleaned == 1
+    assert not cache.exists()
+    assert engine.cleaned == 1

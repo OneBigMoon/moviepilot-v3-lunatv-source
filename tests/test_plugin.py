@@ -2984,6 +2984,7 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin, "_start_queue", lambda: True)
+    monkeypatch.setattr(plugin._queue, "wake", lambda: False)
     pending = DownloadTask(
         task_id="pending-task",
         source_key="cms-demo",
@@ -3200,6 +3201,196 @@ def test_active_queue_projection_reports_partial_size_and_speed(monkeypatch, tmp
     assert first.dlspeed == "0.0B"
     assert second.size == 6144.0
     assert second.dlspeed == "1.0K"
+
+
+def test_download_configuration_defaults_and_bounds_are_passed_to_queue():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    assert plugin._config["max_concurrent_tasks"] == 2
+    assert plugin._config["segment_thread_count"] == 16
+    assert plugin._queue.max_concurrent_tasks == 2
+    assert plugin._queue.segment_thread_count == 16
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "max_concurrent_tasks": 0,
+            "segment_thread_count": 1,
+        }
+    )
+    assert plugin._queue.max_concurrent_tasks == 1
+    assert plugin._queue.segment_thread_count == 4
+
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "max_concurrent_tasks": 99,
+            "segment_thread_count": 999,
+        }
+    )
+    assert plugin._queue.max_concurrent_tasks == 4
+    assert plugin._queue.segment_thread_count == 16
+
+
+def test_reinitialization_waits_for_old_queue_before_replacing_it(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    old_queue = plugin._queue
+    calls = []
+    monkeypatch.setattr(
+        old_queue,
+        "stop_and_wait",
+        lambda *, timeout: calls.append(timeout) or True,
+    )
+
+    plugin.init_plugin({"enabled": True, "max_concurrent_tasks": 2})
+
+    assert calls == [plugin_module._QUEUE_RELOAD_STOP_TIMEOUT_SECONDS]
+    assert plugin._queue is not old_queue
+    assert plugin._queue.max_concurrent_tasks == 2
+
+
+def test_reinitialization_keeps_old_queue_if_worker_shutdown_times_out(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "max_concurrent_tasks": 3})
+    old_queue = plugin._queue
+    old_config = dict(plugin._config)
+    monkeypatch.setattr(old_queue, "stop_and_wait", lambda *, timeout: False)
+
+    plugin.init_plugin({"enabled": False, "max_concurrent_tasks": 1})
+
+    assert plugin._queue is old_queue
+    assert plugin._config == old_config
+
+
+def test_terminal_removed_and_completion_tasks_clear_download_metrics(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    def task(task_id: str, state: str = "pending") -> DownloadTask:
+        return DownloadTask(
+            task_id=task_id,
+            source_key="cms-demo",
+            media_id=f"cms-demo:{task_id}",
+            title="指标清理",
+            year="2026",
+            media_type="movie",
+            season=1,
+            episode=1,
+            url=f"https://example.test/{task_id}.m3u8",
+            root=str(tmp_path),
+            state=state,
+        )
+
+    completed = task("completed", "completed")
+    failed = task("failed", "failed")
+    pending = task("pending")
+    plugin.save_data(
+        plugin._queue.DATA_KEY,
+        [completed.to_dict(), failed.to_dict(), pending.to_dict()],
+    )
+    plugin._download_metrics.update(
+        {"completed": object(), "failed": object(), "pending": object(), "removed": object()}
+    )
+
+    plugin.api_tasks()
+    assert set(plugin._download_metrics) == {"pending"}
+
+    removable = task("removed")
+    assert plugin._queue.enqueue(removable)
+    plugin._download_metrics[removable.task_id] = object()
+    assert plugin.remove_torrents([removable.task_id], downloader="LunaTVSource") is True
+    assert removable.task_id not in plugin._download_metrics
+
+    completed_now = task("completed-now", "completed")
+    plugin._download_metrics[completed_now.task_id] = object()
+    monkeypatch.setattr(plugin, "_native_transfer", lambda *_args: "")
+    monkeypatch.setattr(plugin, "_record_native_history", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_sync_media_server", lambda: None)
+    plugin._record_completion(completed_now, str(tmp_path / "completed.mp4"))
+    assert completed_now.task_id not in plugin._download_metrics
+
+
+def test_active_metrics_use_rolling_window_and_reset_after_size_rollback(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    task = DownloadTask(
+        task_id="rolling-metrics-task",
+        source_key="cms-demo",
+        media_id="cms-demo:48",
+        title="滚动测速",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/rolling.m3u8",
+        root=str(tmp_path),
+        state="running",
+        progress=1.0,
+    )
+    relative_dir, filename = media_path(
+        task.root,
+        task.title,
+        task.year,
+        task.media_type,
+        task.season,
+        task.episode,
+        task.url,
+        task.mode,
+    )
+    partial = tmp_path / relative_dir / f"{filename}.part"
+    partial.parent.mkdir(parents=True)
+    timestamps = iter([100.0, 110.0, 130.0, 140.0, 150.0])
+    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(timestamps))
+
+    partial.write_bytes(b"x" * 1024)
+    assert plugin._active_download_torrent(task).dlspeed == "0.0B"
+    partial.write_bytes(b"x" * 21504)
+    assert plugin._active_download_torrent(task).dlspeed == "2.0K"
+    # The 100s sample is outside the 20-second window: 20 KiB / 20s.
+    partial.write_bytes(b"x" * 41984)
+    assert plugin._active_download_torrent(task).dlspeed == "1.0K"
+    # A shrinking partial indicates restart/truncation and starts a new sample.
+    partial.write_bytes(b"x" * 4096)
+    assert plugin._active_download_torrent(task).dlspeed == "0.0B"
+    partial.write_bytes(b"x" * 14336)
+    assert plugin._active_download_torrent(task).dlspeed == "1.0K"
+
+
+def test_active_queue_projects_n_engine_cache_and_keeps_legacy_site_name(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    task = DownloadTask(
+        task_id="n-engine-cache-task",
+        source_key="cms-demo",
+        source_name="演示源",
+        media_id="cms-demo:49",
+        title="缓存投影",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/cache.m3u8",
+        root=str(tmp_path),
+        state="running",
+        progress=0.0,
+        download_engine="N_m3u8DL-RE",
+    )
+    monkeypatch.setattr(plugin._queue, "task_cache_size", lambda task_id: 4096)
+
+    torrent = plugin._active_download_torrent(task)
+    assert torrent.size == 4096.0
+    assert torrent.dlspeed == "0.0B"
+    assert torrent.site_name == "演示源 · N_m3u8DL-RE"
+
+    legacy_payload = task.to_dict()
+    legacy_payload.pop("download_engine")
+    legacy_task = DownloadTask(**legacy_payload)
+    legacy_torrent = plugin._active_download_torrent(legacy_task)
+    assert legacy_torrent.site_name == "演示源"
 
 
 def test_active_queue_projection_clamps_fractional_progress_to_percent():
