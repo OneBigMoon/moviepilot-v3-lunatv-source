@@ -1126,6 +1126,22 @@ class AppleCmsClient:
 
         payload = self._request(source, ac="list", wd=query, pg=1)
         if "list" not in payload and "data" not in payload:
+            error_code = _text(payload.get("code"))
+            error_message = _text(payload.get("msg") or payload.get("message"))
+            normalized_error = error_message.lower()
+            explicitly_forbidden = error_code == "1002" or (
+                "search" in normalized_error
+                and any(
+                    token in normalized_error
+                    for token in ("forbid", "disabled", "not support", "unsupported")
+                )
+            ) or any(
+                token in error_message
+                for token in ("禁止搜索", "禁止关键词搜索", "不支持搜索", "禁用搜索")
+            )
+            if explicitly_forbidden:
+                code_label = f"（API {error_code}）" if error_code else ""
+                raise ValueError(f"CMS 源站在线，但禁止关键词搜索{code_label}")
             raise ValueError("CMS 搜索响应缺少 list/data")
         items: Any = payload.get("list") if "list" in payload else payload.get("data")
         if isinstance(items, Mapping):

@@ -50,7 +50,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.57"
+    expected_version = "0.4.58"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -59,6 +59,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.58"] == (
+        "识别 CMS API 1002 关键词搜索禁用响应，明确显示源站在线但禁止搜索并自动排除，"
+        "避免误报为缺少 list/data。"
+    )
     assert history["0.4.57"] == (
         "修复立即健康检查每 2 秒完整刷新来源表导致页面闪烁；"
         "检查期间仅静默轮询运行状态，完成后一次性刷新缓存结果。"

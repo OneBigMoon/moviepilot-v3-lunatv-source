@@ -39,6 +39,39 @@ def test_search_protocol_health_accepts_a_valid_empty_result(monkeypatch):
     with pytest.raises(ValueError, match="list/data"):
         client.verify_search(source)
 
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: {"code": 1002, "msg": "Current API search."},
+    )
+    with pytest.raises(ValueError, match="源站在线，但禁止关键词搜索（API 1002）"):
+        client.verify_search(source)
+
+
+def test_search_forbidden_source_is_auto_disabled_with_clear_reason(monkeypatch):
+    source = make_source("search-forbidden")
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    save_catalog(plugin, source)
+    monkeypatch.setattr(
+        plugin_module,
+        "load_sources_from_url",
+        lambda *_args, **_kwargs: [source],
+    )
+    monkeypatch.setattr(
+        AppleCmsClient,
+        "_request",
+        lambda *_args, **_kwargs: {"code": 1002, "msg": "Current API search."},
+    )
+
+    result = plugin.refresh_source_health()
+    payload = plugin.api_sources()["data"][0]
+
+    assert result["disabled"] == 1
+    assert payload["auto_disabled"] is True
+    assert payload["last_error"] == "CMS 源站在线，但禁止关键词搜索（API 1002）"
+    assert plugin._client().sources == []
+
 
 def test_unchecked_source_is_excluded_until_health_check_passes(monkeypatch):
     source = make_source("unchecked")
