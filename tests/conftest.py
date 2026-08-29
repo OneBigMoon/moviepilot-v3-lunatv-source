@@ -26,3 +26,4 @@ def disable_live_stream_probe(monkeypatch):
 
     plugin_module = sys.modules[PACKAGE_NAME]
     monkeypatch.setattr(plugin_module, "probe_stream_height", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", None)

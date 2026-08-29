@@ -1116,6 +1116,25 @@ class AppleCmsClient:
             raise ValueError("CMS 响应不是 JSON 对象")
         return payload
 
+    def verify_search(self, source: CmsSource, query: str = "1") -> None:
+        """Verify that a source implements the Apple CMS search response shape.
+
+        A valid empty list still proves that the search endpoint works.  This
+        deliberately distinguishes protocol health from whether one probe
+        keyword happens to match a title.
+        """
+
+        payload = self._request(source, ac="list", wd=query, pg=1)
+        if "list" not in payload and "data" not in payload:
+            raise ValueError("CMS 搜索响应缺少 list/data")
+        items: Any = payload.get("list") if "list" in payload else payload.get("data")
+        if isinstance(items, Mapping):
+            if "list" not in items:
+                raise ValueError("CMS 搜索 data 缺少 list")
+            items = items.get("list")
+        if items is not None and not isinstance(items, list):
+            raise ValueError("CMS 搜索结果不是列表")
+
     @staticmethod
     def _items(payload: Mapping[str, Any]) -> List[Mapping[str, Any]]:
         items = payload.get("list") or payload.get("data") or []
