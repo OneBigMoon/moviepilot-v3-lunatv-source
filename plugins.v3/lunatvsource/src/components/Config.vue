@@ -12,6 +12,7 @@ const saving = ref(false)
 const message = reactive({ text: '', type: 'info' })
 const defaults = {
   enabled: false,
+  generate_nfo: false,
   config_url: 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json',
   source_allowlist: '',
   mode: 'download',
@@ -113,6 +114,15 @@ onMounted(() => {
     </VAlert>
     <VRow dense>
       <VCol cols="12"><VSwitch v-model="config.enabled" label="启用原生桥接" color="success" hide-details /></VCol>
+      <VCol cols="12">
+        <VSwitch
+          v-model="config.generate_nfo"
+          label="生成 NFO 元数据"
+          hint="开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
+          persistent-hint
+          color="success"
+        />
+      </VCol>
       <VCol cols="12"><VTextField v-model="config.config_url" label="LunaTV 配置地址" variant="outlined" /></VCol>
       <VCol cols="12">
         <VTextField

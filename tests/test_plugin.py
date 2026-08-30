@@ -3856,7 +3856,7 @@ def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
     monkeypatch.setattr(plugin_module, "_HostTransferChain", TransferChain)
     plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True})
+    plugin.init_plugin({"enabled": True, "generate_nfo": True})
     monkeypatch.setattr(
         plugin,
         "_system_directory_info",
@@ -3880,6 +3880,7 @@ def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
     assert captured["media_source"] is MediaSource.TMDB
     assert captured["media_id"] == "1084242"
     assert captured["transfer_type"] == "move"
+    assert captured["scrape"] is True
 
 
 def test_native_movie_transfer_clears_season_metadata(monkeypatch, tmp_path: Path):
@@ -3953,6 +3954,7 @@ def test_native_movie_transfer_clears_season_metadata(monkeypatch, tmp_path: Pat
     assert captured["target_path"] == tmp_path / "library"
     assert captured["transfer_type"] == "copy"
     assert captured["manual"] is True
+    assert captured["scrape"] is False
     assert captured["sync_extra_files"] is True
     meta = captured["meta"]
     assert meta.type is MediaType.MOVIE

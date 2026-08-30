@@ -50,7 +50,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.58"
+    expected_version = "0.4.59"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -59,6 +59,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.59"] == (
+        "新增可选的 NFO 元数据开关，默认关闭；启用后下载完成并由 MoviePilot 原生整理时生成标准 "
+        "NFO，关闭时明确不触发刮削。"
+    )
     assert history["0.4.58"] == (
         "识别 CMS API 1002 关键词搜索禁用响应，明确显示源站在线但禁止搜索并自动排除，"
         "避免误报为缺少 list/data。"
@@ -173,7 +177,7 @@ def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     )
 
 
-def test_config_exposes_and_preserves_single_download_directory():
+def test_config_exposes_download_directory_and_nfo_switch():
     project_root = Path(__file__).resolve().parents[1]
     config_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "Config.vue"
@@ -182,6 +186,9 @@ def test_config_exposes_and_preserves_single_download_directory():
     assert "download_root: '/downloads/未整理'" in config_page
     assert 'v-model="config.download_root"' in config_page
     assert "download_root: String(config.download_root || '').trim()" in config_page
+    assert "generate_nfo: false" in config_page
+    assert 'v-model="config.generate_nfo"' in config_page
+    assert "生成 NFO 元数据" in config_page
 
 
 def test_source_health_ui_uses_cached_reads_and_persists_interval():

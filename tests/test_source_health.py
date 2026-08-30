@@ -469,8 +469,10 @@ def test_source_health_interval_is_clamped_and_exposed():
         for item in form[0]["content"]
     }
     assert defaults["source_check_minutes"] == 60
+    assert defaults["generate_nfo"] is False
     assert fields["source_check_minutes"]["min"] == 15
     assert fields["source_check_minutes"]["max"] == 1440
+    assert fields["generate_nfo"]["label"] == "生成 NFO 元数据"
 
 
 def test_due_check_considers_every_current_source(monkeypatch):
