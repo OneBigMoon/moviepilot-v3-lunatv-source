@@ -2,6 +2,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import lunatvsource_test as plugin_module
 from lunatvsource_test import LunaTVSource
 from lunatvsource_test.cms import CmsSource, _result_from_item
 from lunatvsource_test.downloader import DownloadQueue, DownloadTask
@@ -63,6 +64,477 @@ def test_record_completion_respects_disabled_moviepilot_organize(monkeypatch):
     plugin._record_completion(SimpleNamespace(), "/downloads/movie.mp4")
 
     assert calls == [("history", "/downloads/movie.mp4"), "sync"]
+
+
+def test_native_subscription_ids_require_exact_identity_and_season(monkeypatch):
+    subscriptions = [
+        SimpleNamespace(
+            id=1,
+            state="R",
+            type="电视剧",
+            media_source="themoviedb",
+            media_id="42",
+            season=1,
+        ),
+        SimpleNamespace(
+            id=2,
+            state="P",
+            type="tv",
+            media_source="themoviedb",
+            media_id="42",
+            season=1,
+        ),
+        SimpleNamespace(
+            id=3,
+            state="R",
+            type="tv",
+            media_source="themoviedb",
+            media_id="43",
+            season=1,
+        ),
+        SimpleNamespace(
+            id=4,
+            state="R",
+            type="tv",
+            media_source="themoviedb",
+            media_id="42",
+            season=2,
+        ),
+        SimpleNamespace(
+            id=5,
+            state="S",
+            type="tv",
+            media_source="themoviedb",
+            media_id="42",
+            season=1,
+        ),
+        SimpleNamespace(
+            id=6,
+            state="R",
+            type="tv",
+            media_source="themoviedb",
+            media_id="42",
+            season=0,
+        ),
+    ]
+
+    class Repository:
+        @staticmethod
+        def list(_state=None):
+            return subscriptions
+
+    class SubscribeChain:
+        subscription_repository = Repository()
+
+    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
+    task = DownloadTask(
+        task_id="subscription-progress-identity",
+        source_key="lunatv",
+        media_id="cms:series",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=7,
+        url="https://video.example/s01e07.m3u8",
+        root="/downloads",
+        host_media_source="themoviedb",
+        host_media_id="42",
+    )
+
+    assert LunaTVSource()._native_subscription_ids(task) == {1, 2}
+
+    task.season = 0
+    assert LunaTVSource()._native_subscription_ids(task) == {6}
+
+
+def test_record_completion_schedules_backfill_only_after_native_transfer(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "moviepilot_organize": True})
+    task = DownloadTask(
+        task_id="subscription-progress-completion",
+        source_key="lunatv",
+        media_id="cms:series",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=7,
+        url="https://video.example/s01e07.m3u8",
+        root=str(tmp_path),
+    )
+    calls = []
+    transfer_results = iter(("moviepilot", "fallback:no-library-target"))
+
+    monkeypatch.setattr(plugin, "_native_transfer", lambda *_args: next(transfer_results))
+    monkeypatch.setattr(plugin, "_remove_empty_download_parents", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_record_native_history", lambda *_args: calls.append("history"))
+    monkeypatch.setattr(plugin, "_native_subscription_ids", lambda _task: {10, 11})
+
+    def sync(subscription_ids=None, episode=None):
+        calls.append(("sync", subscription_ids, episode))
+        return True
+
+    monkeypatch.setattr(plugin, "_sync_media_server", sync)
+
+    plugin._record_completion(task, str(tmp_path / "episode-7.mp4"))
+    plugin._record_completion(task, str(tmp_path / "episode-7.mp4"))
+
+    assert calls == [
+        "history",
+        ("sync", {10, 11}, 7),
+        "history",
+        ("sync", {10, 11}, None),
+    ]
+
+
+def test_record_completion_replay_skips_duplicate_native_transfer(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "moviepilot_organize": True})
+    task = DownloadTask(
+        task_id="completion-replay",
+        source_key="lunatv",
+        media_id="cms:series",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=7,
+        url="https://video.example/s01e07.m3u8",
+        root=str(tmp_path),
+    )
+    history_checks = iter((False, True))
+    transfers = []
+    syncs = []
+
+    monkeypatch.setattr(
+        plugin,
+        "_native_history_has_episode",
+        lambda _task: next(history_checks),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_native_transfer",
+        lambda *_args: transfers.append("transfer") or "moviepilot",
+    )
+    monkeypatch.setattr(plugin, "_remove_empty_download_parents", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_record_native_history", lambda *_args: None)
+    monkeypatch.setattr(plugin, "_native_subscription_ids", lambda _task: {10})
+    monkeypatch.setattr(
+        plugin,
+        "_sync_media_server",
+        lambda ids, episode=None: syncs.append((ids, episode)) or True,
+    )
+
+    output = str(tmp_path / "episode-7.mp4")
+    plugin._record_completion(task, output)
+    plugin._record_completion(task, output)
+
+    assert transfers == ["transfer"]
+    assert syncs == [({10}, 7), ({10}, None)]
+
+
+def test_backfill_native_subscription_progress_reads_fresh_snapshot(monkeypatch):
+    snapshot = SimpleNamespace(id=10)
+    gets = []
+    backfills = []
+
+    class Repository:
+        @staticmethod
+        def get(subscribe_id):
+            gets.append(subscribe_id)
+            return snapshot
+
+    class SubscribeChain:
+        subscription_repository = Repository()
+
+        @staticmethod
+        def backfill_existing_episodes(subscribe, episodes):
+            backfills.append((subscribe, episodes))
+            return {
+                "accepted": episodes,
+                "updated": True,
+                "progress": {"updated": True},
+            }
+
+    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
+
+    handled = LunaTVSource()._backfill_native_subscription_progress({10: {7, 6}})
+
+    assert handled == {10}
+    assert gets == [10]
+    assert backfills == [(snapshot, [6, 7])]
+
+
+def test_backfill_native_subscription_progress_accepts_duplicate_episodes(monkeypatch):
+    snapshot = SimpleNamespace(id=10)
+
+    class Repository:
+        @staticmethod
+        def get(_subscribe_id):
+            return snapshot
+
+    class SubscribeChain:
+        subscription_repository = Repository()
+
+        @staticmethod
+        def backfill_existing_episodes(_subscribe, _episodes):
+            return {
+                "accepted": [],
+                "ignored": [{"episode": 7, "reason": "duplicate"}],
+            }
+
+    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
+
+    assert LunaTVSource()._backfill_native_subscription_progress({10: {7}}) == {10}
+
+
+def test_backfill_native_subscription_progress_rejects_invalid_ignored_episode(monkeypatch):
+    snapshot = SimpleNamespace(id=10)
+
+    class Repository:
+        @staticmethod
+        def get(_subscribe_id):
+            return snapshot
+
+    class SubscribeChain:
+        subscription_repository = Repository()
+
+        @staticmethod
+        def backfill_existing_episodes(_subscribe, _episodes):
+            return {
+                "accepted": [],
+                "ignored": [{"episode": 7, "reason": "invalid"}],
+            }
+
+    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
+
+    assert LunaTVSource()._backfill_native_subscription_progress({10: {7}}) == set()
+
+
+def test_sync_media_server_replays_request_arriving_during_sync(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_calls = []
+    backfills = []
+    refreshes = []
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+            if len(sync_calls) == 1:
+                assert plugin._sync_media_server({9}, 2) is False
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def backfill(pending):
+        backfills.append(pending)
+        return set(pending)
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(plugin, "_backfill_native_subscription_progress", backfill)
+    monkeypatch.setattr(
+        plugin,
+        "_refresh_native_subscription_progress",
+        lambda ids: refreshes.append(ids),
+    )
+
+    assert plugin._sync_media_server({9}, 1) is True
+    assert sync_calls == ["Emby", "Emby"]
+    assert backfills == [{9: {1}}, {9: {2}}]
+    assert refreshes == []
+    assert plugin._media_sync_running is False
+
+
+def test_sync_media_server_retries_once_after_transient_failure(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_calls = []
+    refreshes = []
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+            if len(sync_calls) == 1:
+                raise RuntimeError("temporary")
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(plugin, "_backfill_native_subscription_progress", lambda _pending: set())
+    monkeypatch.setattr(
+        plugin,
+        "_refresh_native_subscription_progress",
+        lambda ids: refreshes.append(ids) or set(ids),
+    )
+
+    assert plugin._sync_media_server({9}) is True
+    assert sync_calls == ["Emby", "Emby"]
+    assert refreshes == [{9}]
+    assert plugin._media_sync_running is False
+    status = plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)["media_server_sync"]
+    assert status["success"] is True
+    assert status["media_server_synced"] is True
+    assert status["refreshed_subscriptions"] == 1
+
+
+def test_sync_media_server_persists_failure_after_retry(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_calls = []
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+            raise RuntimeError("media server unavailable")
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        plugin,
+        "_backfill_native_subscription_progress",
+        lambda pending: set(pending),
+    )
+
+    assert plugin._sync_media_server({9}, 1) is True
+    assert sync_calls == ["Emby", "Emby"]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["media_server_synced"] is False
+    assert status["backfilled_subscriptions"] == 1
+    assert "重试仍失败" in status["error"]
+
+
+def test_sync_media_server_older_runner_cannot_overwrite_latest_status(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            assert server == "Emby"
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(
+        plugin,
+        "_backfill_native_subscription_progress",
+        lambda pending: set(pending),
+    )
+    original_record = plugin._record_followup_status
+    first_waiting = threading.Event()
+    release_first = threading.Event()
+    second_recorded = threading.Event()
+    first_finished = threading.Event()
+    record_calls = []
+
+    def delayed_record(name, **kwargs):
+        record_calls.append(name)
+        call_number = len(record_calls)
+        if name == "media_server_sync" and call_number == 1:
+            first_waiting.set()
+            assert release_first.wait(timeout=2)
+        original_record(name, **kwargs)
+        if name == "media_server_sync" and call_number == 1:
+            first_finished.set()
+        elif name == "media_server_sync" and call_number == 2:
+            second_recorded.set()
+
+    monkeypatch.setattr(plugin, "_record_followup_status", delayed_record)
+
+    assert plugin._sync_media_server({1}, 1) is True
+    assert first_waiting.wait(timeout=2)
+    assert plugin._sync_media_server({2, 3}, 2) is True
+    assert second_recorded.wait(timeout=2)
+    assert plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)[
+        "media_server_sync"
+    ]["backfilled_subscriptions"] == 2
+
+    release_first.set()
+    assert first_finished.wait(timeout=2)
+    assert plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)[
+        "media_server_sync"
+    ]["backfilled_subscriptions"] == 2
+
+
+def test_sync_media_server_retries_backfill_without_media_server(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    attempts = []
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def backfill(pending):
+        attempts.append(pending)
+        return set(pending) if len(attempts) > 1 else set()
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", None)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(plugin, "_backfill_native_subscription_progress", backfill)
+
+    assert plugin._sync_media_server({9}, 1) is True
+    assert attempts == [{9: {1}}, {9: {1}}]
+    assert plugin._media_sync_running is False
+
+
+def test_stop_service_prevents_inflight_sync_from_backfilling(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_started = threading.Event()
+    release_sync = threading.Event()
+    backfills = []
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_started.set()
+            assert release_sync.wait(timeout=2)
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(
+        plugin,
+        "_backfill_native_subscription_progress",
+        lambda pending: backfills.append(pending) or set(pending),
+    )
+
+    assert plugin._sync_media_server({9}, 1) is True
+    assert sync_started.wait(timeout=2)
+    worker = plugin._media_sync_thread
+    plugin.stop_service()
+    release_sync.set()
+    assert worker is not None
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert backfills == []
 
 
 def test_queue_holds_slot_during_completion_callback(tmp_path: Path):

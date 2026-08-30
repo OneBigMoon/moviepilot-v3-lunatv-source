@@ -14,7 +14,6 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -86,6 +85,7 @@ _PROBE_REDIRECT_CODES = {301, 302, 303, 307, 308}
 _PROBE_MAX_REDIRECTS = 5
 _PROBE_PLAYLIST_BYTES = 256 * 1024
 _PROBE_MEDIA_BYTES = 4 * 1024 * 1024
+_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 _TV_EPISODE_ROW_TITLE_RE = re.compile(
     r"^(?P<title>.+?)(?:\s*[-_.·:：]*\s*)"
     r"(?:S\s*(?P<season>\d{1,3})\s*E\s*(?P<episode>\d{1,4})|"
@@ -136,13 +136,20 @@ def _chinese_number(value: str) -> int:
     return 0
 
 
-def _json_get(url: str, timeout: float) -> Any:
-    request = urllib.request.Request(
+def _json_get(
+    url: str,
+    timeout: float,
+    allowed_private_ranges: Iterable[str] = (),
+) -> Any:
+    payload, _ = _fetch_public_url(
         url,
-        headers={"User-Agent": "LunaTVSource/0.1 MoviePilot"},
+        timeout,
+        _JSON_RESPONSE_BYTES + 1,
+        tuple(allowed_private_ranges or ()),
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+    if len(payload) > _JSON_RESPONSE_BYTES:
+        raise ValueError("CMS JSON response too large")
+    return json.loads(payload.decode("utf-8", errors="replace"))
 
 
 def stream_quality_label(height: int) -> str:
@@ -265,17 +272,24 @@ def _probe_host_header(parsed: urllib.parse.ParseResult, port: int) -> str:
     return hostname if port == default_port else f"{hostname}:{port}"
 
 
-def _fetch_public_url(
+def _request_public_url(
     url: str,
     timeout: float,
-    limit: int,
     allowed_private_ranges: Iterable[str] = (),
-) -> Tuple[bytes, str]:
-    """Fetch a bounded public URL while pinning DNS and validating redirects."""
+    headers: Optional[Mapping[str, str]] = None,
+    deadline: Optional[float] = None,
+) -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse, str]:
+    """Open an approved URL while pinning DNS and validating redirects."""
 
     current_url = str(url or "").strip()
     request_timeout = min(max(float(timeout or 8.0), 1.0), 15.0)
     for _ in range(_PROBE_MAX_REDIRECTS + 1):
+        connection_timeout = request_timeout
+        if deadline is not None:
+            remaining = float(deadline) - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("public URL request deadline exceeded")
+            connection_timeout = min(connection_timeout, remaining)
         parsed, address, port = _resolve_public_probe_target(
             current_url,
             allowed_private_ranges,
@@ -286,10 +300,14 @@ def _fetch_public_url(
                 parsed.hostname or "",
                 address,
                 port,
-                request_timeout,
+                connection_timeout,
             )
         else:
-            connection = http.client.HTTPConnection(address, port, timeout=request_timeout)
+            connection = http.client.HTTPConnection(
+                address,
+                port,
+                timeout=connection_timeout,
+            )
         path = urllib.parse.urlunparse(
             (
                 "",
@@ -306,30 +324,59 @@ def _fetch_public_url(
                 "",
             )
         )
+        request_headers = {
+            "Host": _probe_host_header(parsed, port),
+            "User-Agent": "LunaTVSource/0.1 MoviePilot",
+            "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
+            "Connection": "close",
+        }
+        if headers:
+            request_headers.update({str(key): str(value) for key, value in headers.items()})
+            request_headers["Host"] = _probe_host_header(parsed, port)
+            request_headers["Connection"] = "close"
         try:
             connection.request(
                 "GET",
                 path,
-                headers={
-                    "Host": _probe_host_header(parsed, port),
-                    "User-Agent": "LunaTVSource/0.1 MoviePilot",
-                    "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
-                    "Connection": "close",
-                },
+                headers=request_headers,
             )
             response = connection.getresponse()
-            if response.status in _PROBE_REDIRECT_CODES:
-                location = response.getheader("Location")
-                if not location:
-                    raise OSError("probe redirect has no target")
-                current_url = urllib.parse.urljoin(current_url, location)
-                continue
-            if response.status < 200 or response.status >= 400:
-                raise OSError(f"probe request returned HTTP {response.status}")
-            return response.read(max(1, int(limit)) + 1)[:limit], current_url
-        finally:
+        except Exception:
             connection.close()
+            raise
+        if response.status in _PROBE_REDIRECT_CODES:
+            location = response.getheader("Location")
+            connection.close()
+            if not location:
+                raise OSError("probe redirect has no target")
+            current_url = urllib.parse.urljoin(current_url, location)
+            continue
+        if response.status < 200 or response.status >= 400:
+            connection.close()
+            raise OSError(f"probe request returned HTTP {response.status}")
+        return connection, response, current_url
     raise OSError("too many probe redirects")
+
+
+def _fetch_public_url(
+    url: str,
+    timeout: float,
+    limit: int,
+    allowed_private_ranges: Iterable[str] = (),
+    deadline: Optional[float] = None,
+) -> Tuple[bytes, str]:
+    """Fetch a bounded public URL while pinning DNS and validating redirects."""
+
+    connection, response, final_url = _request_public_url(
+        url,
+        timeout,
+        allowed_private_ranges,
+        deadline=deadline,
+    )
+    try:
+        return response.read(max(1, int(limit)) + 1)[:limit], final_url
+    finally:
+        connection.close()
 
 
 def _playlist_followup_urls(playlist: str, base_url: str) -> Tuple[List[str], bool]:
@@ -1076,8 +1123,16 @@ def parse_config(payload: Mapping[str, Any], allowlist: Sequence[str] = ()) -> L
     return sources
 
 
-def load_sources_from_url(url: str, timeout: float = 15, allowlist: Sequence[str] = ()) -> List[CmsSource]:
-    return parse_config(_json_get(url, timeout), allowlist=allowlist)
+def load_sources_from_url(
+    url: str,
+    timeout: float = 15,
+    allowlist: Sequence[str] = (),
+    allowed_private_ranges: Iterable[str] = (),
+) -> List[CmsSource]:
+    return parse_config(
+        _json_get(url, timeout, allowed_private_ranges),
+        allowlist=allowlist,
+    )
 
 
 class AppleCmsClient:
@@ -1086,10 +1141,12 @@ class AppleCmsClient:
         sources: Sequence[CmsSource],
         timeout: float = 15,
         parallel_wait_timeout: Optional[float] = None,
+        allowed_private_ranges: Iterable[str] = (),
     ) -> None:
         self.sources = list(sources)
         self.timeout = timeout
         self.parallel_wait_timeout = parallel_wait_timeout
+        self.allowed_private_ranges = tuple(allowed_private_ranges or ())
 
     def _parallel_wait_seconds(self) -> float:
         """Return the total budget for a parallel source search.
@@ -1108,10 +1165,12 @@ class AppleCmsClient:
         return deadline is not None and time.monotonic() >= deadline
 
     def _request(self, source: CmsSource, **params: Any) -> Mapping[str, Any]:
-        query = urllib.parse.urlencode({key: value for key, value in params.items() if value not in (None, "")})
+        query = urllib.parse.urlencode(
+            {key: value for key, value in params.items() if value not in (None, "")}
+        )
         separator = "&" if "?" in source.api else "?"
         url = f"{source.api}{separator}{query}" if query else source.api
-        payload = _json_get(url, self.timeout)
+        payload = _json_get(url, self.timeout, self.allowed_private_ranges)
         if not isinstance(payload, Mapping):
             raise ValueError("CMS 响应不是 JSON 对象")
         return payload

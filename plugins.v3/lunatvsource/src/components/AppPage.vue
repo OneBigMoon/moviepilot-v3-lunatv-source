@@ -11,8 +11,10 @@ const loading = ref(true)
 const error = ref('')
 const sources = ref([])
 const status = ref({})
+const tasks = ref([])
 const healthCheckStarting = ref(false)
 const busySourceKeys = ref(new Set())
+const retryingTaskIds = ref(new Set())
 let healthPollTimer = null
 let healthPollDeadline = 0
 
@@ -34,12 +36,14 @@ async function load(options = {}) {
     error.value = ''
   }
   try {
-    const [statusResponse, sourceResponse] = await Promise.all([
+    const [statusResponse, sourceResponse, taskResponse] = await Promise.all([
       apiCall('get', '/status'),
       apiCall('get', '/sources'),
+      apiCall('get', '/tasks'),
     ])
     status.value = unwrap(statusResponse)
     sources.value = unwrap(sourceResponse) || []
+    tasks.value = unwrap(taskResponse) || []
   } catch (loadError) {
     error.value = loadError?.message || '加载 LunaTV 状态失败'
   } finally {
@@ -155,6 +159,41 @@ const downloadSettings = computed(() => status.value.download_settings || {})
 const engineStatus = computed(() => status.value.engine || {})
 const subscriptionStatus = computed(() => status.value.subscription || {})
 const sourceHealth = computed(() => status.value.source_health || {})
+const queueStatus = computed(() => status.value.queue || {})
+const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
+  .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0))
+const followupStatus = computed(() => status.value.followup_status || {})
+const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {})
+const mediaSyncStatus = computed(() => followupStatus.value.media_server_sync || {})
+const failedTasks = computed(() => tasks.value.filter((task) => task?.state === 'failed'))
+
+function followupSummary(item) {
+  if (item?.running) return '进行中'
+  if (!item?.finished_at) return '暂无记录'
+  return `${item.success === false ? '失败' : '成功'} · ${formattedTime(item.finished_at)}`
+}
+
+function taskIsRetrying(task) {
+  return retryingTaskIds.value.has(task.task_id)
+}
+
+async function retryTask(task) {
+  if (!task?.task_id || taskIsRetrying(task)) return
+  const nextRetryingTaskIds = new Set(retryingTaskIds.value)
+  nextRetryingTaskIds.add(task.task_id)
+  retryingTaskIds.value = nextRetryingTaskIds
+  error.value = ''
+  try {
+    unwrap(await apiCall('post', `/tasks/${encodeURIComponent(task.task_id)}/retry`))
+    await load({ silent: true })
+  } catch (requestError) {
+    error.value = requestError?.message || `重试“${task.title || task.task_id}”失败`
+  } finally {
+    const remainingRetryingTaskIds = new Set(retryingTaskIds.value)
+    remainingRetryingTaskIds.delete(task.task_id)
+    retryingTaskIds.value = remainingRetryingTaskIds
+  }
+}
 
 function formattedTime(value) {
   if (!value) return '未检查'
@@ -194,7 +233,7 @@ onBeforeUnmount(clearHealthPoll)
       </div>
       <div class="header-status">
         <span class="chip">
-          {{ downloadSettings.max_concurrent_tasks || 2 }} 任务 × {{ downloadSettings.segment_thread_count || 16 }} 分片
+          并发上限：{{ downloadSettings.max_concurrent_tasks || 2 }} 任务 × {{ downloadSettings.segment_thread_count || 16 }} 分片
         </span>
         <span :class="['chip', engineStatus.ready ? 'ready' : 'muted-chip']">
           N_m3u8DL-RE {{ engineStatus.ready ? '已就绪' : (engineStatus.supported ? '内置待安装' : '当前平台不支持') }}
@@ -220,11 +259,20 @@ onBeforeUnmount(clearHealthPoll)
     <div v-if="status.source_config?.error" class="alert warning">
       远程来源清单刷新失败，当前使用{{ status.source_config?.origin || '缓存' }}：{{ status.source_config.error }}
     </div>
+    <div v-if="subscriptionRefreshStatus.error" class="alert warning">
+      最近一次追更失败：{{ subscriptionRefreshStatus.error }}
+    </div>
+    <div v-if="mediaSyncStatus.error" class="alert warning">
+      最近一次媒体库或订阅进度同步失败：{{ mediaSyncStatus.error }}
+    </div>
 
     <section class="setup-strip">
       <span>目录：{{ directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置' }}</span>
       <span>来源：{{ directoryStatus.source || '未配置' }}</span>
+      <span>当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 失败 {{ queueStatus.failed || 0 }} · 共 {{ queueTotal }} 任务</span>
       <span>追更：每 {{ subscriptionStatus.refresh_minutes || 30 }} 分钟检查新集</span>
+      <span>最近追更：{{ followupSummary(subscriptionRefreshStatus) }}</span>
+      <span>最近同步：{{ followupSummary(mediaSyncStatus) }}</span>
       <span>TMDB：{{ status.tmdb_association ? '自动关联' : '关闭' }}</span>
       <span>缓存：完成后才整理</span>
       <span>来源健康检查：每 {{ sourceHealth.interval_minutes || 60 }} 分钟</span>
@@ -300,6 +348,25 @@ onBeforeUnmount(clearHealthPoll)
             </tr>
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <section v-if="failedTasks.length" class="panel">
+      <div class="section-heading">
+        <div class="section-title">失败任务 <span class="muted">{{ failedTasks.length }}</span></div>
+        <span class="source-caption">重试会将任务重新排入下载队列</span>
+      </div>
+      <div v-for="task in failedTasks" :key="task.task_id" class="source-actions">
+        <div>
+          <div class="source-name">{{ task.title || '未命名任务' }}</div>
+          <div class="source-error">{{ task.error || '下载失败' }}</div>
+        </div>
+        <button
+          class="source-action"
+          :disabled="taskIsRetrying(task)"
+          :aria-label="`重试任务 ${task.title || task.task_id}`"
+          @click="retryTask(task)"
+        >{{ taskIsRetrying(task) ? '重试中…' : '重试' }}</button>
       </div>
     </section>
 

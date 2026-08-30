@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -7,14 +8,36 @@ from lunatvsource_test import LunaTVSource
 from lunatvsource_test.m3u8_engine import N_M3U8DL_RE_SPEC
 
 
+def test_generate_nfo_config_is_exposed_and_disabled_by_default():
+    form, defaults = LunaTVSource().get_form()
+    models = []
+    pending = [form]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            props = value.get("props")
+            if isinstance(props, dict) and "model" in props:
+                models.append(props["model"])
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+    assert "generate_nfo" in models
+    assert defaults["generate_nfo"] is False
+
+
 def test_manifest_and_plugin_icons_use_https_url():
     project_root = Path(__file__).resolve().parents[1]
     package = json.loads((project_root / "package.v3.json").read_text(encoding="utf-8"))
 
-    manifest_icon = package["LunaTVSource"]["icon"]
+    manifest = package["LunaTVSource"]
+    manifest_icon = manifest["icon"]
     plugin_icon = LunaTVSource.plugin_icon
     parsed_icon = urlparse(manifest_icon)
 
+    assert manifest["project_url"] == (
+        "https://github.com/OneBigMoon/moviepilot-v3-lunatv-source"
+    )
     assert manifest_icon == plugin_icon
     assert parsed_icon.scheme == "https"
     assert Path(parsed_icon.path).name == "lunatvsource.png"
@@ -50,12 +73,18 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.58"
+    expected_version = "0.4.60"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
     assert lockfile["version"] == expected_version
     assert lockfile["packages"][""]["version"] == expected_version
+    release_tag = os.getenv("LUNATV_RELEASE_TAG", "").strip()
+    if release_tag:
+        expected_tag = f"LunaTVSource_v{expected_version}"
+        assert release_tag == expected_tag, (
+            f"release tag {release_tag!r} must match manifest tag {expected_tag!r}"
+        )
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
@@ -151,6 +180,23 @@ def test_app_page_shows_loading_state_before_empty_sources():
     assert app_page.index(loading_state) < app_page.index(empty_state)
 
 
+def test_app_page_queue_summary_is_independent_from_source_count():
+    project_root = Path(__file__).resolve().parents[1]
+    app_page = (
+        project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
+    ).read_text(encoding="utf-8")
+    queue = {"pending": 206, "running": 2, "paused": 1, "failed": 3, "completed": 10}
+    sources = list(range(19))
+
+    assert sum(queue.values()) == 222
+    assert len(sources) == 19
+    assert "const queueStatus = computed(() => status.value.queue || {})" in app_page
+    assert "const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']" in app_page
+    assert "当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 失败 {{ queueStatus.failed || 0 }} · 共 {{ queueTotal }} 任务" in app_page
+    assert "并发上限：{{ downloadSettings.max_concurrent_tasks || 2 }} 任务 × {{ downloadSettings.segment_thread_count || 16 }} 分片" in app_page
+    assert "{{ loading ? '…' : sources.length }}" in app_page
+
+
 def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     project_root = Path(__file__).resolve().parents[1]
     app_page = (
@@ -173,15 +219,38 @@ def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     )
 
 
-def test_config_exposes_and_preserves_single_download_directory():
+def test_frontend_supports_failed_task_retry_and_optional_download_directory():
     project_root = Path(__file__).resolve().parents[1]
+    app_page = (
+        project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
+    ).read_text(encoding="utf-8")
     config_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "Config.vue"
     ).read_text(encoding="utf-8")
 
-    assert "download_root: '/downloads/未整理'" in config_page
+    assert "const tasks = ref([])" in app_page
+    assert "apiCall('get', '/tasks')" in app_page
+    assert "task?.state === 'failed'" in app_page
+    assert "`/tasks/${encodeURIComponent(task.task_id)}/retry`" in app_page
+    assert "{{ task.title || '未命名任务' }}" in app_page
+    assert "{{ task.error || '下载失败' }}" in app_page
+    assert '@click="retryTask(task)"' in app_page
+
+    assert "download_root: ''" in config_page
+    assert "probe_allowed_private_ranges: ''" in config_page
+    assert "hls_ad_filter_regex:" in config_page
     assert 'v-model="config.download_root"' in config_page
+    assert 'v-model="config.source_allowlist"' in config_page
+    assert 'v-model="config.probe_allowed_private_ranges"' in config_page
+    assert 'v-model="config.hls_ad_filter_regex"' in config_page
     assert "download_root: String(config.download_root || '').trim()" in config_page
+    assert "source_allowlist: String(config.source_allowlist || '').trim()" in config_page
+    assert "probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim()" in config_page
+    assert "hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim()" in config_page
+    assert "请填写下载目录" not in config_page
+    assert "下载目录（可留空）" in config_page
+    assert "MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录" in config_page
+    assert "config.download_root = defaults.download_root" not in config_page
 
 
 def test_source_health_ui_uses_cached_reads_and_persists_interval():

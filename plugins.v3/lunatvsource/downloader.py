@@ -14,11 +14,12 @@ import tempfile
 import threading
 import time
 import urllib.parse
-import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from .cms import _fetch_public_url, _request_public_url
 
 from .m3u8_engine import (
     M3U8EngineCancelled,
@@ -39,6 +40,15 @@ DEFAULT_SEGMENT_THREAD_COUNT = 16
 MIN_SEGMENT_THREAD_COUNT = 4
 MAX_SEGMENT_THREAD_COUNT = 32
 MAX_TOTAL_SEGMENT_THREADS = 64
+DEFAULT_HLS_AD_FILTER_REGEX = (
+    r"(?i)(?:adjump|redtraffic|alimama|chenggao|laomaotao|"
+    r"[/_.-](?:ad|ads|advert|advertisement|promo|sponsor)[/_.-])"
+)
+_HLS_PLAYLIST_MAX_BYTES = 4 * 1024 * 1024
+_HLS_PLAYLIST_TOTAL_BYTES = 8 * 1024 * 1024
+_HLS_PLAYLIST_MAX_COUNT = 32
+_HLS_PLAYLIST_MAX_DEPTH = 4
+_HLS_PREPARE_TIMEOUT_SECONDS = 60.0
 
 
 def _regular_file_size(value: str) -> int:
@@ -114,11 +124,12 @@ class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
 class _SegmentProxy:
     """Loopback-only streaming proxy that removes fake JPEG segment headers."""
 
-    def __init__(self) -> None:
+    def __init__(self, allowed_private_ranges: Iterable[str] = ()) -> None:
         self._urls: Dict[str, str] = {}
         self._reverse: Dict[str, str] = {}
         self._server: Optional[http.server.ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._allowed_private_ranges = tuple(allowed_private_ranges or ())
 
     def __enter__(self) -> "_SegmentProxy":
         return self
@@ -138,23 +149,39 @@ class _SegmentProxy:
                     self.send_error(404)
                     return
                 try:
-                    request = urllib.request.Request(
+                    request_headers = {
+                        "User-Agent": "MoviePilot-LunaTV/1.0",
+                        "Accept": "*/*",
+                        "Accept-Encoding": "identity",
+                    }
+                    range_header = self.headers.get("Range")
+                    if range_header:
+                        request_headers["Range"] = range_header
+                    connection, response, _ = _request_public_url(
                         remote_url,
-                        headers={"User-Agent": "MoviePilot-LunaTV/1.0", "Accept-Encoding": "identity"},
+                        30,
+                        proxy._allowed_private_ranges,
+                        headers=request_headers,
                     )
-                    with urllib.request.urlopen(request, timeout=30) as response:
+                    try:
+                        partial = response.status == 206
                         prefix = response.read(4096)
-                        offset = _mpegts_payload_offset(prefix)
+                        offset = 0 if partial else _mpegts_payload_offset(prefix)
                         length = response.headers.get("Content-Length")
                         content_length = (
                             int(length)
                             if length is not None and str(length).isdigit()
                             else None
                         )
-                        self.send_response(200)
+                        self.send_response(206 if partial else 200)
                         self.send_header("Content-Type", "video/mp2t" if offset else (
                             response.headers.get("Content-Type") or "application/octet-stream"
                         ))
+                        if partial:
+                            for name in ("Content-Range", "Accept-Ranges"):
+                                value = response.headers.get(name)
+                                if value:
+                                    self.send_header(name, value)
                         if content_length is not None and content_length >= offset:
                             self.send_header("Content-Length", str(content_length - offset))
                         else:
@@ -169,6 +196,8 @@ class _SegmentProxy:
                             if not chunk:
                                 break
                             self.wfile.write(chunk)
+                    finally:
+                        connection.close()
                 except (BrokenPipeError, ConnectionResetError):
                     return
                 except Exception:
@@ -184,7 +213,7 @@ class _SegmentProxy:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
-    def url_for(self, remote_url: str) -> str:
+    def url_for(self, remote_url: str, *, ad: bool = False) -> str:
         self._start()
         token = self._reverse.get(remote_url)
         if token is None:
@@ -194,7 +223,8 @@ class _SegmentProxy:
         if self._server is None:
             raise RuntimeError("分片代理尚未启动")
         host, port = self._server.server_address[:2]
-        return f"http://{host}:{port}/segment/{token}"
+        marker = "?cue=lunatv-cue-ad" if ad else ""
+        return f"http://{host}:{port}/segment/{token}{marker}"
 
     def __exit__(self, *_args: Any) -> None:
         if self._server is not None:
@@ -251,6 +281,7 @@ class DownloadTask:
         media_source: str,
         media_id: str,
     ) -> "DownloadTask":
+        season_value = getattr(episode, "season", None)
         return cls(
             task_id=str(uuid.uuid4()),
             source_key=media_source,
@@ -258,7 +289,7 @@ class DownloadTask:
             title=title,
             year=year,
             media_type=media_type,
-            season=int(getattr(episode, "season", 1) or 1),
+            season=int(season_value) if season_value not in (None, "") else 1,
             episode=int(getattr(episode, "episode", 1) or 1),
             url=str(getattr(episode, "url", "")),
             root=root,
@@ -297,6 +328,7 @@ class _SerialDownloadQueue:
         notify: Callable[[str, str], None],
         on_complete: Optional[Callable[[DownloadTask, str], None]] = None,
         data_path: Optional[Path] = None,
+        allowed_private_ranges: Iterable[str] = (),
     ) -> None:
         self._load = load
         self._save = save
@@ -314,6 +346,7 @@ class _SerialDownloadQueue:
         self._idle_event = threading.Event()
         self._idle_event.set()
         self._delete_file_tasks: set[str] = set()
+        self._allowed_private_ranges = tuple(allowed_private_ranges or ())
         # Standalone/legacy hosts retain the historical N-only behavior.
         # MoviePilot passes its plugin data directory and enables the managed
         # N_m3u8DL-RE is the sole VOD download engine.
@@ -622,11 +655,19 @@ class _SerialDownloadQueue:
         """Return active workers whose download is durable but hook still runs."""
         with self._lock:
             states = {task.task_id: task.state for task in self._read()}
-            return {
+            active = {
                 task_id
                 for task_id in self._active
                 if states.get(task_id) == "completed"
             }
+            pending = {
+                task_id
+                for task_id, intent in getattr(
+                    self, "_pending_terminal", {}
+                ).items()
+                if intent.state == "completed"
+            }
+            return active | pending
 
     def engine_status(self) -> Dict[str, Any]:
         """Report the pinned engine without triggering a network install."""
@@ -930,24 +971,173 @@ class _SerialDownloadQueue:
         self._notify("LunaTV 已完成", self._notification_text(task))
         return {"processed": 1, "task_id": task.task_id, "state": "completed", "output": output}
 
+    @staticmethod
+    def _open_parent_below_root(
+        root: Path,
+        target: Path,
+        *,
+        create: bool = False,
+    ) -> tuple[List[int], str, tuple[str, ...]]:
+        """Open a target parent without following directory symlinks."""
+
+        root_path = Path(os.path.abspath(os.fspath(root)))
+        target_path = Path(os.path.abspath(os.fspath(target)))
+        try:
+            relative = target_path.relative_to(root_path)
+        except ValueError as exc:
+            raise ValueError("目标路径越界") from exc
+        if not relative.parts:
+            raise ValueError("目标路径无效")
+
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        directory = getattr(os, "O_DIRECTORY", 0)
+        if not nofollow or not directory:
+            raise OSError("当前平台缺少安全目录操作支持")
+
+        if create:
+            root_path.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDONLY | directory | nofollow | getattr(os, "O_CLOEXEC", 0)
+        descriptors = [os.open(root_path, flags)]
+        try:
+            for part in relative.parts[:-1]:
+                try:
+                    descriptor = os.open(part, flags, dir_fd=descriptors[-1])
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(part, 0o755, dir_fd=descriptors[-1])
+                    descriptor = os.open(part, flags, dir_fd=descriptors[-1])
+                descriptors.append(descriptor)
+        except Exception:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+        return descriptors, relative.parts[-1], relative.parts[:-1]
+
+    @staticmethod
+    def _close_descriptors(descriptors: Iterable[int]) -> None:
+        for descriptor in reversed(tuple(descriptors)):
+            if descriptor < 0:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    @classmethod
+    def _ensure_parent_below_root(cls, root: Path, target: Path) -> None:
+        descriptors, _name, _parents = cls._open_parent_below_root(
+            root,
+            target,
+            create=True,
+        )
+        cls._close_descriptors(descriptors)
+
+    @classmethod
+    def _atomic_write_text_below_root(
+        cls,
+        root: Path,
+        target: Path,
+        value: str,
+    ) -> None:
+        descriptors, name, _parents = cls._open_parent_below_root(
+            root,
+            target,
+            create=True,
+        )
+        parent_fd = descriptors[-1]
+        temporary_name = f".{name}.{uuid.uuid4().hex}.part"
+        descriptor = -1
+        try:
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                descriptor = -1
+                stream.write(value)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            temporary_name = ""
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            cls._close_descriptors(descriptors)
+
+    @classmethod
+    def _unlink_below_root(
+        cls,
+        root: Path,
+        target: Path,
+        *,
+        cleanup_empty_parents: bool = False,
+    ) -> bool:
+        try:
+            descriptors, name, parent_parts = cls._open_parent_below_root(
+                root,
+                target,
+            )
+        except FileNotFoundError:
+            return False
+
+        removed = False
+        try:
+            try:
+                os.unlink(name, dir_fd=descriptors[-1])
+                removed = True
+            except FileNotFoundError:
+                pass
+
+            if cleanup_empty_parents:
+                for index in range(len(parent_parts) - 1, -1, -1):
+                    child_index = index + 1
+                    os.close(descriptors[child_index])
+                    descriptors[child_index] = -1
+                    try:
+                        os.rmdir(parent_parts[index], dir_fd=descriptors[index])
+                    except OSError:
+                        break
+            return removed
+        finally:
+            cls._close_descriptors(descriptors)
+
     def _execute(self, task: DownloadTask) -> str:
         root, destination = self._destination_for_task(task)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() and destination.stat().st_size > 0:
+        self._ensure_parent_below_root(root, destination)
+        if _regular_file_size(destination) > 0:
             self._cleanup_m3u8_cache(task, destination.parent)
             return str(destination)
 
         if task.mode == "strm":
-            temp_path = destination.with_suffix(destination.suffix + ".part")
-            try:
-                temp_path.write_text(task.url + "\n", encoding="utf-8")
-                os.replace(temp_path, destination)
-            except Exception:
-                try:
-                    temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+            self._unlink_below_root(
+                root,
+                destination.with_suffix(destination.suffix + ".part"),
+            )
+            self._atomic_write_text_below_root(
+                root,
+                destination,
+                task.url + "\n",
+            )
             self._cleanup_m3u8_cache(task, destination.parent)
             return str(destination)
 
@@ -1040,11 +1230,16 @@ class _SerialDownloadQueue:
         if not self._m3u8_engines:
             return False
         try:
-            with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy() as proxy:
+            with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy(
+                self._allowed_private_ranges
+            ) as proxy:
                 if self._control_event.is_set():
                     raise _QueueControl("controlled")
                 input_url = self._prepare_hls_input(
-                    task.url, Path(temp_dir), proxy.url_for
+                    task.url,
+                    Path(temp_dir),
+                    proxy.url_for,
+                    self._allowed_private_ranges,
                 )
                 if self._control_event.is_set():
                     raise _QueueControl("controlled")
@@ -1083,11 +1278,13 @@ class _SerialDownloadQueue:
             return False
 
     def _delete_task_files(self, task: DownloadTask) -> None:
-        """Delete only the task output and cache paths below its configured root."""
+        """Delete only task-owned paths without following symlinks."""
+
         try:
             root = Path(task.root).expanduser().resolve()
         except (OSError, RuntimeError):
             return
+
         candidates: List[Path] = []
         if task.output:
             output = Path(task.output).expanduser()
@@ -1106,24 +1303,29 @@ class _SerialDownloadQueue:
         except (TypeError, ValueError, OSError):
             relative_dir = ""
             filename = ""
-        if filename and not task.output:
+        if filename and filename != task.output:
             candidates.append(root / relative_dir / filename)
 
         seen: set[Path] = set()
         for candidate in candidates:
-            try:
-                output = candidate.resolve()
-            except (OSError, RuntimeError):
+            output = Path(os.path.abspath(os.fspath(candidate)))
+            if output in seen:
                 continue
-            if root not in output.parents or output in seen:
+            try:
+                output.relative_to(root)
+            except ValueError:
                 continue
             seen.add(output)
-            for path in (output, Path(f"{output}.part")):
+            paths = (output, Path(f"{output}.part"))
+            for index, path in enumerate(paths):
                 try:
-                    path.unlink(missing_ok=True)
-                except OSError:
+                    self._unlink_below_root(
+                        root,
+                        path,
+                        cleanup_empty_parents=index == len(paths) - 1,
+                    )
+                except (OSError, ValueError):
                     continue
-                self._remove_empty_parents(path.parent, root)
 
     @staticmethod
     def _remove_empty_parents(path: Path, root: Path) -> None:
@@ -1157,10 +1359,130 @@ class _SerialDownloadQueue:
         return uri
 
     @staticmethod
+    def _detect_hls_markers(text: str) -> Dict[str, Any]:
+        """Summarize explicit HLS splice markers without changing the playlist."""
+
+        result: Dict[str, Any] = {
+            "cue_out": 0,
+            "cue_out_cont": 0,
+            "cue_in": 0,
+            "cue_ranges": [],
+            "unclosed_cue": 0,
+            "daterange": 0,
+            "daterange_candidates": 0,
+            "discontinuity": 0,
+        }
+        elapsed = 0.0
+        cue_start: Optional[float] = None
+        for line in text.splitlines():
+            marker = line.strip()
+            upper = marker.upper()
+            if upper.startswith("#EXTINF:"):
+                try:
+                    elapsed += max(0.0, float(marker.partition(":")[2].partition(",")[0]))
+                except ValueError:
+                    pass
+            elif upper.startswith("#EXT-X-CUE-OUT-CONT"):
+                result["cue_out_cont"] += 1
+                if cue_start is None:
+                    cue_start = elapsed
+            elif upper.startswith("#EXT-X-CUE-OUT"):
+                result["cue_out"] += 1
+                if cue_start is None:
+                    cue_start = elapsed
+            elif upper.startswith("#EXT-X-CUE-IN"):
+                result["cue_in"] += 1
+                if cue_start is not None:
+                    result["cue_ranges"].append((cue_start, elapsed))
+                    cue_start = None
+            elif upper.startswith("#EXT-X-DATERANGE:"):
+                result["daterange"] += 1
+                if any(
+                    attribute in upper
+                    for attribute in (
+                        'CLASS="COM.APPLE.HLS.INTERSTITIAL"',
+                        "X-ASSET-URI=",
+                        "X-ASSET-LIST=",
+                        "SCTE35-OUT=",
+                        "SCTE35-IN=",
+                        "SCTE35-CMD=",
+                    )
+                ):
+                    result["daterange_candidates"] += 1
+            elif upper == "#EXT-X-DISCONTINUITY":
+                result["discontinuity"] += 1
+        result["unclosed_cue"] = int(cue_start is not None)
+        return result
+
+    @staticmethod
+    def _strip_closed_cue_segments(text: str) -> tuple[str, int, float]:
+        """Remove only structurally closed CUE ad blocks; otherwise keep all data."""
+
+        report = DownloadQueue._detect_hls_markers(text)
+        if not report["cue_ranges"] or report["unclosed_cue"]:
+            return text, 0, 0.0
+
+        output: List[str] = []
+        in_cue = False
+        pending_extinf = False
+        removed_segments = 0
+        removed_seconds = 0.0
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            upper = stripped.upper()
+
+            if upper.startswith("#EXT-X-CUE-OUT-CONT"):
+                if pending_extinf:
+                    return text, 0, 0.0
+                in_cue = True
+                continue
+            if upper.startswith("#EXT-X-CUE-OUT"):
+                if pending_extinf:
+                    return text, 0, 0.0
+                in_cue = True
+                continue
+            if upper.startswith("#EXT-X-CUE-IN"):
+                if not in_cue or pending_extinf:
+                    return text, 0, 0.0
+                in_cue = False
+                continue
+
+            if not in_cue:
+                output.append(line)
+                continue
+
+            if upper.startswith("#EXTINF:"):
+                if pending_extinf:
+                    return text, 0, 0.0
+                try:
+                    removed_seconds += max(
+                        0.0, float(stripped.partition(":")[2].partition(",")[0])
+                    )
+                except ValueError:
+                    return text, 0, 0.0
+                pending_extinf = True
+            elif stripped and not stripped.startswith("#"):
+                if not pending_extinf:
+                    return text, 0, 0.0
+                removed_segments += 1
+                pending_extinf = False
+
+        if in_cue or pending_extinf or removed_segments == 0:
+            return text, 0, 0.0
+        if "#EXTINF:" in text.upper() and "#EXTINF:" not in "\n".join(output).upper():
+            return text, 0, 0.0
+        newline = "\n" if text.endswith(("\n", "\r")) else ""
+        return "\n".join(output) + newline, removed_segments, removed_seconds
+
+    @staticmethod
     def _prepare_hls_input(
         url: str,
         temp_dir: Path,
         segment_url_mapper: Optional[Callable[[str], str]] = None,
+        allowed_private_ranges: Iterable[str] = (),
+        ad_segment_url_mapper: Optional[Callable[[str], str]] = None,
+        ad_url_matcher: Optional[Callable[[str], bool]] = None,
     ) -> str:
         """Materialize playlists locally so ffmpeg can read zstd HTTP responses.
 
@@ -1171,20 +1493,50 @@ class _SerialDownloadQueue:
         """
 
         visited: Dict[str, str] = {}
+        marker_totals = DownloadQueue._detect_hls_markers("")
+        removed_cue_segments = 0
+        removed_cue_seconds = 0.0
+        playlist_count = 0
+        total_playlist_bytes = 0
+        deadline = time.monotonic() + _HLS_PREPARE_TIMEOUT_SECONDS
 
-        def materialize(playlist_url: str) -> str:
-            playlist_url = DownloadQueue._validate_hls_remote_uri(playlist_url)
-            if playlist_url in visited:
-                return visited[playlist_url]
-            request = urllib.request.Request(
-                playlist_url,
-                headers={"User-Agent": "MoviePilot-LunaTV/1.0", "Accept-Encoding": "identity"},
+        def materialize(playlist_url: str, depth: int = 0) -> str:
+            nonlocal playlist_count, total_playlist_bytes
+            nonlocal removed_cue_segments, removed_cue_seconds
+            requested_url = DownloadQueue._validate_hls_remote_uri(playlist_url)
+            if requested_url in visited:
+                return visited[requested_url]
+            if depth > _HLS_PLAYLIST_MAX_DEPTH:
+                raise RuntimeError("m3u8 播放列表嵌套层级过深")
+            if playlist_count >= _HLS_PLAYLIST_MAX_COUNT:
+                raise RuntimeError("m3u8 播放列表数量过多")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("m3u8 播放列表准备超时")
+            payload, final_url = _fetch_public_url(
+                requested_url,
+                30,
+                _HLS_PLAYLIST_MAX_BYTES + 1,
+                allowed_private_ranges,
+                deadline=deadline,
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = response.read()
-                encoding = (response.headers.get("Content-Encoding") or "").lower()
-            if encoding == "zstd" or payload.startswith(b"\x28\xb5\x2f\xfd"):
-                payload = DownloadQueue._decompress_zstd(payload)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("m3u8 播放列表准备超时")
+            if len(payload) > _HLS_PLAYLIST_MAX_BYTES:
+                raise RuntimeError("m3u8 播放列表响应过大")
+            playlist_url = DownloadQueue._validate_hls_remote_uri(final_url)
+            if playlist_url in visited:
+                visited[requested_url] = visited[playlist_url]
+                return visited[playlist_url]
+            if payload.startswith(b"\x28\xb5\x2f\xfd"):
+                payload = DownloadQueue._decompress_zstd(
+                    payload,
+                    _HLS_PLAYLIST_MAX_BYTES,
+                )
+            if len(payload) > _HLS_PLAYLIST_MAX_BYTES:
+                raise RuntimeError("m3u8 播放列表解压后过大")
+            if total_playlist_bytes + len(payload) > _HLS_PLAYLIST_TOTAL_BYTES:
+                raise RuntimeError("m3u8 播放列表累计大小过大")
+            total_playlist_bytes += len(payload)
             try:
                 text = payload.decode("utf-8-sig")
             except UnicodeDecodeError as exc:
@@ -1192,13 +1544,43 @@ class _SerialDownloadQueue:
             if "#EXTM3U" not in text[:100]:
                 raise RuntimeError("资源站返回的不是有效 m3u8")
 
-            local_path = temp_dir / f"playlist-{len(visited)}.m3u8"
+            detected = DownloadQueue._detect_hls_markers(text)
+            for key in (
+                "cue_out",
+                "cue_out_cont",
+                "cue_in",
+                "unclosed_cue",
+                "daterange",
+                "daterange_candidates",
+                "discontinuity",
+            ):
+                marker_totals[key] += detected[key]
+            marker_totals["cue_ranges"].extend(detected["cue_ranges"])
+            _preview, cue_segments, cue_seconds = (
+                DownloadQueue._strip_closed_cue_segments(text)
+            )
+            removed_cue_segments += cue_segments
+            removed_cue_seconds += cue_seconds
+
+            local_path = temp_dir / f"playlist-{playlist_count}.m3u8"
+            playlist_count += 1
+            visited[requested_url] = str(local_path)
             visited[playlist_url] = str(local_path)
             lines = text.splitlines()
             rewritten: List[str] = []
             child_playlist = False
+            in_closed_cue = False
+            cue_filter_enabled = cue_segments > 0 and ad_segment_url_mapper is not None
             for line in lines:
                 stripped = line.strip()
+                upper = stripped.upper()
+                if cue_filter_enabled:
+                    if upper.startswith(
+                        ("#EXT-X-CUE-OUT-CONT", "#EXT-X-CUE-OUT")
+                    ):
+                        in_closed_cue = True
+                    elif upper.startswith("#EXT-X-CUE-IN"):
+                        in_closed_cue = False
                 if stripped.startswith("#EXT-X-STREAM-INF"):
                     child_playlist = True
                     rewritten.append(line)
@@ -1208,7 +1590,15 @@ class _SerialDownloadQueue:
                         urllib.parse.urljoin(playlist_url, stripped)
                     )
                     if child_playlist or urllib.parse.urlparse(absolute).path.lower().endswith(".m3u8"):
-                        rewritten.append(materialize(absolute))
+                        rewritten.append(materialize(absolute, depth + 1))
+                    elif in_closed_cue and ad_segment_url_mapper is not None:
+                        rewritten.append(ad_segment_url_mapper(absolute))
+                    elif (
+                        ad_segment_url_mapper is not None
+                        and ad_url_matcher is not None
+                        and ad_url_matcher(absolute)
+                    ):
+                        rewritten.append(ad_segment_url_mapper(absolute))
                     else:
                         rewritten.append(segment_url_mapper(absolute) if segment_url_mapper else absolute)
                     child_playlist = False
@@ -1218,9 +1608,11 @@ class _SerialDownloadQueue:
                     absolute = DownloadQueue._validate_hls_remote_uri(
                         urllib.parse.urljoin(playlist_url, match.group(1))
                     )
-                    if stripped.startswith("#EXT-X-MEDIA"):
-                        absolute = materialize(absolute)
-                    elif stripped.startswith("#EXT-X-MAP") and segment_url_mapper:
+                    if stripped.startswith(
+                        ("#EXT-X-MEDIA", "#EXT-X-I-FRAME-STREAM-INF", "#EXT-X-RENDITION-REPORT")
+                    ):
+                        absolute = materialize(absolute, depth + 1)
+                    elif segment_url_mapper:
                         absolute = segment_url_mapper(absolute)
                     return f'URI="{absolute}"'
 
@@ -1228,16 +1620,65 @@ class _SerialDownloadQueue:
             local_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
             return str(local_path)
 
-        return materialize(url)
+        local_input = materialize(url)
+        ranges = ", ".join(
+            f"{start:g}-{end:g}s" for start, end in marker_totals["cue_ranges"][:8]
+        ) or "-"
+        if len(marker_totals["cue_ranges"]) > 8:
+            ranges += ", ..."
+        LOGGER.info(
+            "LunaTV HLS 标记扫描: CUE-OUT=%d, CUE-IN=%d, CUE-OUT-CONT=%d, "
+            "闭合候选=%d [%s], 待过滤=%d分片/%.1f秒, 未闭合=%d, "
+            "DATERANGE广告候选=%d/%d, "
+            "DISCONTINUITY边界=%d",
+            marker_totals["cue_out"],
+            marker_totals["cue_in"],
+            marker_totals["cue_out_cont"],
+            len(marker_totals["cue_ranges"]),
+            ranges,
+            removed_cue_segments,
+            removed_cue_seconds,
+            marker_totals["unclosed_cue"],
+            marker_totals["daterange_candidates"],
+            marker_totals["daterange"],
+            marker_totals["discontinuity"],
+        )
+        return local_input
 
     @staticmethod
-    def _decompress_zstd(payload: bytes) -> bytes:
+    def _decompress_zstd(
+        payload: bytes,
+        max_output_bytes: int = _HLS_PLAYLIST_MAX_BYTES,
+    ) -> bytes:
+        output_limit = max(1, int(max_output_bytes))
         try:
             import zstandard  # type: ignore[import-not-found]
-
-            return zstandard.ZstdDecompressor().decompress(payload)
         except ImportError:
             pass
+        else:
+            frame_size = None
+            frame_content_size = getattr(zstandard, "frame_content_size", None)
+            if callable(frame_content_size):
+                try:
+                    frame_size = int(frame_content_size(payload))
+                except Exception:
+                    frame_size = None
+            unknown_sizes = {
+                int(getattr(zstandard, "CONTENTSIZE_UNKNOWN", 0xFFFFFFFFFFFFFFFF)),
+                int(getattr(zstandard, "CONTENTSIZE_ERROR", 0xFFFFFFFFFFFFFFFE)),
+            }
+            if frame_size is not None and frame_size not in unknown_sizes and frame_size > output_limit:
+                raise RuntimeError("zstd m3u8 解压后过大")
+            try:
+                decompressed = zstandard.ZstdDecompressor().decompress(
+                    payload,
+                    max_output_size=output_limit,
+                )
+            except Exception as exc:
+                raise RuntimeError("zstd m3u8 解压失败") from exc
+            if len(decompressed) > output_limit:
+                raise RuntimeError("zstd m3u8 解压后过大")
+            return decompressed
 
         candidates = [
             ctypes.util.find_library("zstd"),
@@ -1268,10 +1709,14 @@ class _SerialDownloadQueue:
         size = int(library.ZSTD_getFrameContentSize(source, len(payload)))
         if size in {0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFE} or size <= 0:
             raise RuntimeError("无法确定 zstd m3u8 的解压大小")
+        if size > output_limit:
+            raise RuntimeError("zstd m3u8 解压后过大")
         target = ctypes.create_string_buffer(size)
         result = int(library.ZSTD_decompress(target, size, source, len(payload)))
         if library.ZSTD_isError(result):
             raise RuntimeError("zstd m3u8 解压失败")
+        if result > output_limit:
+            raise RuntimeError("zstd m3u8 解压后过大")
         return target.raw[:result]
 
     def stop(self) -> None:
@@ -1305,6 +1750,8 @@ class _TerminalIntent:
 class DownloadQueue(_SerialDownloadQueue):
     """Persistent bounded-concurrency queue with task-local cancellation."""
 
+    COMPLETION_OUTBOX_KEY = "download_completion_outbox_v1"
+
     def __init__(
         self,
         load: Callable[[str, Any], Any],
@@ -1314,6 +1761,8 @@ class DownloadQueue(_SerialDownloadQueue):
         data_path: Optional[Path] = None,
         max_concurrent_tasks: int = 1,
         segment_thread_count: int = DEFAULT_SEGMENT_THREAD_COUNT,
+        allowed_private_ranges: Iterable[str] = (),
+        ad_filter_regex: str = "",
     ) -> None:
         self._load = load
         self._save = save
@@ -1346,9 +1795,20 @@ class DownloadQueue(_SerialDownloadQueue):
         self._idle_event = threading.Event()
         self._idle_event.set()
         self._delete_file_tasks: set[str] = set()
+        self._allowed_private_ranges = tuple(allowed_private_ranges or ())
+        self._ad_filter_regex = str(ad_filter_regex or "").strip()
+        self._ad_filter_pattern: Optional[re.Pattern[str]] = None
+        if self._ad_filter_regex:
+            try:
+                self._ad_filter_pattern = re.compile(self._ad_filter_regex)
+            except re.error as exc:
+                LOGGER.warning("LunaTV HLS 广告正则无效，已停用：%s", exc)
+                self._ad_filter_regex = ""
+        self._ad_keyword = "lunatv-cue-ad"
         self._data_path = Path(data_path).resolve() if data_path is not None else None
         self._m3u8_engines = (self._new_n_engine(self._data_path),) if self._data_path else ()
         self._recover_interrupted_tasks()
+        self._restore_completion_outbox()
 
     def _new_n_engine(self, data_path: Path) -> N_m3u8DLEngine:
         try:
@@ -1357,6 +1817,76 @@ class DownloadQueue(_SerialDownloadQueue):
             if "thread_count" not in str(exc):
                 raise
             return N_m3u8DLEngine(data_path)
+
+    def _read_completion_outbox(self) -> Dict[str, _TerminalIntent]:
+        intents: Dict[str, _TerminalIntent] = {}
+        raw = self._load(self.COMPLETION_OUTBOX_KEY, []) or []
+        if not isinstance(raw, list):
+            return intents
+        for item in raw:
+            if not isinstance(item, dict) or not isinstance(item.get("task"), dict):
+                continue
+            try:
+                task = DownloadTask(**item["task"])
+            except TypeError:
+                continue
+            if not task.task_id:
+                continue
+            output = str(item.get("output") or task.output or "")
+            intents[task.task_id] = _TerminalIntent(
+                task=task,
+                control=_TaskControl(),
+                state="completed",
+                output=output,
+            )
+        return intents
+
+    def _write_completion_outbox(
+        self, intents: Dict[str, _TerminalIntent]
+    ) -> None:
+        payload = []
+        for intent in intents.values():
+            task = intent.task.to_dict()
+            task.update(
+                state="completed",
+                error="",
+                progress=1.0,
+                output=intent.output,
+            )
+            payload.append({"task": task, "output": intent.output})
+        self._save(self.COMPLETION_OUTBOX_KEY, payload)
+
+    def _persist_completion_outbox(self, intent: _TerminalIntent) -> None:
+        intents = self._read_completion_outbox()
+        intents[intent.task.task_id] = intent
+        try:
+            self._write_completion_outbox(intents)
+        except Exception:
+            if intent.task.task_id in self._read_completion_outbox():
+                return
+            raise
+
+    def _clear_completion_outbox(self, task_id: str) -> None:
+        intents = self._read_completion_outbox()
+        if task_id not in intents:
+            return
+        intents.pop(task_id, None)
+        try:
+            self._write_completion_outbox(intents)
+        except Exception:
+            if task_id not in self._read_completion_outbox():
+                return
+            raise
+
+    def _restore_completion_outbox(self) -> None:
+        for task_id, intent in self._read_completion_outbox().items():
+            self._pending_terminal[task_id] = intent
+            self._active_destinations[task_id] = self._destination_key(intent.task)
+            self._persist_state_transition(
+                intent.task,
+                "completed",
+                output=intent.output,
+            )
 
     @staticmethod
     def _destination_for_task(task: DownloadTask) -> tuple[Path, Path]:
@@ -1371,9 +1901,13 @@ class DownloadQueue(_SerialDownloadQueue):
             task.mode,
         )
         root = Path(task.root).expanduser().resolve()
-        destination = (root / relative_dir / filename).resolve()
-        if root not in destination.parents:
-            raise ValueError("目标路径越界")
+        destination = Path(
+            os.path.abspath(os.fspath(root / relative_dir / filename))
+        )
+        try:
+            destination.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("目标路径越界") from exc
         return root, destination
 
     @classmethod
@@ -1637,6 +2171,8 @@ class DownloadQueue(_SerialDownloadQueue):
                 intent.task.output = intent.output
             self._persist_control_transition(intent.task, intent.control, intent.state)
             return
+        if intent.state == "completed":
+            self._persist_completion_outbox(intent)
         self._persist_state_transition(
             intent.task,
             intent.state,
@@ -1673,30 +2209,53 @@ class DownloadQueue(_SerialDownloadQueue):
                 except Exception:
                     LOGGER.warning("LunaTV terminal transition replay failed for %s", task_id)
                     continue
-                self._pending_terminal.pop(task_id, None)
                 if intent.state == "completed":
                     completed.append(intent)
-                elif intent.state == "failed":
-                    failed.append(intent)
-                if intent.state != "completed":
+                else:
+                    self._pending_terminal.pop(task_id, None)
                     self._active_destinations.pop(task_id, None)
+                    if intent.state == "failed":
+                        failed.append(intent)
         for intent in completed:
-            try:
-                try:
-                    if self._on_complete is not None:
-                        self._on_complete(intent.task, intent.output)
-                except Exception:
-                    LOGGER.exception("LunaTV completion hook failed")
-                self._notify("LunaTV 已完成", self._notification_text(intent.task))
-            finally:
-                with self._lock:
-                    self._active_destinations.pop(intent.task.task_id, None)
-                    self._drain_wakeup.set()
+            self._deliver_completion(intent)
         for intent in failed:
             self._notify(
                 "LunaTV 下载失败",
                 f"{self._notification_text(intent.task)}：{intent.error}",
             )
+
+    def _deliver_completion(self, intent: _TerminalIntent) -> bool:
+        task_id = intent.task.task_id
+        with self._lock:
+            if self._pending_terminal.get(task_id) is not intent:
+                return False
+            self._pending_terminal.pop(task_id, None)
+        try:
+            if self._on_complete is not None:
+                self._on_complete(intent.task, intent.output)
+        except Exception:
+            LOGGER.exception("LunaTV completion hook failed")
+            with self._lock:
+                self._pending_terminal[task_id] = intent
+                self._drain_failed = True
+                self._release(task_id, release_destination=False)
+            return False
+        try:
+            with self._lock:
+                self._clear_completion_outbox(task_id)
+        except Exception:
+            LOGGER.exception("LunaTV completion outbox acknowledgement failed")
+            with self._lock:
+                self._pending_terminal[task_id] = intent
+                self._drain_failed = True
+                self._release(task_id, release_destination=False)
+            return False
+        try:
+            self._notify("LunaTV 已完成", self._notification_text(intent.task))
+        finally:
+            with self._lock:
+                self._release(task_id)
+        return True
 
     def _finish_failed(
         self, task: DownloadTask, control: _TaskControl, exc: Exception
@@ -1734,20 +2293,19 @@ class DownloadQueue(_SerialDownloadQueue):
         with self._lock:
             if control.action == "remove":
                 state = "remove"
-            elif control.action == "pause":
-                state = "pause"
             else:
                 state = "completed"
             final_output = task.output or output if state == "remove" else output
+            intent = _TerminalIntent(
+                task=task,
+                control=control,
+                state=state,
+                output=final_output,
+            )
+            if state == "completed":
+                self._pending_terminal[task.task_id] = intent
             try:
-                self._persist_terminal_intent(
-                    _TerminalIntent(
-                        task=task,
-                        control=control,
-                        state=state,
-                        output=final_output,
-                    )
-                )
+                self._persist_terminal_intent(intent)
             except Exception as exc:
                 self._defer_terminal(
                     task,
@@ -1766,16 +2324,7 @@ class DownloadQueue(_SerialDownloadQueue):
             return {"processed": 1, "task_id": task.task_id, "state": state}
         if not persisted:
             return {"processed": 1, "task_id": task.task_id, "state": state, "output": output}
-        try:
-            try:
-                if self._on_complete is not None:
-                    self._on_complete(task, output)
-            except Exception:
-                LOGGER.exception("LunaTV completion hook failed")
-            self._notify("LunaTV 已完成", self._notification_text(task))
-        finally:
-            with self._lock:
-                self._release(task.task_id)
+        self._deliver_completion(intent)
         return {"processed": 1, "task_id": task.task_id, "state": "completed", "output": output}
 
     def _release(self, task_id: str, *, release_destination: bool = True) -> None:
@@ -1977,26 +2526,21 @@ class DownloadQueue(_SerialDownloadQueue):
         return False
 
     def _execute(self, task: DownloadTask) -> str:
-        relative_dir, filename = media_path(
-            task.root, task.title, task.year, task.media_type, task.season,
-            task.episode, task.url, task.mode,
-        )
-        root = Path(task.root).expanduser().resolve()
-        destination = (root / relative_dir / filename).resolve()
-        if root not in destination.parents:
-            raise ValueError("目标路径越界")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists() and destination.stat().st_size > 0:
+        root, destination = self._destination_for_task(task)
+        self._ensure_parent_below_root(root, destination)
+        if _regular_file_size(destination) > 0:
             self._cleanup_m3u8_cache(task, destination.parent)
             return str(destination)
         if task.mode == "strm":
-            temp_path = destination.with_suffix(destination.suffix + ".part")
-            try:
-                temp_path.write_text(task.url + "\n", encoding="utf-8")
-                os.replace(temp_path, destination)
-            except Exception:
-                temp_path.unlink(missing_ok=True)
-                raise
+            self._unlink_below_root(
+                root,
+                destination.with_suffix(destination.suffix + ".part"),
+            )
+            self._atomic_write_text_below_root(
+                root,
+                destination,
+                task.url + "\n",
+            )
             self._cleanup_m3u8_cache(task, destination.parent)
             return str(destination)
         temp_path = destination.with_suffix(destination.suffix + ".part")
@@ -2021,8 +2565,21 @@ class DownloadQueue(_SerialDownloadQueue):
             raise _QueueControl("controlled")
         if not self._m3u8_engines:
             return False
-        with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy() as proxy:
-            input_url = self._prepare_hls_input(task.url, Path(temp_dir), proxy.url_for)
+        with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy(
+            self._allowed_private_ranges
+        ) as proxy:
+            input_url = self._prepare_hls_input(
+                task.url,
+                Path(temp_dir),
+                proxy.url_for,
+                self._allowed_private_ranges,
+                lambda url: proxy.url_for(url, ad=True),
+                (
+                    lambda url: bool(self._ad_filter_pattern.search(url))
+                    if self._ad_filter_pattern is not None
+                    else False
+                ),
+            )
             segments = self._playlist_segment_count(Path(input_url))
             engine = self._m3u8_engines[0]
             kwargs = dict(
@@ -2031,6 +2588,7 @@ class DownloadQueue(_SerialDownloadQueue):
                 control_event=self._control_event,
                 progress_callback=lambda progress: self._update_progress(task.task_id, progress),
                 expected_segments=segments,
+                ad_keyword=self._ad_keyword,
             )
             try:
                 engine.download(input_url, output, thread_count=self.segment_thread_count, **kwargs)

@@ -240,6 +240,37 @@ def test_api_download_enqueues_lunatv_season_token_once(monkeypatch, tmp_path: P
     assert wakeups == [True]
 
 
+def test_api_download_preserves_special_season_zero(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+    token = plugin._resource_token(
+        {
+            "url": "https://example.test/s00e01.m3u8",
+            "title": "示例剧",
+            "year": "2026",
+            "media_type": "tv",
+            "season": 0,
+            "episode": 1,
+            "media_id": "demo:specials",
+            "source_key": "demo",
+            "episodes": [
+                {
+                    "url": "https://example.test/s00e01.m3u8",
+                    "season": 0,
+                    "episode": 1,
+                }
+            ],
+        }
+    )
+
+    response = plugin.api_download({"content": token})
+
+    assert response["success"] is True
+    [task] = plugin._queue.list_tasks()
+    assert (task["season"], task["episode"]) == (0, 1)
+
+
 def test_api_download_encodes_top_level_episodes_for_native_season_download(
     monkeypatch, tmp_path: Path
 ):
@@ -3328,7 +3359,9 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
     assert module["stop_torrents"](["native-qbt-hash"], downloader="下载器1") is None
 
 
-def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(monkeypatch):
+def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
+    monkeypatch, tmp_path: Path
+):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin._queue, "wake", lambda: False)
@@ -3344,16 +3377,20 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(mo
             season=season,
             episode=episode,
             url=f"https://example.test/s{season:02d}e{episode:02d}.m3u8",
-            root="/downloads/tv",
+            root=str(tmp_path),
             host_media_source="themoviedb",
             host_media_id="456",
             source_name="光速资源",
             state=state,
+            output=str(tmp_path / f"{task_id}.mp4") if state == "completed" else "",
             progress=progress,
         )
 
+    completed = task("season-1-completed", 1, "completed", progress=1.0)
+    completed_output = Path(completed.output)
+    completed_output.write_bytes(b"video")
     plugin.save_data(plugin._queue.DATA_KEY, [
-        task("season-1-completed", 1, "completed", progress=1.0).to_dict(),
+        completed.to_dict(),
         task("season-1-pending", 2, "pending", progress=0.5).to_dict(),
         task("season-1-paused", 3, "paused").to_dict(),
         task("season-2-pending", 1, "pending", season=2).to_dict(),
@@ -3386,11 +3423,10 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(mo
     assert states["season-1-paused"] == "pending"
     assert states["season-2-pending"] == "pending"
 
-    assert plugin.remove_torrents(
-        [season_one.hash], delete_file=False, downloader="LunaTVSource"
-    ) is True
+    assert plugin.remove_torrents([season_one.hash], downloader="LunaTVSource") is True
     remaining = {item["task_id"] for item in plugin._queue.list_tasks()}
     assert remaining == {"season-2-pending"}
+    assert completed_output.exists()
 
 
 def test_native_resume_wakes_serial_queue(monkeypatch, tmp_path: Path):
@@ -3505,6 +3541,13 @@ def test_download_configuration_defaults_and_bounds_are_passed_to_queue():
     assert plugin._config["segment_thread_count"] == 16
     assert plugin._queue.max_concurrent_tasks == 2
     assert plugin._queue.segment_thread_count == 16
+    assert plugin._config["hls_ad_filter_regex"]
+    assert plugin._queue._ad_filter_regex == plugin._config["hls_ad_filter_regex"]
+    assert plugin._queue._ad_keyword == "lunatv-cue-ad"
+    assert plugin._queue._ad_filter_pattern is not None
+    assert plugin._queue._ad_filter_pattern.search(
+        "https://cdn.example/path/ads/spot.ts"
+    )
 
     plugin.init_plugin(
         {
@@ -3521,10 +3564,13 @@ def test_download_configuration_defaults_and_bounds_are_passed_to_queue():
             "enabled": True,
             "max_concurrent_tasks": 99,
             "segment_thread_count": 999,
+            "hls_ad_filter_regex": "",
         }
     )
     assert plugin._queue.max_concurrent_tasks == 4
     assert plugin._queue.segment_thread_count == 16
+    assert plugin._queue._ad_filter_regex == ""
+    assert plugin._queue._ad_keyword == "lunatv-cue-ad"
 
 
 def test_reinitialization_waits_for_old_queue_before_replacing_it(monkeypatch):
@@ -3880,6 +3926,63 @@ def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
     assert captured["media_source"] is MediaSource.TMDB
     assert captured["media_id"] == "1084242"
     assert captured["transfer_type"] == "move"
+
+
+def test_native_transfer_passes_generate_nfo_as_scrape_for_manual_transfer(
+    monkeypatch, tmp_path: Path
+):
+    captured = {}
+
+    class MediaSource(str, Enum):
+        TMDB = "themoviedb"
+
+    class MediaType(str, Enum):
+        TV = "电视剧"
+
+    class StorageChain:
+        def get_file_item(self, **kwargs):
+            return object()
+
+    class TransferChain:
+        def manual_transfer(self, **kwargs):
+            captured.update(kwargs)
+            return True, ""
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
+    monkeypatch.setattr(plugin_module, "_HostMediaType", MediaType)
+    monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
+    monkeypatch.setattr(plugin_module, "_HostTransferChain", TransferChain)
+    monkeypatch.setattr(
+        LunaTVSource,
+        "_system_directory_info",
+        lambda self, *_args, **_kwargs: {
+            "library_path": str(tmp_path / "library"),
+            "transfer_type": "copy",
+        },
+    )
+    task = SimpleNamespace(
+        mode="download",
+        media_type="tv",
+        title="示例剧",
+        year="2026",
+        root=str(tmp_path),
+        source_key="cms-demo",
+        media_id="cms-demo:42",
+        host_media_source="themoviedb",
+        host_media_id="1084242",
+        season=1,
+        episode=1,
+    )
+
+    default_plugin = LunaTVSource()
+    default_plugin.init_plugin({"enabled": True})
+    assert default_plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
+    assert captured["scrape"] is False
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "generate_nfo": True})
+    assert plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
+    assert captured["scrape"] is True
 
 
 def test_native_movie_transfer_clears_season_metadata(monkeypatch, tmp_path: Path):
@@ -4895,9 +4998,9 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
         },
     )
     subscriptions = [
-        SimpleNamespace(state="R", name="示例电影", year="2026", type="电影", season=0,
+        SimpleNamespace(id=1, state="R", name="示例电影", year="2026", type="电影", season=0,
                         media_source="lunatv", media_id="", save_path=""),
-        SimpleNamespace(state="P", name="示例剧", year="2026", type="电视剧", season=1,
+        SimpleNamespace(id=2, state="P", name="示例剧", year="2026", type="电视剧", season=1,
                         media_source="lunatv", media_id="", save_path=""),
     ]
     subscribe_module = ModuleType("app.db.oper.subscribe")
@@ -4940,11 +5043,17 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
+    progress_refreshes = []
     monkeypatch.setattr(plugin_module, "_HostDirectoryHelper", DirectoryHelper)
     monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     monkeypatch.setattr(plugin, "_prepare_result", lambda item: (item, {}))
     monkeypatch.setattr(plugin._ai, "normalize", lambda title, *_args: (title, False))
+    monkeypatch.setattr(
+        plugin,
+        "_refresh_native_subscription_progress",
+        lambda ids: progress_refreshes.append(ids),
+    )
 
     first = plugin.refresh_subscriptions()
     second = plugin.refresh_subscriptions()
@@ -4955,6 +5064,7 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
         ("movie", "/media/incoming/movies"),
         ("tv", "/media/incoming/tv"),
     ]
+    assert progress_refreshes == [{2}, {2}]
 
 
 def test_local_episode_path_requires_completed_download_or_strm_artifact(tmp_path: Path):

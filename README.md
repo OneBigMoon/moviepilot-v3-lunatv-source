@@ -17,8 +17,10 @@
 - 默认调用 MoviePilot 原生整理链；插件只在宿主链不可用时保留直写结果，完成记录统一回到 MoviePilot 原生历史。
 - 下载完成后沿用 MoviePilot 已启用媒体服务器设置触发媒体库刷新；播放不放在插件页，仍由既有媒体服务器页面负责。
 - 原生下载管理会投影插件任务的季集、可用时的 VOD 进度、暂停/继续和删除操作；暂停或删除运行中任务会先安全终止当前下载进程，不把虚拟任务转发给 qBittorrent。
+- 原生整季删除默认只移除任务并保留已完成文件；只有 MoviePilot 明确传入“删除文件”选项时才清理下载目录内对应文件。
 - 订阅刷新同时检查 MoviePilot 原生 TMDB 下载历史；即使整理方式移动了下载源文件，已经完成的电影或电视剧季集也不会被再次排队。
 - MoviePilot 活跃电视剧订阅默认每 30 分钟检查一次：首次补齐所有缺集，后续只加入新增集；选择来源时先保证最新季集完整，再比较清晰度。
+- 工作台持久显示最近一次追更、媒体库同步和订阅进度回填结果；重启后仍可查看最后失败原因和完成时间。
 - 自动复用 MoviePilot“智能助手配置”（DeepSeek 等 OpenAI 兼容模型）清理片名后再搜索；未配置或调用失败自动回退原名称。
 - 搜索结果自动调用 MoviePilot 原生识别链关联 TMDB；TMDB 能提供完整季集数时，会帮助拆分平铺的多季合集。
 - 搜索结果会显示默认 TMDB 关联；同名或多季作品可重新搜索候选并手动切换，所选作品的季集数会参与安全拆分。
@@ -59,5 +61,15 @@ https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json
 ```bash
 python3 -m pytest tests
 python3 -m compileall plugins.v3/lunatvsource
+cd plugins.v3/lunatvsource && npm ci && npm run build
 git diff --check
 ```
+
+## 发布与回滚
+
+- 发布前必须通过 `.github/workflows/ci.yml`：完整测试、Python 编译、前端生产构建，以及 `dist` 已提交且可重复生成。
+- 发布标签必须严格等于 `LunaTVSource_v<package.v3.json 中的版本>`；例如 `0.4.60` 只能使用 `LunaTVSource_v0.4.60`，标签与清单不一致时 CI 会拒绝。
+- 为兼容 MoviePilot 的 Release 安装路径，同名发布还应附带小写资产 `lunatvsource_v<version>.zip`（例如 `lunatvsource_v0.4.60.zip`）；压缩包根目录直接放插件文件，不再套一层 `lunatvsource/` 目录。
+- MoviePilot 更新后先核对插件版本、工作台最近追更/同步状态，再用一集新增内容验证“下载 → 原生整理 → 订阅进度递增 → Emby/Jellyfin 可见”的完整链路。
+- 回滚前先停用插件，保留队列、缓存和已完成文件；不要删除持久化数据，也不要移动或覆盖旧标签。
+- 回滚采用向前修复：撤销有问题的发布提交，提升一个补丁版本，重新通过同一 CI 后创建新的更高版本标签。这样 MoviePilot 能正常识别更新，历史版本和队列数据仍可追踪。

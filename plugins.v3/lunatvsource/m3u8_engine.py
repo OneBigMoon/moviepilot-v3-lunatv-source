@@ -146,6 +146,10 @@ _CREDENTIAL_LINE_RE = re.compile(
 _INLINE_SECRET_RE = re.compile(
     r"(?im)((?:\b(?:token|access[_-]?key|signature)\b[\"']?\s*[=:]\s*[\"']?))[^\r\n]*"
 )
+_AD_KEYWORD_LINE_RE = re.compile(
+    r"(?im)^(\s*(?:User customed Ad keyword|用户自定义广告分片URL关键字|"
+    r"用戶自定義廣告分片URL關鍵字)\s*[:：]\s*).*?$"
+)
 
 
 def normalized_platform(
@@ -173,6 +177,7 @@ def _safe_error_text(value: object) -> str:
     text = str(value or "")
     text = _CREDENTIAL_LINE_RE.sub(r"\1<redacted>", text)
     text = _INLINE_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _AD_KEYWORD_LINE_RE.sub(r"\1<redacted>", text)
     return text[-1200:]
 
 
@@ -1258,6 +1263,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
         stage_dir: Path,
         ffmpeg_path: str,
         thread_count: Optional[object] = None,
+        ad_keyword: str = "",
     ) -> Sequence[str]:
         selected_thread_count = self._normalized_thread_count(
             self.thread_count if thread_count is None else thread_count
@@ -1265,7 +1271,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
         # ffmpeg is used exclusively by N_m3u8DL-RE's final mux step.
         ffmpeg_binary = ffmpeg_path or "ffmpeg"
         ffmpeg_binary = shutil.which(ffmpeg_binary) or ffmpeg_binary
-        return [
+        command = [
             str(binary),
             url,
             "--auto-select",
@@ -1285,6 +1291,9 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
             ffmpeg_binary,
             "--no-ansi-color",
         ]
+        if ad_keyword:
+            command.extend(["--ad-keyword", ad_keyword])
+        return command
 
     def download(
         self,
@@ -1297,6 +1306,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
         progress_callback: Optional[Callable[[float], None]],
         expected_segments: int = 0,
         thread_count: Optional[object] = None,
+        ad_keyword: str = "",
     ) -> Path:
         self._raise_if_cancelled(control_event)
         binary = self._installer.ensure_binary(control_event=control_event)
@@ -1312,6 +1322,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
                 stage_dir,
                 ffmpeg_path,
                 thread_count,
+                ad_keyword,
             ),
             cache_dir=cache_dir,
             control_event=control_event,

@@ -431,6 +431,9 @@ def test_queue_replays_unpersisted_terminal_without_rerunning_task(
     first_id = f"terminal-{terminal}"
 
     def save(key, value):
+        if key != DownloadQueue.DATA_KEY:
+            data[key] = value
+            return
         first = next((item for item in value if item["task_id"] == first_id), None)
         terminal_write = (
             first is None
@@ -482,6 +485,97 @@ def test_queue_replays_unpersisted_terminal_without_rerunning_task(
         assert first.task_id not in tasks
     else:
         assert tasks[first.task_id]["state"] == expected_state
+
+
+def test_completion_outbox_replays_after_restart_without_redownload(tmp_path: Path):
+    data = {}
+    callbacks: list[str] = []
+    executions = 0
+
+    def fail_callback(_task: DownloadTask, _output: str) -> None:
+        callbacks.append("failed")
+        raise RuntimeError("completion side effect unavailable")
+
+    first = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        on_complete=fail_callback,
+    )
+    task = make_task("restart-completion", tmp_path)
+    assert first.enqueue(task)
+
+    def execute(_task: DownloadTask) -> str:
+        nonlocal executions
+        executions += 1
+        return str(tmp_path / "completed.mp4")
+
+    first._execute = execute  # type: ignore[method-assign]
+    assert first.run_one()["state"] == "completed"
+    assert callbacks == ["failed"]
+    assert data[first.COMPLETION_OUTBOX_KEY]
+    assert first.list_tasks()[0]["state"] == "completed"
+
+    def complete_callback(_task: DownloadTask, _output: str) -> None:
+        callbacks.append("replayed")
+
+    restarted = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        on_complete=complete_callback,
+    )
+    restarted._execute = lambda _task: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("completed task must not download again")
+    )
+    assert restarted.finalizing_task_ids() == {task.task_id}
+    assert restarted.wake()
+    wait_until(lambda: callbacks == ["failed", "replayed"])
+    assert restarted.wait_until_idle(timeout=1)
+    assert executions == 1
+    assert data[restarted.COMPLETION_OUTBOX_KEY] == []
+    assert restarted.list_tasks()[0]["state"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_result"),
+    [("pause", "completed"), ("remove", "remove")],
+)
+def test_control_after_execute_return_respects_completed_and_remove(
+    tmp_path: Path,
+    action: str,
+    expected_result: str,
+):
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    task = make_task(f"late-{action}", tmp_path)
+    assert queue.enqueue(task)
+    queue._execute = lambda _task: str(tmp_path / "completed.mp4")  # type: ignore[method-assign]
+
+    finish_entered = threading.Event()
+    release_finish = threading.Event()
+    original_finish = queue._finish_completed
+
+    def delayed_finish(current, control, output):
+        finish_entered.set()
+        assert release_finish.wait(timeout=2)
+        return original_finish(current, control, output)
+
+    queue._finish_completed = delayed_finish  # type: ignore[method-assign]
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(queue.run_one()))
+    worker.start()
+    assert finish_entered.wait(timeout=2)
+    assert getattr(queue, action)(task.task_id)
+    release_finish.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert result["state"] == expected_result
+    tasks = queue.list_tasks()
+    if action == "pause":
+        assert tasks[0]["state"] == "completed"
+    else:
+        assert tasks == []
 
 
 def test_failed_task_reenqueue_reuses_existing_record(tmp_path: Path):

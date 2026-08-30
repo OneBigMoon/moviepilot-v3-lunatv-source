@@ -30,35 +30,53 @@ const _hoisted_10 = {
   key: 2,
   class: "alert warning"
 };
-const _hoisted_11 = { class: "setup-strip" };
-const _hoisted_12 = { class: "panel" };
-const _hoisted_13 = { class: "section-heading" };
-const _hoisted_14 = { class: "section-title" };
-const _hoisted_15 = { class: "muted" };
-const _hoisted_16 = {
+const _hoisted_11 = {
+  key: 3,
+  class: "alert warning"
+};
+const _hoisted_12 = {
+  key: 4,
+  class: "alert warning"
+};
+const _hoisted_13 = { class: "setup-strip" };
+const _hoisted_14 = { class: "panel" };
+const _hoisted_15 = { class: "section-heading" };
+const _hoisted_16 = { class: "section-title" };
+const _hoisted_17 = { class: "muted" };
+const _hoisted_18 = {
   key: 0,
   class: "empty"
 };
-const _hoisted_17 = {
+const _hoisted_19 = {
   key: 1,
   class: "empty"
 };
-const _hoisted_18 = {
+const _hoisted_20 = {
   key: 2,
   class: "source-table-wrap"
 };
-const _hoisted_19 = { class: "source-table" };
-const _hoisted_20 = { class: "health-status" };
-const _hoisted_21 = ["title"];
-const _hoisted_22 = { class: "source-name" };
-const _hoisted_23 = ["href"];
-const _hoisted_24 = {
+const _hoisted_21 = { class: "source-table" };
+const _hoisted_22 = { class: "health-status" };
+const _hoisted_23 = ["title"];
+const _hoisted_24 = { class: "source-name" };
+const _hoisted_25 = ["href"];
+const _hoisted_26 = {
   key: 1,
   class: "muted"
 };
-const _hoisted_25 = { class: "source-actions" };
-const _hoisted_26 = ["disabled", "aria-label", "onClick"];
-const _hoisted_27 = ["disabled", "aria-label", "onClick"];
+const _hoisted_27 = { class: "source-actions" };
+const _hoisted_28 = ["disabled", "aria-label", "onClick"];
+const _hoisted_29 = ["disabled", "aria-label", "onClick"];
+const _hoisted_30 = {
+  key: 5,
+  class: "panel"
+};
+const _hoisted_31 = { class: "section-heading" };
+const _hoisted_32 = { class: "section-title" };
+const _hoisted_33 = { class: "muted" };
+const _hoisted_34 = { class: "source-name" };
+const _hoisted_35 = { class: "source-error" };
+const _hoisted_36 = ["disabled", "aria-label", "onClick"];
 
 const {computed,onBeforeUnmount,onMounted,ref} = await importShared('vue');
 
@@ -79,8 +97,10 @@ const loading = ref(true);
 const error = ref('');
 const sources = ref([]);
 const status = ref({});
+const tasks = ref([]);
 const healthCheckStarting = ref(false);
 const busySourceKeys = ref(new Set());
+const retryingTaskIds = ref(new Set());
 let healthPollTimer = null;
 let healthPollDeadline = 0;
 
@@ -102,12 +122,14 @@ async function load(options = {}) {
     error.value = '';
   }
   try {
-    const [statusResponse, sourceResponse] = await Promise.all([
+    const [statusResponse, sourceResponse, taskResponse] = await Promise.all([
       apiCall('get', '/status'),
       apiCall('get', '/sources'),
+      apiCall('get', '/tasks'),
     ]);
     status.value = unwrap(statusResponse);
     sources.value = unwrap(sourceResponse) || [];
+    tasks.value = unwrap(taskResponse) || [];
   } catch (loadError) {
     error.value = loadError?.message || '加载 LunaTV 状态失败';
   } finally {
@@ -223,6 +245,41 @@ const downloadSettings = computed(() => status.value.download_settings || {});
 const engineStatus = computed(() => status.value.engine || {});
 const subscriptionStatus = computed(() => status.value.subscription || {});
 const sourceHealth = computed(() => status.value.source_health || {});
+const queueStatus = computed(() => status.value.queue || {});
+const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
+  .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0));
+const followupStatus = computed(() => status.value.followup_status || {});
+const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {});
+const mediaSyncStatus = computed(() => followupStatus.value.media_server_sync || {});
+const failedTasks = computed(() => tasks.value.filter((task) => task?.state === 'failed'));
+
+function followupSummary(item) {
+  if (item?.running) return '进行中'
+  if (!item?.finished_at) return '暂无记录'
+  return `${item.success === false ? '失败' : '成功'} · ${formattedTime(item.finished_at)}`
+}
+
+function taskIsRetrying(task) {
+  return retryingTaskIds.value.has(task.task_id)
+}
+
+async function retryTask(task) {
+  if (!task?.task_id || taskIsRetrying(task)) return
+  const nextRetryingTaskIds = new Set(retryingTaskIds.value);
+  nextRetryingTaskIds.add(task.task_id);
+  retryingTaskIds.value = nextRetryingTaskIds;
+  error.value = '';
+  try {
+    unwrap(await apiCall('post', `/tasks/${encodeURIComponent(task.task_id)}/retry`));
+    await load({ silent: true });
+  } catch (requestError) {
+    error.value = requestError?.message || `重试“${task.title || task.task_id}”失败`;
+  } finally {
+    const remainingRetryingTaskIds = new Set(retryingTaskIds.value);
+    remainingRetryingTaskIds.delete(task.task_id);
+    retryingTaskIds.value = remainingRetryingTaskIds;
+  }
+}
 
 function formattedTime(value) {
   if (!value) return '未检查'
@@ -260,7 +317,7 @@ return (_ctx, _cache) => {
         _createElementVNode("p", null, "接入 MoviePilot 原生搜索、订阅与下载；播放继续交给既有 Emby。")
       ], -1)),
       _createElementVNode("div", _hoisted_3, [
-        _createElementVNode("span", _hoisted_4, _toDisplayString(downloadSettings.value.max_concurrent_tasks || 2) + " 任务 × " + _toDisplayString(downloadSettings.value.segment_thread_count || 16) + " 分片 ", 1),
+        _createElementVNode("span", _hoisted_4, " 并发上限：" + _toDisplayString(downloadSettings.value.max_concurrent_tasks || 2) + " 任务 × " + _toDisplayString(downloadSettings.value.segment_thread_count || 16) + " 分片 ", 1),
         _createElementVNode("span", {
           class: _normalizeClass(['chip', engineStatus.value.ready ? 'ready' : 'muted-chip'])
         }, " N_m3u8DL-RE " + _toDisplayString(engineStatus.value.ready ? '已就绪' : (engineStatus.value.supported ? '内置待安装' : '当前平台不支持')), 3),
@@ -293,28 +350,37 @@ return (_ctx, _cache) => {
     (status.value.source_config?.error)
       ? (_openBlock(), _createElementBlock("div", _hoisted_10, " 远程来源清单刷新失败，当前使用" + _toDisplayString(status.value.source_config?.origin || '缓存') + "：" + _toDisplayString(status.value.source_config.error), 1))
       : _createCommentVNode("", true),
-    _createElementVNode("section", _hoisted_11, [
+    (subscriptionRefreshStatus.value.error)
+      ? (_openBlock(), _createElementBlock("div", _hoisted_11, " 最近一次追更失败：" + _toDisplayString(subscriptionRefreshStatus.value.error), 1))
+      : _createCommentVNode("", true),
+    (mediaSyncStatus.value.error)
+      ? (_openBlock(), _createElementBlock("div", _hoisted_12, " 最近一次媒体库或订阅进度同步失败：" + _toDisplayString(mediaSyncStatus.value.error), 1))
+      : _createCommentVNode("", true),
+    _createElementVNode("section", _hoisted_13, [
       _createElementVNode("span", null, "目录：" + _toDisplayString(directoryStatus.value.configured_root || directoryStatus.value.auto_roots?.[0]?.download_path || '未配置'), 1),
       _createElementVNode("span", null, "来源：" + _toDisplayString(directoryStatus.value.source || '未配置'), 1),
+      _createElementVNode("span", null, "当前队列：运行 " + _toDisplayString(queueStatus.value.running || 0) + " · 等待 " + _toDisplayString(queueStatus.value.pending || 0) + " · 暂停 " + _toDisplayString(queueStatus.value.paused || 0) + " · 失败 " + _toDisplayString(queueStatus.value.failed || 0) + " · 共 " + _toDisplayString(queueTotal.value) + " 任务", 1),
       _createElementVNode("span", null, "追更：每 " + _toDisplayString(subscriptionStatus.value.refresh_minutes || 30) + " 分钟检查新集", 1),
+      _createElementVNode("span", null, "最近追更：" + _toDisplayString(followupSummary(subscriptionRefreshStatus.value)), 1),
+      _createElementVNode("span", null, "最近同步：" + _toDisplayString(followupSummary(mediaSyncStatus.value)), 1),
       _createElementVNode("span", null, "TMDB：" + _toDisplayString(status.value.tmdb_association ? '自动关联' : '关闭'), 1),
       _cache[1] || (_cache[1] = _createElementVNode("span", null, "缓存：完成后才整理", -1)),
       _createElementVNode("span", null, "来源健康检查：每 " + _toDisplayString(sourceHealth.value.interval_minutes || 60) + " 分钟", 1)
     ]),
-    _createElementVNode("section", _hoisted_12, [
-      _createElementVNode("div", _hoisted_13, [
-        _createElementVNode("div", _hoisted_14, [
+    _createElementVNode("section", _hoisted_14, [
+      _createElementVNode("div", _hoisted_15, [
+        _createElementVNode("div", _hoisted_16, [
           _cache[2] || (_cache[2] = _createTextVNode("资源站 ", -1)),
-          _createElementVNode("span", _hoisted_15, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
+          _createElementVNode("span", _hoisted_17, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
         ]),
         _cache[3] || (_cache[3] = _createElementVNode("span", { class: "source-caption" }, "打开页面仅读取缓存；搜索仅使用健康且已启用的来源", -1))
       ]),
       (loading.value)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_16, "正在读取资源站配置…"))
+        ? (_openBlock(), _createElementBlock("div", _hoisted_18, "正在读取资源站配置…"))
         : (!sources.value.length)
-          ? (_openBlock(), _createElementBlock("div", _hoisted_17, "暂未读取到资源站配置"))
-          : (_openBlock(), _createElementBlock("div", _hoisted_18, [
-              _createElementVNode("table", _hoisted_19, [
+          ? (_openBlock(), _createElementBlock("div", _hoisted_19, "暂未读取到资源站配置"))
+          : (_openBlock(), _createElementBlock("div", _hoisted_20, [
+              _createElementVNode("table", _hoisted_21, [
                 _cache[5] || (_cache[5] = _createElementVNode("thead", null, [
                   _createElementVNode("tr", null, [
                     _createElementVNode("th", { scope: "col" }, "状态"),
@@ -340,7 +406,7 @@ return (_ctx, _cache) => {
                           }, null, -1)),
                           _createTextVNode(" " + _toDisplayString(source.status_label || '已加载'), 1)
                         ], 2),
-                        _createElementVNode("div", _hoisted_20, [
+                        _createElementVNode("div", _hoisted_22, [
                           _createElementVNode("span", {
                             class: _normalizeClass(['health-state', `is-${source.health_status || 'unknown'}`])
                           }, _toDisplayString(source.health_label || '未检查'), 3),
@@ -349,12 +415,12 @@ return (_ctx, _cache) => {
                                 key: 0,
                                 class: "source-error",
                                 title: source.last_error
-                              }, _toDisplayString(source.last_error), 9, _hoisted_21))
+                              }, _toDisplayString(source.last_error), 9, _hoisted_23))
                             : _createCommentVNode("", true)
                         ])
                       ]),
                       _createElementVNode("td", null, [
-                        _createElementVNode("span", _hoisted_22, _toDisplayString(source.name), 1)
+                        _createElementVNode("span", _hoisted_24, _toDisplayString(source.name), 1)
                       ]),
                       _createElementVNode("td", null, [
                         (sourceUrl(source))
@@ -364,8 +430,8 @@ return (_ctx, _cache) => {
                               href: sourceUrl(source),
                               target: "_blank",
                               rel: "noopener noreferrer"
-                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_23))
-                          : (_openBlock(), _createElementBlock("span", _hoisted_24, "—"))
+                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_25))
+                          : (_openBlock(), _createElementBlock("span", _hoisted_26, "—"))
                       ]),
                       _createElementVNode("td", null, [
                         _createElementVNode("span", {
@@ -374,13 +440,13 @@ return (_ctx, _cache) => {
                       ]),
                       _createElementVNode("td", null, _toDisplayString(formattedTime(source.last_checked)), 1),
                       _createElementVNode("td", null, [
-                        _createElementVNode("div", _hoisted_25, [
+                        _createElementVNode("div", _hoisted_27, [
                           _createElementVNode("button", {
                             class: "source-action",
                             disabled: sourceIsBusy(source) || sourceHealth.value.running,
                             "aria-label": `${source.manual_disabled ? '重新启用' : '永久停用'}来源 ${source.name || source.key}`,
                             onClick: $event => (setSourceEnabled(source, source.manual_disabled))
-                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_26),
+                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_28),
                           (!source.manual_disabled && !source.enabled && source.disabled_reason !== 'configured')
                             ? (_openBlock(), _createElementBlock("button", {
                                 key: 0,
@@ -388,7 +454,7 @@ return (_ctx, _cache) => {
                                 disabled: sourceIsBusy(source) || sourceHealth.value.running,
                                 "aria-label": `立即复检来源 ${source.name || source.key}`,
                                 onClick: $event => (recheckSource(source))
-                              }, "立即复检", 8, _hoisted_27))
+                              }, "立即复检", 8, _hoisted_29))
                             : _createCommentVNode("", true)
                         ])
                       ])
@@ -398,12 +464,40 @@ return (_ctx, _cache) => {
               ])
             ]))
     ]),
-    _cache[6] || (_cache[6] = _createStaticVNode("<section class=\"panel help-panel\" data-v-c4328a6e><div class=\"section-title\" data-v-c4328a6e>使用说明</div><div class=\"help-grid\" data-v-c4328a6e><p data-v-c4328a6e><strong data-v-c4328a6e>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-c4328a6e><strong data-v-c4328a6e>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-c4328a6e><strong data-v-c4328a6e>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-c4328a6e><strong data-v-c4328a6e>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-c4328a6e><strong data-v-c4328a6e>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    (failedTasks.value.length)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_30, [
+          _createElementVNode("div", _hoisted_31, [
+            _createElementVNode("div", _hoisted_32, [
+              _cache[6] || (_cache[6] = _createTextVNode("失败任务 ", -1)),
+              _createElementVNode("span", _hoisted_33, _toDisplayString(failedTasks.value.length), 1)
+            ]),
+            _cache[7] || (_cache[7] = _createElementVNode("span", { class: "source-caption" }, "重试会将任务重新排入下载队列", -1))
+          ]),
+          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(failedTasks.value, (task) => {
+            return (_openBlock(), _createElementBlock("div", {
+              key: task.task_id,
+              class: "source-actions"
+            }, [
+              _createElementVNode("div", null, [
+                _createElementVNode("div", _hoisted_34, _toDisplayString(task.title || '未命名任务'), 1),
+                _createElementVNode("div", _hoisted_35, _toDisplayString(task.error || '下载失败'), 1)
+              ]),
+              _createElementVNode("button", {
+                class: "source-action",
+                disabled: taskIsRetrying(task),
+                "aria-label": `重试任务 ${task.title || task.task_id}`,
+                onClick: $event => (retryTask(task))
+              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_36)
+            ]))
+          }), 128))
+        ]))
+      : _createCommentVNode("", true),
+    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-a4dd5cca><div class=\"section-title\" data-v-a4dd5cca>使用说明</div><div class=\"help-grid\" data-v-a4dd5cca><p data-v-a4dd5cca><strong data-v-a4dd5cca>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c4328a6e"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a4dd5cca"]]);
 
 export { AppPage as default };

@@ -11,6 +11,7 @@ from lunatvsource_test.cms import (
     CmsSource,
     _fetch_public_url,
     _is_public_probe_url,
+    _json_get,
     _master_playlist_height,
     _parse_play_urls,
     _result_from_item,
@@ -154,6 +155,23 @@ def test_public_fetch_pins_dns_and_rejects_private_redirect(monkeypatch):
     ]
 
 
+def test_public_fetch_expired_deadline_skips_dns_and_connection(monkeypatch):
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("expired deadline must not start network work")
+
+    monkeypatch.setattr(cms_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(cms_module.socket, "getaddrinfo", unexpected)
+    monkeypatch.setattr(cms_module.http.client, "HTTPConnection", unexpected)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        _fetch_public_url(
+            "http://video.example/index.m3u8",
+            3.0,
+            1024,
+            deadline=9.0,
+        )
+
+
 def test_public_fetch_percent_encodes_non_ascii_request_target(monkeypatch):
     requests = []
 
@@ -199,6 +217,106 @@ def test_public_fetch_percent_encodes_non_ascii_request_target(monkeypatch):
         "/%E7%AC%AC1%E9%9B%86/%E6%92%AD%E6%94%BE.m3u8"
         "?token=%E5%80%BC&part=1%2F2"
     )
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "file:///tmp/config.json",
+        "http://user:password@93.184.216.34/config.json",
+        "http://127.0.0.1/config.json",
+    ),
+)
+def test_json_get_rejects_unsafe_urls(url):
+    with pytest.raises(ValueError):
+        _json_get(url, 3.0)
+
+
+def test_json_get_rejects_public_redirect_to_private(monkeypatch):
+    class Response:
+        status = 302
+
+        @staticmethod
+        def getheader(name):
+            return "http://127.0.0.1/config.json" if name == "Location" else None
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def request(*_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def getresponse():
+            return Response()
+
+        @staticmethod
+        def close():
+            pass
+
+    monkeypatch.setattr(
+        "lunatvsource_test.cms.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
+        ],
+    )
+    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+
+    with pytest.raises(ValueError, match="non-public"):
+        _json_get("http://config.example/config.json", 3.0)
+
+
+def test_json_get_allows_explicit_trusted_cidr(monkeypatch):
+    requests = []
+
+    class Response:
+        status = 200
+
+        @staticmethod
+        def read(_limit):
+            return b'{"ok": true}'
+
+    class Connection:
+        def __init__(self, address, port, timeout):
+            requests.append((address, port, timeout))
+
+        @staticmethod
+        def request(*_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def getresponse():
+            return Response()
+
+        @staticmethod
+        def close():
+            pass
+
+    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+
+    assert _json_get(
+        "http://10.0.0.8/config.json",
+        3.0,
+        ("10.0.0.0/8",),
+    ) == {"ok": True}
+    assert requests == [("10.0.0.8", 80, 3.0)]
+
+
+def test_json_get_rejects_oversized_response(monkeypatch):
+    limits = []
+
+    def fetch(url, _timeout, limit, _allowed_private_ranges):
+        limits.append(limit)
+        return b"x" * limit, url
+
+    monkeypatch.setattr(cms_module, "_fetch_public_url", fetch)
+
+    with pytest.raises(ValueError, match="too large"):
+        _json_get("https://config.example/config.json", 3.0)
+
+    assert limits == [cms_module._JSON_RESPONSE_BYTES + 1]
 
 
 def test_probe_media_sample_uses_safe_suffix_for_dotted_parent_path(monkeypatch):

@@ -297,6 +297,17 @@ def test_engine_commands_and_progress_parsing(tmp_path: Path):
     assert "--auto-select" in n_command
     assert "--no-ansi-color" in n_command
 
+    assert "--ad-keyword" not in n_command
+    ad_keyword = r"(?:^|/)ads?[-_/]"
+    filtered_command = n_engine.command(
+        Path("/bin/n_m3u8dl"),
+        "playlist.m3u8",
+        tmp_path / "cache",
+        tmp_path / "stage",
+        "/bin/ffmpeg",
+        ad_keyword=ad_keyword,
+    )
+    assert filtered_command[filtered_command.index("--ad-keyword") + 1] == ad_keyword
     assert N_m3u8DLEngine.parse_progress("completed 64.7%") == pytest.approx(0.647)
 
 
@@ -378,8 +389,8 @@ def test_engine_progress_growth_resets_stall_watchdog(monkeypatch, tmp_path: Pat
     engine = ENGINE_UNDER_TEST(tmp_path)
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    monkeypatch.setattr(engine, "PROCESS_TOTAL_TIMEOUT_SECONDS", 2.0)
-    monkeypatch.setattr(engine, "PROCESS_NO_PROGRESS_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(engine, "PROCESS_TOTAL_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(engine, "PROCESS_NO_PROGRESS_TIMEOUT_SECONDS", 0.8)
     monkeypatch.setattr(engine, "PROCESS_POLL_INTERVAL_SECONDS", 0.02)
 
     started_at = time.monotonic()
@@ -387,14 +398,14 @@ def test_engine_progress_growth_resets_stall_watchdog(monkeypatch, tmp_path: Pat
         [
             sys.executable,
             "-c",
-            "import time; exec(\"for current in range(1, 5):\\n    print(f'PT: {current}/4', flush=True)\\n    time.sleep(0.12)\")",
+            "import time; exec(\"for current in range(1, 5):\\n    print(f'PT: {current}/4', flush=True)\\n    time.sleep(0.3)\")",
         ],
         cache_dir=cache_dir,
         control_event=None,
         progress_callback=None,
     )
 
-    assert time.monotonic() - started_at > 0.3
+    assert time.monotonic() - started_at > 0.8
 
 
 @pytest.mark.parametrize(
@@ -955,6 +966,19 @@ def test_error_tail_redacts_complete_http_credential_values():
     assert "Authorization: <redacted>" in detail
     assert "Cookie: <redacted>" in detail
     assert "Set-Cookie: <redacted>" in detail
+
+
+def test_error_tail_redacts_engine_ad_keyword_echo():
+    safe = _safe_error_text(
+        "User customed Ad keyword: token-in-regex\n"
+        "用户自定义广告分片URL关键字：secret-path-pattern\n"
+        "用戶自定義廣告分片URL關鍵字：private-pattern"
+    )
+
+    assert "token-in-regex" not in safe
+    assert "secret-path-pattern" not in safe
+    assert "private-pattern" not in safe
+    assert safe.count("<redacted>") == 3
 
 
 def test_installer_download_cancels_and_removes_partial_archive(

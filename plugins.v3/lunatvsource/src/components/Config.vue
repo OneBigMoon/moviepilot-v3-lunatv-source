@@ -12,11 +12,14 @@ const saving = ref(false)
 const message = reactive({ text: '', type: 'info' })
 const defaults = {
   enabled: false,
+  generate_nfo: false,
   config_url: 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json',
   source_allowlist: '',
+  probe_allowed_private_ranges: '',
+  hls_ad_filter_regex: '(?i)(?:adjump|redtraffic|alimama|chenggao|laomaotao|[/_.-](?:ad|ads|advert|advertisement|promo|sponsor)[/_.-])',
   mode: 'download',
   source_strategy: 'first',
-  download_root: '/downloads/未整理',
+  download_root: '',
   use_moviepilot_dirs: true,
   ffmpeg_path: 'ffmpeg',
   queue_minutes: 1,
@@ -51,10 +54,6 @@ async function saveConfig() {
     showMessage('当前 MoviePilot 未提供配置保存接口', 'error')
     return
   }
-  if (!String(config.download_root || '').trim()) {
-    showMessage('请填写下载目录', 'error')
-    return
-  }
   if (!validateIntegerRange(config.max_concurrent_tasks, '任务并发数', 1, 4)
     || !validateIntegerRange(config.segment_thread_count, '分片线程数', 4, 32)
     || !validateIntegerRange(config.source_check_minutes, '来源健康检查间隔', 15, 1440)) return
@@ -66,7 +65,9 @@ async function saveConfig() {
   try {
     const payload = {
       ...config,
-      source_allowlist: '',
+      source_allowlist: String(config.source_allowlist || '').trim(),
+      probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim(),
+      hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim(),
       source_strategy: 'first',
       download_root: String(config.download_root || '').trim(),
       ai_enabled: true,
@@ -93,7 +94,6 @@ async function saveConfig() {
 
 onMounted(() => {
   Object.assign(config, defaults, props.initialConfig || {})
-  if (!String(config.download_root || '').trim()) config.download_root = defaults.download_root
 })
 </script>
 
@@ -113,13 +113,52 @@ onMounted(() => {
     </VAlert>
     <VRow dense>
       <VCol cols="12"><VSwitch v-model="config.enabled" label="启用原生桥接" color="success" hide-details /></VCol>
+      <VCol cols="12">
+        <VSwitch
+          v-model="config.generate_nfo"
+          label="生成 NFO 元数据"
+          hint="开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
+          persistent-hint
+          color="success"
+        />
+      </VCol>
       <VCol cols="12"><VTextField v-model="config.config_url" label="LunaTV 配置地址" variant="outlined" /></VCol>
       <VCol cols="12">
         <VTextField
+          v-model="config.source_allowlist"
+          label="启用资源站（可选）"
+          placeholder="留空允许配置中的全部来源"
+          hint="填写来源 key，使用逗号分隔。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VTextField
+          v-model="config.hls_ad_filter_regex"
+          label="HLS 广告分片 URL 正则（可选）"
+          placeholder="例如 adjump|redtraffic|/ad/"
+          hint="默认过滤常见广告路径；留空则只删除闭合 CUE-OUT/CUE-IN 标记区间。不要用单独的 DISCONTINUITY 作为删除条件。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VTextField
+          v-model="config.probe_allowed_private_ranges"
+          label="可信网络 CIDR（可选）"
+          placeholder="例如 198.18.0.0/15"
+          hint="默认拒绝私网配置、CMS 和媒体地址；Fake-IP 或可信内网环境才填写。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VTextField
           v-model="config.download_root"
-          label="下载目录"
-          placeholder="/downloads/未整理"
-          hint="m3u8 下载先写入此目录，完成后继续复用 MoviePilot 的整理规则。"
+          label="下载目录（可留空）"
+          placeholder="留空自动选择"
+          hint="填写后优先使用；留空时依次使用 MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录。"
           persistent-hint
           variant="outlined"
         />
