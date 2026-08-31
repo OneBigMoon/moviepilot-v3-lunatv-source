@@ -87,7 +87,9 @@ def test_queue_default_ad_filter_matches_decoded_path_only():
     )
 
 
-def test_download_queue_passes_combined_ad_keyword_to_engine(monkeypatch, tmp_path: Path):
+def test_download_queue_passes_combined_ad_keyword_to_engine(
+    monkeypatch, tmp_path: Path, caplog
+):
     playlist = tmp_path / "input.m3u8"
     playlist.write_text("#EXTM3U\n#EXTINF:1,\nsegment.ts\n", encoding="utf-8")
     captured = {}
@@ -107,6 +109,17 @@ def test_download_queue_passes_combined_ad_keyword_to_engine(monkeypatch, tmp_pa
 
     def prepare(*args, **_kwargs):
         prepared["ad_url_matcher"] = args[5]
+        args[6](
+            {
+                "cue_segments": 2,
+                "cue_seconds": 30.0,
+                "regex_segments": 1,
+                "total_segments": 3,
+                "unclosed_cue": 1,
+                "daterange_candidates": 2,
+                "discontinuity": 1,
+            }
+        )
         return str(playlist)
 
     monkeypatch.setattr(queue, "_prepare_hls_input", prepare)
@@ -123,10 +136,14 @@ def test_download_queue_passes_combined_ad_keyword_to_engine(monkeypatch, tmp_pa
         root=str(tmp_path),
     )
 
-    assert queue._run_m3u8_engines(task, tmp_path / "movie.mp4.part") is True
+    with caplog.at_level("INFO", logger="LunaTVSource"):
+        assert queue._run_m3u8_engines(task, tmp_path / "movie.mp4.part") is True
     assert captured["ad_keyword"] == "lunatv-cue-ad"
     assert prepared["ad_url_matcher"]("https://cdn.example/ads/spot.ts") is True
     assert prepared["ad_url_matcher"]("https://cdn.example/show/part.ts") is False
+    assert "task_id=ad-filter" in caplog.text
+    assert "title=title" in caplog.text
+    assert "总计待过滤=3分片" in caplog.text
 
 
 def test_queue_is_serial_and_deduplicates(tmp_path: Path):
@@ -890,6 +907,7 @@ ads/spot.ts
     )
     normal_urls = []
     ad_urls = []
+    scan_summaries = []
     pattern = downloader_module.re.compile(
         downloader_module.DEFAULT_HLS_AD_FILTER_REGEX
     )
@@ -901,6 +919,7 @@ ads/spot.ts
         (),
         lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
         lambda url: bool(pattern.search(url)),
+        scan_summaries.append,
     )
 
     content = Path(local).read_text(encoding="utf-8")
@@ -908,6 +927,17 @@ ads/spot.ts
     assert ad_urls == ["https://media.example/path/ads/spot.ts"]
     assert "normal:1" in content
     assert "lunatv-cue-ad:1" in content
+    assert scan_summaries == [
+        {
+            "cue_segments": 0,
+            "cue_seconds": 0.0,
+            "regex_segments": 1,
+            "total_segments": 1,
+            "unclosed_cue": 0,
+            "daterange_candidates": 0,
+            "discontinuity": 0,
+        }
+    ]
 
 
 def test_segment_proxy_forwards_byte_ranges_and_preserves_partial_response():

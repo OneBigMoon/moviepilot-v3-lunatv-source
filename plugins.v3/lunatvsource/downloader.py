@@ -1906,6 +1906,7 @@ class _SerialDownloadQueue:
         allowed_private_ranges: Iterable[str] = (),
         ad_segment_url_mapper: Optional[Callable[[str], str]] = None,
         ad_url_matcher: Optional[Callable[[str], bool]] = None,
+        ad_scan_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> str:
         """Materialize playlists locally so ffmpeg can read zstd HTTP responses.
 
@@ -1919,6 +1920,7 @@ class _SerialDownloadQueue:
         marker_totals = DownloadQueue._detect_hls_markers("")
         removed_cue_segments = 0
         removed_cue_seconds = 0.0
+        regex_ad_segments = 0
         playlist_count = 0
         total_playlist_bytes = 0
         deadline = time.monotonic() + _HLS_PREPARE_TIMEOUT_SECONDS
@@ -1929,7 +1931,7 @@ class _SerialDownloadQueue:
             parent_variables: Optional[Dict[str, str]] = None,
         ) -> str:
             nonlocal playlist_count, total_playlist_bytes
-            nonlocal removed_cue_segments, removed_cue_seconds
+            nonlocal removed_cue_segments, removed_cue_seconds, regex_ad_segments
             requested_url = DownloadQueue._validate_hls_remote_uri(playlist_url)
             if requested_url in visited:
                 return visited[requested_url]
@@ -2149,6 +2151,7 @@ class _SerialDownloadQueue:
                         and ad_url_matcher is not None
                         and ad_url_matcher(absolute)
                     ):
+                        regex_ad_segments += 1
                         rewritten.append(ad_segment_url_mapper(absolute))
                     else:
                         rewritten.append(segment_url_mapper(absolute) if segment_url_mapper else absolute)
@@ -2187,7 +2190,7 @@ class _SerialDownloadQueue:
         LOGGER.info(
             "LunaTV HLS 标记扫描: CUE-OUT=%d, CUE-IN=%d, CUE-OUT-CONT=%d, "
             "闭合候选=%d [%s], 待过滤=%d分片/%.1f秒, 未闭合=%d, "
-            "DATERANGE广告候选=%d/%d, "
+            "正则待过滤=%d分片, DATERANGE广告候选=%d/%d, "
             "DISCONTINUITY边界=%d",
             marker_totals["cue_out"],
             marker_totals["cue_in"],
@@ -2197,10 +2200,23 @@ class _SerialDownloadQueue:
             removed_cue_segments,
             removed_cue_seconds,
             marker_totals["unclosed_cue"],
+            regex_ad_segments,
             marker_totals["daterange_candidates"],
             marker_totals["daterange"],
             marker_totals["discontinuity"],
         )
+        if ad_scan_callback is not None:
+            ad_scan_callback(
+                {
+                    "cue_segments": removed_cue_segments,
+                    "cue_seconds": removed_cue_seconds,
+                    "regex_segments": regex_ad_segments,
+                    "total_segments": removed_cue_segments + regex_ad_segments,
+                    "unclosed_cue": marker_totals["unclosed_cue"],
+                    "daterange_candidates": marker_totals["daterange_candidates"],
+                    "discontinuity": marker_totals["discontinuity"],
+                }
+            )
         return local_input
 
     @staticmethod
@@ -2308,6 +2324,24 @@ class _TerminalIntent:
 
 class DownloadQueue(_SerialDownloadQueue):
     """Persistent bounded-concurrency queue with task-local cancellation."""
+
+    @staticmethod
+    def _log_ad_scan(task: DownloadTask, summary: Dict[str, Any]) -> None:
+        LOGGER.info(
+            "LunaTV HLS 去广告任务: task_id=%s, title=%s, "
+            "CUE待过滤=%d分片/%.1f秒, 正则待过滤=%d分片, "
+            "总计待过滤=%d分片, 未闭合CUE=%d, DATERANGE候选=%d, "
+            "DISCONTINUITY边界=%d",
+            task.task_id,
+            task.title,
+            summary["cue_segments"],
+            summary["cue_seconds"],
+            summary["regex_segments"],
+            summary["total_segments"],
+            summary["unclosed_cue"],
+            summary["daterange_candidates"],
+            summary["discontinuity"],
+        )
 
     COMPLETION_OUTBOX_KEY = "download_completion_outbox_v1"
     COMPLETION_OUTBOX_QUARANTINE_KEY = "download_completion_outbox_v1_quarantine"
@@ -3349,6 +3383,7 @@ class DownloadQueue(_SerialDownloadQueue):
                 (
                     self._is_ad_segment_url
                 ),
+                lambda summary: self._log_ad_scan(task, summary),
             )
             segments = self._playlist_segment_count(Path(input_url))
             engine = self._m3u8_engines[0]

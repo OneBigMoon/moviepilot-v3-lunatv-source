@@ -871,7 +871,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.61"
+    plugin_version = "0.4.62"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -5140,6 +5140,61 @@ class LunaTVSource(_PluginBase):
             )
         return torrents
 
+    def downloader_info(
+        self, downloader: Optional[str] = None
+    ) -> Optional[List[Any]]:
+        """向 MoviePilot 首页汇总 LunaTV 活跃任务的下载统计。"""
+        if not self._enabled or not self._is_lunatv_downloader(downloader):
+            return None
+
+        download_speed = 0.0
+        download_size = 0.0
+        try:
+            raw_tasks = self._queue.list_tasks() if self._queue else []
+        except Exception as exc:
+            self._logger.debug("读取 LunaTV 首页下载统计失败：%s", exc)
+            raw_tasks = []
+        for raw_task in raw_tasks:
+            try:
+                task = (
+                    raw_task
+                    if isinstance(raw_task, DownloadTask)
+                    else DownloadTask(**raw_task)
+                )
+            except TypeError:
+                continue
+            state = str(task.state or "").strip().casefold()
+            if state in {"pending", "running", "paused"}:
+                _, dlspeed = self._active_download_metrics(task)
+                download_speed += self._download_speed_bytes(dlspeed)
+                with self._download_metrics_lock:
+                    samples = self._download_metrics.get(str(task.task_id or ""))
+                    if samples:
+                        download_size += max(0.0, float(samples[-1][1]))
+            elif state == "completed":
+                download_size += self._completed_download_size(task)
+
+        values = {
+            "download_speed": download_speed,
+            "upload_speed": 0.0,
+            "download_size": download_size,
+            "upload_size": 0.0,
+            "free_space": 0.0,
+        }
+        info_type = (
+            getattr(_schemas, "DownloaderInfo", None)
+            if _schemas is not None
+            else None
+        )
+        if callable(info_type):
+            try:
+                return [info_type(**values)]
+            except Exception as exc:
+                self._logger.debug(
+                    "构造 MoviePilot 下载器统计失败，使用兼容对象：%s", exc
+                )
+        return [_CompatDownloaderTorrent(**values)]
+
     @staticmethod
     def _torrent_hashes(hashs: Any) -> List[str]:
         if isinstance(hashs, str):
@@ -5281,6 +5336,7 @@ class LunaTVSource(_PluginBase):
             "search_torrents": self.search_torrents,
             "async_search_torrents": self.async_search_torrents,
             "download": self.download,
+            "downloader_info": self.downloader_info,
             "list_torrents": self.list_torrents,
             "start_torrents": self.start_torrents,
             "stop_torrents": self.stop_torrents,

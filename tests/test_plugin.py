@@ -3783,6 +3783,79 @@ def test_active_queue_projection_reports_partial_size_and_speed(monkeypatch, tmp
     assert second.dlspeed == "1.0K"
 
 
+def test_downloader_info_reports_active_lunatv_transfer(monkeypatch, tmp_path: Path):
+    class HostDownloaderInfo:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_schemas",
+        SimpleNamespace(DownloaderInfo=HostDownloaderInfo),
+    )
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    task = DownloadTask(
+        task_id="dashboard-metrics-task",
+        source_key="cms-demo",
+        media_id="cms-demo:dashboard",
+        title="首页统计电影",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/dashboard.m3u8",
+        root=str(tmp_path),
+        state="running",
+        progress=0.5,
+    )
+    completed = DownloadTask(
+        task_id="dashboard-completed-task",
+        source_key="cms-demo",
+        media_id="cms-demo:completed",
+        title="已完成电影",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/completed.m3u8",
+        root=str(tmp_path),
+        state="completed",
+        progress=1.0,
+        downloaded_bytes=4096,
+    )
+    relative_dir, filename = media_path(
+        task.root,
+        task.title,
+        task.year,
+        task.media_type,
+        task.season,
+        task.episode,
+        task.url,
+        task.mode,
+    )
+    partial = tmp_path / relative_dir / f"{filename}.part"
+    partial.parent.mkdir(parents=True)
+    partial.write_bytes(b"x" * 1024)
+    plugin.save_data(plugin._queue.DATA_KEY, [task.to_dict(), completed.to_dict()])
+    timestamps = iter([100.0, 102.0])
+    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(timestamps))
+
+    first = plugin.downloader_info("LunaTVSource")[0]
+    partial.write_bytes(b"x" * 3072)
+    second = plugin.downloader_info()[0]
+
+    assert isinstance(second, HostDownloaderInfo)
+    assert first.download_speed == 0.0
+    assert first.download_size == 5120.0
+    assert second.download_speed == 1024.0
+    assert second.download_size == 7168.0
+    assert second.upload_speed == 0.0
+    assert second.upload_size == 0.0
+    assert plugin.downloader_info("qBittorrent") is None
+    assert "downloader_info" in plugin.get_module()
+
+
 def test_download_configuration_defaults_and_bounds_are_passed_to_queue():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
