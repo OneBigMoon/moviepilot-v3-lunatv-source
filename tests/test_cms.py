@@ -465,6 +465,47 @@ def test_parse_play_urls_supports_chinese_episode_label():
     assert episodes[0].episode == 8
 
 
+def test_parse_play_urls_supports_chinese_season_and_episode_numbers():
+    episodes = _parse_play_urls(
+        "第八季",
+        "第十二集$https://example.test/12.m3u8#"
+        "第一百零二集$https://example.test/102.m3u8#"
+        "第一千零二十集$https://example.test/1020.m3u8",
+    )
+    assert [(item.season, item.episode) for item in episodes] == [
+        (8, 12),
+        (8, 102),
+        (8, 1020),
+    ]
+
+
+def test_parse_play_urls_preserves_zero_season():
+    episodes = _parse_play_urls(
+        "Season 00",
+        "S00E01$https://example.test/01.m3u8#SP$https://example.test/sp.m3u8",
+    )
+    assert [(item.season, item.episode, item.season_known) for item in episodes] == [
+        (0, 1, True),
+        (0, 2, True),
+    ]
+
+
+def test_parse_play_urls_uses_entry_ordinal_for_unlabelled_specials():
+    episodes = _parse_play_urls(
+        "S01",
+        "第8集$https://example.test/08.m3u8#SP$https://example.test/sp.m3u8#"
+        "OVA$https://example.test/ova.m3u8#特别篇$https://example.test/special.m3u8#"
+        "第12集$https://example.test/12.m3u8",
+    )
+    assert {item.label: item.episode for item in episodes} == {
+        "第8集": 8,
+        "SP": 2,
+        "OVA": 3,
+        "特别篇": 4,
+        "第12集": 12,
+    }
+
+
 def test_parse_play_urls_rejects_non_http_urls():
     episodes = _parse_play_urls("在线播放", "01$file:///tmp/episode.m3u8#02$https://example.test/02.m3u8")
     assert [(item.episode, item.url) for item in episodes] == [(2, "https://example.test/02.m3u8")]
@@ -2507,3 +2548,15 @@ def test_animation_is_treated_as_series_for_season_naming():
         },
     )
     assert result.media_type == "tv"
+
+    single = _result_from_item(
+        CmsSource(key="demo", name="演示", api="https://cms.example/api.php/provide/vod"),
+        {
+            "vod_id": "cartoon-102",
+            "vod_name": "示例动画 第一百零二集",
+            "type_name": "动漫",
+            "vod_play_from": "在线播放",
+            "vod_play_url": "第一百零二集$https://example.test/102.m3u8",
+        },
+    )
+    assert (single.media_type, single.episodes[0].episode) == ("tv", 102)

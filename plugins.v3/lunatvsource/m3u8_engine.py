@@ -1298,7 +1298,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
     def download(
         self,
         url: str,
-        output: Path,
+        output: Optional[Path],
         *,
         task_id: str,
         ffmpeg_path: str,
@@ -1330,5 +1330,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
             expected_segments=expected_segments,
         )
         candidate = self._output_from_stage(stage_dir)
+        if output is None:
+            return candidate
         self._move_stage_output(candidate, output)
         return output

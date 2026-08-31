@@ -8,6 +8,7 @@ import http.server
 import logging
 import os
 import re
+import shutil
 import socketserver
 import stat
 import tempfile
@@ -62,6 +63,30 @@ def _regular_file_size(value: str) -> int:
     return max(0, int(info.st_size))
 
 
+_ERROR_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _redact_error_urls(value: object) -> str:
+    """Remove credentials and query data from URLs embedded in public errors."""
+
+    def redact(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            host = parsed.hostname or ""
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            port = parsed.port
+            netloc = f"{host}:{port}" if port is not None else host
+            return urllib.parse.urlunsplit(
+                (parsed.scheme, netloc, parsed.path, "", "")
+            )
+        except ValueError:
+            return raw.split("?", 1)[0].split("#", 1)[0]
+
+    return _ERROR_URL_RE.sub(redact, str(value or ""))
+
+
 def normalize_download_concurrency(
     max_concurrent_tasks: object,
     segment_thread_count: object,
@@ -97,6 +122,10 @@ class _QueueControl(RuntimeError):
     def __init__(self, action: str) -> None:
         super().__init__(action)
         self.action = action
+
+
+class _HLSPrepareLimitError(RuntimeError):
+    """A global playlist preparation budget was exhausted."""
 
 
 def _mpegts_payload_offset(data: bytes) -> int:
@@ -253,6 +282,8 @@ class DownloadTask:
     ffmpeg_path: str = "ffmpeg"
     state: str = "pending"
     error: str = ""
+    control_action: str = ""
+    delete_file: bool = False
     output: str = ""
     created_at: float = field(default_factory=time.time)
     completed_at: float = 0.0
@@ -315,11 +346,77 @@ class DownloadTask:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
+    def public_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "title": self.title,
+            "state": self.state,
+            "error": _redact_error_urls(self.error),
+        }
+
+
+def _download_task_from_payload(value: object) -> DownloadTask:
+    """Strictly decode one persisted task while allowing older missing defaults."""
+    if not isinstance(value, dict):
+        raise ValueError("task record is not an object")
+    try:
+        task = DownloadTask(**value)
+    except TypeError as exc:
+        raise ValueError("task record fields are invalid") from exc
+
+    string_fields = (
+        "task_id",
+        "source_key",
+        "media_id",
+        "title",
+        "year",
+        "media_type",
+        "url",
+        "root",
+        "mode",
+        "ffmpeg_path",
+        "state",
+        "error",
+        "control_action",
+        "output",
+        "download_engine",
+    )
+    optional_string_fields = (
+        "host_media_source",
+        "host_media_id",
+        "source_name",
+    )
+    if any(not isinstance(getattr(task, name), str) for name in string_fields):
+        raise ValueError("task record contains a non-string field")
+    if any(
+        value is not None and not isinstance(value, str)
+        for value in (getattr(task, name) for name in optional_string_fields)
+    ):
+        raise ValueError("task record contains an invalid optional string")
+    if any(
+        type(getattr(task, name)) is not int
+        for name in ("season", "episode", "attempts", "downloaded_bytes")
+    ):
+        raise ValueError("task record contains an invalid integer")
+    if any(
+        isinstance(getattr(task, name), bool)
+        or not isinstance(getattr(task, name), (int, float))
+        for name in ("created_at", "completed_at", "progress")
+    ):
+        raise ValueError("task record contains an invalid number")
+    if type(task.delete_file) is not bool:
+        raise ValueError("task record contains an invalid delete flag")
+    if task.control_action not in {"", "pause", "remove"}:
+        raise ValueError("task record contains an unknown control action")
+    return task
+
 
 class _SerialDownloadQueue:
     """One-at-a-time queue; no worker fan-out or parallel download."""
 
+    PERSISTENCE_SCHEMA = 1
     DATA_KEY = "download_tasks_v1"
+    DATA_QUARANTINE_KEY = "download_tasks_v1_quarantine"
 
     def __init__(
         self,
@@ -356,6 +453,58 @@ class _SerialDownloadQueue:
             else ()
         )
         self._recover_interrupted_tasks()
+        self._cleanup_orphan_m3u8_caches(self._read())
+
+    def _quarantine_payload(
+        self,
+        source_key: str,
+        quarantine_key: str,
+        payload: object,
+        reason: str,
+    ) -> None:
+        try:
+            self._save(
+                quarantine_key,
+                {
+                    "schema": self.PERSISTENCE_SCHEMA,
+                    "source_key": source_key,
+                    "reason": reason,
+                    "payload": payload,
+                },
+            )
+        except Exception as exc:
+            raise RuntimeError(f"{source_key} 损坏且隔离失败") from exc
+        raise ValueError(f"{source_key} 持久化数据损坏：{reason}")
+
+    def _load_versioned_items(
+        self,
+        source_key: str,
+        quarantine_key: str,
+    ) -> tuple[object, List[object]]:
+        missing = object()
+        raw = self._load(source_key, missing)
+        if raw is missing:
+            return [], []
+        if isinstance(raw, list):
+            return raw, list(raw)
+        if not isinstance(raw, dict):
+            self._quarantine_payload(
+                source_key, quarantine_key, raw, "payload is not a list or envelope"
+            )
+        if set(raw) != {"schema", "items"}:
+            self._quarantine_payload(
+                source_key, quarantine_key, raw, "envelope fields are invalid"
+            )
+        if type(raw.get("schema")) is not int or raw.get("schema") != self.PERSISTENCE_SCHEMA:
+            self._quarantine_payload(
+                source_key, quarantine_key, raw, "schema is unknown"
+            )
+        items = raw.get("items")
+        if not isinstance(items, list):
+            self._quarantine_payload(
+                source_key, quarantine_key, raw, "envelope items are not a list"
+            )
+        return raw, list(items)
 
     def _recover_interrupted_tasks(self) -> None:
         """Put tasks left in ``running`` back into the download queue.
@@ -441,8 +590,21 @@ class _SerialDownloadQueue:
                 tasks.extend(tasks_without_identity)
                 changed = True
 
+            removed_tasks: List[DownloadTask] = []
+            recovered_tasks: List[DownloadTask] = []
             for task in tasks:
-                if task.state == "running":
+                if task.control_action == "remove":
+                    removed_tasks.append(task)
+                    changed = True
+                    continue
+                if task.control_action == "pause":
+                    task.state = "paused"
+                    task.progress = 0.0
+                    task.error = ""
+                    task.control_action = ""
+                    task.delete_file = False
+                    changed = True
+                elif task.state == "running":
                     task.state = "pending"
                     task.progress = 0.0
                     task.error = "上次进程中断，已恢复排队"
@@ -454,18 +616,48 @@ class _SerialDownloadQueue:
                     task.progress = 1.0
                     task.error = ""
                     changed = True
+                recovered_tasks.append(task)
+            tasks = recovered_tasks
             if changed:
-                self._write(tasks)
+                try:
+                    self._write(tasks)
+                except Exception as exc:
+                    try:
+                        persisted = self._read()
+                    except Exception:
+                        raise exc
+                    recovery_state = lambda items: [
+                        (
+                            task.task_id,
+                            task.state,
+                            task.progress,
+                            task.control_action,
+                            task.delete_file,
+                        )
+                        for task in items
+                    ]
+                    if recovery_state(persisted) != recovery_state(tasks):
+                        raise
+            for task in removed_tasks:
+                self._cleanup_m3u8_cache(task)
+                if task.delete_file:
+                    self._delete_task_files(task)
 
     def _read(self) -> List[DownloadTask]:
-        raw = self._load(self.DATA_KEY, []) or []
+        raw, items = self._load_versioned_items(
+            self.DATA_KEY, self.DATA_QUARANTINE_KEY
+        )
         tasks: List[DownloadTask] = []
-        for item in raw:
-            if isinstance(item, dict):
-                try:
-                    tasks.append(DownloadTask(**item))
-                except TypeError:
-                    continue
+        for index, item in enumerate(items):
+            try:
+                tasks.append(_download_task_from_payload(item))
+            except ValueError as exc:
+                self._quarantine_payload(
+                    self.DATA_KEY,
+                    self.DATA_QUARANTINE_KEY,
+                    raw,
+                    f"task record {index} is invalid: {exc}",
+                )
         return tasks
 
     def _write(self, tasks: List[DownloadTask]) -> None:
@@ -475,12 +667,21 @@ class _SerialDownloadQueue:
             sum(task.state in terminal_states for task in tasks) - 500,
         )
         persisted = []
+        discarded: List[DownloadTask] = []
         for task in tasks:
             if task.state in terminal_states and terminal_to_discard:
                 terminal_to_discard -= 1
+                discarded.append(task)
                 continue
-            persisted.append(task.to_dict())
-        self._save(self.DATA_KEY, persisted)
+            payload = task.to_dict()
+            payload["error"] = _redact_error_urls(payload.get("error"))
+            persisted.append(payload)
+        self._save(
+            self.DATA_KEY,
+            {"schema": self.PERSISTENCE_SCHEMA, "items": persisted},
+        )
+        for task in discarded:
+            self._cleanup_m3u8_cache(task)
 
     def _persist_removal(
         self,
@@ -560,6 +761,8 @@ class _SerialDownloadQueue:
             target.state = "completed"
             target.progress = 1.0
             target.error = ""
+            target.control_action = ""
+            target.delete_file = False
             target.output = str(output or "")
             target.completed_at = target.completed_at or time.time()
             target.downloaded_bytes = max(
@@ -580,6 +783,8 @@ class _SerialDownloadQueue:
                     task.state = "pending"
                     task.progress = 0.0
                     task.error = ""
+                    task.control_action = ""
+                    task.delete_file = False
                     task.downloaded_bytes = 0
                     self._write(tasks)
                     return True
@@ -621,6 +826,8 @@ class _SerialDownloadQueue:
                 task.state = "pending"
                 task.progress = 0.0
                 task.error = ""
+                task.control_action = ""
+                task.delete_file = False
                 self._write(tasks)
                 return True
         return False
@@ -860,6 +1067,8 @@ class _SerialDownloadQueue:
                 return {"processed": 0}
             task.state = "running"
             task.progress = max(0.0, min(1.0, float(task.progress or 0.0)))
+            task.control_action = ""
+            task.delete_file = False
             task.attempts += 1
             self._running = True
             self._current_task_id = task.task_id
@@ -887,6 +1096,7 @@ class _SerialDownloadQueue:
                 self._clear_active_state()
                 return {"processed": 1, "task_id": task.task_id, "state": action}
         except Exception as exc:
+            safe_error = _redact_error_urls(exc)
             with self._lock:
                 tasks = self._read()
                 if (
@@ -925,11 +1135,19 @@ class _SerialDownloadQueue:
                 self._delete_file_tasks.discard(task.task_id)
                 current = next((item for item in tasks if item.task_id == task.task_id), task)
                 current.state = "failed"
-                current.error = str(exc)
+                current.error = safe_error
                 self._write(tasks)
                 self._clear_active_state()
-            self._notify("LunaTV 下载失败", f"{self._notification_text(task)}：{exc}")
-            return {"processed": 1, "task_id": task.task_id, "state": "failed", "error": str(exc)}
+            self._notify(
+                "LunaTV 下载失败",
+                f"{self._notification_text(task)}：{safe_error}",
+            )
+            return {
+                "processed": 1,
+                "task_id": task.task_id,
+                "state": "failed",
+                "error": safe_error,
+            }
 
         with self._lock:
             tasks = self._read()
@@ -1085,6 +1303,108 @@ class _SerialDownloadQueue:
             cls._close_descriptors(descriptors)
 
     @classmethod
+    def _atomic_commit_file_below_root(
+        cls,
+        root: Path,
+        target: Path,
+        source: Path,
+    ) -> None:
+        """Copy a staged regular file through a pinned target directory."""
+        descriptors, name, parent_parts = cls._open_parent_below_root(
+            root,
+            target,
+            create=True,
+        )
+        parent_fd = descriptors[-1]
+        temporary_name = f".{name}.{uuid.uuid4().hex}.part"
+        source_fd = -1
+        target_fd = -1
+        try:
+            source_fd = os.open(
+                source,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            source_info = os.fstat(source_fd)
+            if (
+                not stat.S_ISREG(source_info.st_mode)
+                or source_info.st_nlink != 1
+                or source_info.st_size <= 0
+            ):
+                raise IOError("N_m3u8DL-RE 未生成有效文件")
+            target_fd = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                stat.S_IMODE(source_info.st_mode),
+                dir_fd=parent_fd,
+            )
+            with os.fdopen(source_fd, "rb") as source_stream:
+                source_fd = -1
+                with os.fdopen(target_fd, "wb") as target_stream:
+                    target_fd = -1
+                    shutil.copyfileobj(source_stream, target_stream, 1024 * 1024)
+                    target_stream.flush()
+                    os.fsync(target_stream.fileno())
+            os.replace(
+                temporary_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            temporary_name = ""
+
+            changed = False
+            try:
+                root_info = os.stat(
+                    Path(os.path.abspath(os.fspath(root))),
+                    follow_symlinks=False,
+                )
+                opened_root = os.fstat(descriptors[0])
+                changed = (
+                    not stat.S_ISDIR(root_info.st_mode)
+                    or (root_info.st_dev, root_info.st_ino)
+                    != (opened_root.st_dev, opened_root.st_ino)
+                )
+                for index, part in enumerate(parent_parts):
+                    if changed:
+                        break
+                    current = os.stat(
+                        part,
+                        dir_fd=descriptors[index],
+                        follow_symlinks=False,
+                    )
+                    opened = os.fstat(descriptors[index + 1])
+                    changed = (
+                        not stat.S_ISDIR(current.st_mode)
+                        or (current.st_dev, current.st_ino)
+                        != (opened.st_dev, opened.st_ino)
+                    )
+            except OSError:
+                changed = True
+            if changed:
+                try:
+                    os.unlink(name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise OSError("目标目录在提交期间发生变化")
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
+            if target_fd >= 0:
+                os.close(target_fd)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            cls._close_descriptors(descriptors)
+
+    @classmethod
     def _unlink_below_root(
         cls,
         root: Path,
@@ -1143,7 +1463,8 @@ class _SerialDownloadQueue:
 
         temp_path = destination.with_suffix(destination.suffix + ".part")
         try:
-            if not self._run_m3u8_engines(task, temp_path):
+            staged_output = self._run_m3u8_engines(task, temp_path)
+            if not staged_output:
                 raise RuntimeError("N_m3u8DL-RE 不可用或下载失败")
         except Exception:
             # 失败任务不把残留缓存留在媒体库目录，避免 Emby/监控把半成品当成文件夹内容。
@@ -1153,14 +1474,26 @@ class _SerialDownloadQueue:
                 pass
             self._remove_empty_parents(destination.parent, root)
             raise
-        if not temp_path.exists() or temp_path.stat().st_size <= 0:
+        source_path = (
+            Path(staged_output)
+            if isinstance(staged_output, (str, os.PathLike))
+            else temp_path
+        )
+        try:
+            self._atomic_commit_file_below_root(root, destination, source_path)
+        except Exception:
+            if source_path == temp_path:
+                try:
+                    source_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._remove_empty_parents(destination.parent, root)
+            raise
+        if source_path == temp_path:
             try:
-                temp_path.unlink(missing_ok=True)
+                source_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            self._remove_empty_parents(destination.parent, root)
-            raise IOError("N_m3u8DL-RE 未生成有效文件")
-        os.replace(temp_path, destination)
         self._cleanup_m3u8_cache(task, destination.parent)
         return str(destination)
 
@@ -1197,6 +1530,55 @@ class _SerialDownloadQueue:
                 except Exception:
                     pass
 
+    def _cleanup_orphan_m3u8_caches(
+        self, tasks: Iterable[DownloadTask]
+    ) -> None:
+        """Remove unreferenced controlled task-cache directories at startup."""
+        task_ids = {task.task_id for task in tasks}
+        processed_bases: set[Path] = set()
+        for engine in self._m3u8_engines:
+            data_path = getattr(engine, "data_path", None)
+            cache_for = getattr(engine, "task_cache_dir", None)
+            remove_tree = getattr(engine, "_remove_controlled_tree", None)
+            if data_path is None or not callable(cache_for) or not callable(remove_tree):
+                continue
+            base = Path(data_path).expanduser() / "m3u8-cache"
+            if base in processed_bases:
+                continue
+            processed_bases.add(base)
+            try:
+                base_stat = base.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(base_stat.st_mode) or not stat.S_ISDIR(base_stat.st_mode):
+                continue
+
+            referenced = set()
+            for task_id in task_ids:
+                try:
+                    task_root = Path(cache_for(task_id)).parent
+                    if task_root.parent == base:
+                        referenced.add(task_root.name)
+                except (OSError, TypeError, ValueError):
+                    continue
+            try:
+                children = list(base.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.name in referenced or re.fullmatch(r"[0-9a-f]{64}", child.name) is None:
+                    continue
+                try:
+                    child_stat = child.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(child_stat.st_mode):
+                    continue
+                try:
+                    remove_tree(child, base)
+                except Exception:
+                    pass
+
     @staticmethod
     def _playlist_segment_count(path: Path, visited: Optional[set[str]] = None) -> int:
         """Count materialized HLS media segments for conservative cache progress."""
@@ -1223,7 +1605,7 @@ class _SerialDownloadQueue:
                     count += DownloadQueue._playlist_segment_count(child, visited)
         return count
 
-    def _run_m3u8_engines(self, task: DownloadTask, output: Path) -> bool:
+    def _run_m3u8_engines(self, task: DownloadTask, output: Path) -> bool | Path:
         """Run N_m3u8DL-RE through the established HLS proxy seam."""
         if self._control_event.is_set():
             raise _QueueControl("controlled")
@@ -1247,10 +1629,13 @@ class _SerialDownloadQueue:
                 for engine in self._m3u8_engines:
                     if self._control_event.is_set():
                         raise _QueueControl("controlled")
+                    engine_output = (
+                        None if isinstance(engine, N_m3u8DLEngine) else output
+                    )
                     try:
-                        engine.download(
+                        result = engine.download(
                             input_url,
-                            output,
+                            engine_output,
                             task_id=task.task_id,
                             ffmpeg_path=task.ffmpeg_path,
                             control_event=self._control_event,
@@ -1259,7 +1644,7 @@ class _SerialDownloadQueue:
                             ),
                             expected_segments=segments,
                         )
-                        return True
+                        return result if engine_output is None else True
                     except M3U8EngineCancelled as exc:
                         raise _QueueControl("controlled") from exc
                     except (M3U8EngineError, OSError):
@@ -1268,6 +1653,7 @@ class _SerialDownloadQueue:
                         LOGGER.warning(
                     "LunaTV %s M3U8 engine failed", engine.name
                         )
+            return False
         except _QueueControl:
             raise
         except Exception as exc:
@@ -1415,11 +1801,29 @@ class _SerialDownloadQueue:
         return result
 
     @staticmethod
-    def _strip_closed_cue_segments(text: str) -> tuple[str, int, float]:
-        """Remove only structurally closed CUE ad blocks; otherwise keep all data."""
+    def _closed_cue_ranges(lines: List[str]) -> Optional[List[tuple[int, int]]]:
+        """Return closed CUE line ranges, or fail open for an orphan CUE-IN."""
+        ranges: List[tuple[int, int]] = []
+        cue_start: Optional[int] = None
+        for index, line in enumerate(lines):
+            upper = line.strip().upper()
+            if upper.startswith(("#EXT-X-CUE-OUT-CONT", "#EXT-X-CUE-OUT")):
+                if cue_start is None:
+                    cue_start = index
+            elif upper.startswith("#EXT-X-CUE-IN"):
+                if cue_start is None:
+                    return None
+                ranges.append((cue_start, index))
+                cue_start = None
+        return ranges
 
-        report = DownloadQueue._detect_hls_markers(text)
-        if not report["cue_ranges"] or report["unclosed_cue"]:
+    @staticmethod
+    def _strip_closed_cue_segments(text: str) -> tuple[str, int, float]:
+        """Remove structurally closed CUE ad blocks while preserving an open tail."""
+
+        lines = text.splitlines()
+        closed_ranges = DownloadQueue._closed_cue_ranges(lines)
+        if not closed_ranges:
             return text, 0, 0.0
 
         output: List[str] = []
@@ -1427,8 +1831,20 @@ class _SerialDownloadQueue:
         pending_extinf = False
         removed_segments = 0
         removed_seconds = 0.0
+        range_index = 0
 
-        for line in text.splitlines():
+        for index, line in enumerate(lines):
+            while (
+                range_index < len(closed_ranges)
+                and index > closed_ranges[range_index][1]
+            ):
+                range_index += 1
+            if (
+                range_index == len(closed_ranges)
+                or index < closed_ranges[range_index][0]
+            ):
+                output.append(line)
+                continue
             stripped = line.strip()
             upper = stripped.upper()
 
@@ -1446,10 +1862,6 @@ class _SerialDownloadQueue:
                 if not in_cue or pending_extinf:
                     return text, 0, 0.0
                 in_cue = False
-                continue
-
-            if not in_cue:
-                output.append(line)
                 continue
 
             if upper.startswith("#EXTINF:"):
@@ -1474,6 +1886,17 @@ class _SerialDownloadQueue:
             return text, 0, 0.0
         newline = "\n" if text.endswith(("\n", "\r")) else ""
         return "\n".join(output) + newline, removed_segments, removed_seconds
+
+    def _is_ad_segment_url(self, url: str) -> bool:
+        """Match the built-in rule against a decoded path; custom rules see the URL."""
+        if self._ad_filter_pattern is None:
+            return False
+        subject = (
+            urllib.parse.unquote(urllib.parse.urlparse(url).path)
+            if self._ad_filter_regex == DEFAULT_HLS_AD_FILTER_REGEX
+            else url
+        )
+        return bool(self._ad_filter_pattern.search(subject))
 
     @staticmethod
     def _prepare_hls_input(
@@ -1500,7 +1923,11 @@ class _SerialDownloadQueue:
         total_playlist_bytes = 0
         deadline = time.monotonic() + _HLS_PREPARE_TIMEOUT_SECONDS
 
-        def materialize(playlist_url: str, depth: int = 0) -> str:
+        def materialize(
+            playlist_url: str,
+            depth: int = 0,
+            parent_variables: Optional[Dict[str, str]] = None,
+        ) -> str:
             nonlocal playlist_count, total_playlist_bytes
             nonlocal removed_cue_segments, removed_cue_seconds
             requested_url = DownloadQueue._validate_hls_remote_uri(playlist_url)
@@ -1509,18 +1936,60 @@ class _SerialDownloadQueue:
             if depth > _HLS_PLAYLIST_MAX_DEPTH:
                 raise RuntimeError("m3u8 播放列表嵌套层级过深")
             if playlist_count >= _HLS_PLAYLIST_MAX_COUNT:
-                raise RuntimeError("m3u8 播放列表数量过多")
+                raise _HLSPrepareLimitError("m3u8 播放列表数量过多")
             if time.monotonic() >= deadline:
-                raise RuntimeError("m3u8 播放列表准备超时")
-            payload, final_url = _fetch_public_url(
-                requested_url,
-                30,
-                _HLS_PLAYLIST_MAX_BYTES + 1,
-                allowed_private_ranges,
-                deadline=deadline,
-            )
+                raise _HLSPrepareLimitError("m3u8 播放列表准备超时")
+            payload = b""
+            final_url = requested_url
+            for attempt in range(2):
+                try:
+                    payload, final_url = _fetch_public_url(
+                        requested_url,
+                        30,
+                        _HLS_PLAYLIST_MAX_BYTES + 1,
+                        allowed_private_ranges,
+                        deadline=deadline,
+                    )
+                    break
+                except OSError as exc:
+                    message = str(exc)
+                    http_status = re.fullmatch(
+                        r"probe(?: request returned)? HTTP (\d{3})",
+                        message,
+                    )
+                    retryable = (
+                        isinstance(exc, (TimeoutError, ConnectionError))
+                        or (
+                            http_status is not None
+                            and (
+                                int(http_status.group(1)) in {408, 425, 429}
+                                or int(http_status.group(1)) >= 500
+                            )
+                        )
+                        or (
+                            http_status is None
+                            and not message.startswith(
+                                ("probe redirect", "too many probe redirects")
+                            )
+                        )
+                    )
+                    if time.monotonic() >= deadline:
+                        raise _HLSPrepareLimitError(
+                            "m3u8 播放列表准备超时"
+                        ) from exc
+                    if attempt > 0 or not retryable:
+                        raise
+                except ValueError as exc:
+                    if not isinstance(exc.__cause__, OSError):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise _HLSPrepareLimitError(
+                            "m3u8 播放列表准备超时"
+                        ) from exc
+                    if attempt > 0:
+                        raise
             if time.monotonic() >= deadline:
-                raise RuntimeError("m3u8 播放列表准备超时")
+                raise _HLSPrepareLimitError("m3u8 播放列表准备超时")
             if len(payload) > _HLS_PLAYLIST_MAX_BYTES:
                 raise RuntimeError("m3u8 播放列表响应过大")
             playlist_url = DownloadQueue._validate_hls_remote_uri(final_url)
@@ -1535,7 +2004,7 @@ class _SerialDownloadQueue:
             if len(payload) > _HLS_PLAYLIST_MAX_BYTES:
                 raise RuntimeError("m3u8 播放列表解压后过大")
             if total_playlist_bytes + len(payload) > _HLS_PLAYLIST_TOTAL_BYTES:
-                raise RuntimeError("m3u8 播放列表累计大小过大")
+                raise _HLSPrepareLimitError("m3u8 播放列表累计大小过大")
             total_playlist_bytes += len(payload)
             try:
                 text = payload.decode("utf-8-sig")
@@ -1543,6 +2012,58 @@ class _SerialDownloadQueue:
                 raise RuntimeError("m3u8 响应不是可识别的文本格式") from exc
             if "#EXTM3U" not in text[:100]:
                 raise RuntimeError("资源站返回的不是有效 m3u8")
+            lines = text.splitlines()
+            if any(
+                line.strip().upper().startswith(
+                    ("#EXTINF:", "#EXT-X-PART:", "#EXT-X-PRELOAD-HINT:")
+                )
+                for line in lines
+            ) and not any(
+                line.strip().upper() == "#EXT-X-ENDLIST" for line in lines
+            ):
+                raise RuntimeError("m3u8 媒体播放列表缺少 EXT-X-ENDLIST")
+
+            variables: Dict[str, str] = {}
+            for line in lines:
+                stripped = line.strip()
+                if not stripped.upper().startswith("#EXT-X-DEFINE:"):
+                    continue
+                attributes = stripped.partition(":")[2]
+                imported = re.search(
+                    r'(?:^|,)\s*IMPORT="([^"]+)"', attributes, re.I
+                )
+                if imported is not None:
+                    name = imported.group(1)
+                    if parent_variables is None or name not in parent_variables:
+                        raise RuntimeError(f"m3u8 未定义 IMPORT：{name}")
+                    variables[name] = parent_variables[name]
+                    continue
+                name = re.search(r'(?:^|,)\s*NAME="([^"]+)"', attributes, re.I)
+                value = re.search(r'(?:^|,)\s*VALUE="([^"]*)"', attributes, re.I)
+                if name is not None and value is not None:
+                    variables[name.group(1)] = value.group(1)
+
+            variable_reference = re.compile(r"\{\$([^}]+)\}")
+
+            def expand_uri(value: str) -> str:
+                for _ in range(len(variables) + 1):
+                    references = variable_reference.findall(value)
+                    if not references:
+                        return value
+                    missing = next(
+                        (name for name in references if name not in variables),
+                        None,
+                    )
+                    if missing is not None:
+                        raise RuntimeError(f"m3u8 未定义变量：{missing}")
+                    expanded = variable_reference.sub(
+                        lambda match: variables[match.group(1)],
+                        value,
+                    )
+                    if expanded == value:
+                        break
+                    value = expanded
+                raise RuntimeError("m3u8 变量展开循环")
 
             detected = DownloadQueue._detect_hls_markers(text)
             for key in (
@@ -1564,33 +2085,63 @@ class _SerialDownloadQueue:
 
             local_path = temp_dir / f"playlist-{playlist_count}.m3u8"
             playlist_count += 1
-            visited[requested_url] = str(local_path)
-            visited[playlist_url] = str(local_path)
-            lines = text.splitlines()
             rewritten: List[str] = []
-            child_playlist = False
+            pending_variant: Optional[str] = None
+            variant_candidates = 0
+            variant_successes = 0
+            variant_failures: List[str] = []
             in_closed_cue = False
             cue_filter_enabled = cue_segments > 0 and ad_segment_url_mapper is not None
-            for line in lines:
+            closed_cue_ranges = (
+                DownloadQueue._closed_cue_ranges(lines) if cue_filter_enabled else []
+            ) or []
+            closed_cue_starts = {start for start, _end in closed_cue_ranges}
+            closed_cue_ends = {end for _start, end in closed_cue_ranges}
+            for index, line in enumerate(lines):
                 stripped = line.strip()
                 upper = stripped.upper()
                 if cue_filter_enabled:
-                    if upper.startswith(
-                        ("#EXT-X-CUE-OUT-CONT", "#EXT-X-CUE-OUT")
-                    ):
+                    if index in closed_cue_starts:
                         in_closed_cue = True
-                    elif upper.startswith("#EXT-X-CUE-IN"):
+                    elif index in closed_cue_ends:
                         in_closed_cue = False
-                if stripped.startswith("#EXT-X-STREAM-INF"):
-                    child_playlist = True
-                    rewritten.append(line)
+                if upper.startswith("#EXT-X-STREAM-INF"):
+                    pending_variant = line
                     continue
                 if stripped and not stripped.startswith("#"):
+                    if pending_variant is not None:
+                        variant_candidates += 1
+                        try:
+                            absolute = DownloadQueue._validate_hls_remote_uri(
+                                urllib.parse.urljoin(
+                                    playlist_url,
+                                    expand_uri(stripped),
+                                )
+                            )
+                            child = materialize(absolute, depth + 1, variables)
+                        except _HLSPrepareLimitError:
+                            raise
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            candidate_name = (
+                                urllib.parse.urlsplit(stripped).path or "variant"
+                            )
+                            variant_failures.append(
+                                f"{_redact_error_urls(candidate_name)}: "
+                                f"{_redact_error_urls(exc)}"
+                            )
+                            pending_variant = None
+                            continue
+                        rewritten.extend((pending_variant, child))
+                        pending_variant = None
+                        variant_successes += 1
+                        continue
                     absolute = DownloadQueue._validate_hls_remote_uri(
-                        urllib.parse.urljoin(playlist_url, stripped)
+                        urllib.parse.urljoin(playlist_url, expand_uri(stripped))
                     )
-                    if child_playlist or urllib.parse.urlparse(absolute).path.lower().endswith(".m3u8"):
-                        rewritten.append(materialize(absolute, depth + 1))
+                    if urllib.parse.urlparse(absolute).path.lower().endswith(".m3u8"):
+                        rewritten.append(
+                            materialize(absolute, depth + 1, variables)
+                        )
                     elif in_closed_cue and ad_segment_url_mapper is not None:
                         rewritten.append(ad_segment_url_mapper(absolute))
                     elif (
@@ -1601,23 +2152,30 @@ class _SerialDownloadQueue:
                         rewritten.append(ad_segment_url_mapper(absolute))
                     else:
                         rewritten.append(segment_url_mapper(absolute) if segment_url_mapper else absolute)
-                    child_playlist = False
                     continue
 
                 def replace_uri(match: re.Match[str]) -> str:
                     absolute = DownloadQueue._validate_hls_remote_uri(
-                        urllib.parse.urljoin(playlist_url, match.group(1))
+                        urllib.parse.urljoin(
+                            playlist_url,
+                            expand_uri(match.group(1)),
+                        )
                     )
                     if stripped.startswith(
                         ("#EXT-X-MEDIA", "#EXT-X-I-FRAME-STREAM-INF", "#EXT-X-RENDITION-REPORT")
                     ):
-                        absolute = materialize(absolute, depth + 1)
+                        absolute = materialize(absolute, depth + 1, variables)
                     elif segment_url_mapper:
                         absolute = segment_url_mapper(absolute)
                     return f'URI="{absolute}"'
 
                 rewritten.append(re.sub(r'URI="([^"]+)"', replace_uri, line))
+            if variant_candidates and not variant_successes:
+                detail = "; ".join(variant_failures[:4]) or "无可用候选"
+                raise RuntimeError(f"m3u8 所有 variant 均不可用：{detail}")
             local_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+            visited[requested_url] = str(local_path)
+            visited[playlist_url] = str(local_path)
             return str(local_path)
 
         local_input = materialize(url)
@@ -1745,12 +2303,14 @@ class _TerminalIntent:
     state: str
     output: str = ""
     error: str = ""
+    retry_at: float = 0.0
 
 
 class DownloadQueue(_SerialDownloadQueue):
     """Persistent bounded-concurrency queue with task-local cancellation."""
 
     COMPLETION_OUTBOX_KEY = "download_completion_outbox_v1"
+    COMPLETION_OUTBOX_QUARANTINE_KEY = "download_completion_outbox_v1_quarantine"
 
     def __init__(
         self,
@@ -1809,6 +2369,12 @@ class DownloadQueue(_SerialDownloadQueue):
         self._m3u8_engines = (self._new_n_engine(self._data_path),) if self._data_path else ()
         self._recover_interrupted_tasks()
         self._restore_completion_outbox()
+        self._cleanup_orphan_m3u8_caches(
+            [
+                *self._read(),
+                *(intent.task for intent in self._pending_terminal.values()),
+            ]
+        )
 
     def _new_n_engine(self, data_path: Path) -> N_m3u8DLEngine:
         try:
@@ -1820,19 +2386,57 @@ class DownloadQueue(_SerialDownloadQueue):
 
     def _read_completion_outbox(self) -> Dict[str, _TerminalIntent]:
         intents: Dict[str, _TerminalIntent] = {}
-        raw = self._load(self.COMPLETION_OUTBOX_KEY, []) or []
-        if not isinstance(raw, list):
-            return intents
-        for item in raw:
-            if not isinstance(item, dict) or not isinstance(item.get("task"), dict):
-                continue
+        raw, items = self._load_versioned_items(
+            self.COMPLETION_OUTBOX_KEY,
+            self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+        )
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or set(item) - {"task", "output"}:
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} fields are invalid",
+                )
+            if "task" not in item:
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} has no task",
+                )
             try:
-                task = DownloadTask(**item["task"])
-            except TypeError:
-                continue
+                task = _download_task_from_payload(item["task"])
+            except ValueError as exc:
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} task is invalid: {exc}",
+                )
             if not task.task_id:
-                continue
-            output = str(item.get("output") or task.output or "")
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} task id is empty",
+                )
+            output_value = item.get("output", task.output)
+            if output_value is not None and not isinstance(output_value, str):
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} output is invalid",
+                )
+            if task.task_id in intents:
+                self._quarantine_payload(
+                    self.COMPLETION_OUTBOX_KEY,
+                    self.COMPLETION_OUTBOX_QUARANTINE_KEY,
+                    raw,
+                    f"outbox record {index} duplicates a task id",
+                )
+            output = output_value or task.output or ""
             intents[task.task_id] = _TerminalIntent(
                 task=task,
                 control=_TaskControl(),
@@ -1850,11 +2454,16 @@ class DownloadQueue(_SerialDownloadQueue):
             task.update(
                 state="completed",
                 error="",
+                control_action="",
+                delete_file=False,
                 progress=1.0,
                 output=intent.output,
             )
             payload.append({"task": task, "output": intent.output})
-        self._save(self.COMPLETION_OUTBOX_KEY, payload)
+        self._save(
+            self.COMPLETION_OUTBOX_KEY,
+            {"schema": self.PERSISTENCE_SCHEMA, "items": payload},
+        )
 
     def _persist_completion_outbox(self, intent: _TerminalIntent) -> None:
         intents = self._read_completion_outbox()
@@ -1979,6 +2588,8 @@ class DownloadQueue(_SerialDownloadQueue):
                     current.state = "pending"
                     current.progress = 0.0
                     current.error = ""
+                    current.control_action = ""
+                    current.delete_file = False
                     current.attempts = max(0, current.attempts - 1)
                     current.download_engine = ""
                     try:
@@ -2017,9 +2628,12 @@ class DownloadQueue(_SerialDownloadQueue):
                     return False
                 if existing.state != "failed":
                     return False
+                task.task_id = existing.task_id
                 existing.state = "pending"
                 existing.progress = 0.0
                 existing.error = ""
+                existing.control_action = ""
+                existing.delete_file = False
                 existing.output = ""
                 existing.completed_at = 0.0
                 existing.downloaded_bytes = 0
@@ -2061,13 +2675,7 @@ class DownloadQueue(_SerialDownloadQueue):
         return retried
 
     def resume(self, task_id: str) -> bool:
-        with self._lock:
-            if task_id in self._pending_terminal:
-                return False
-            resumed = super().resume(task_id)
-        if resumed:
-            self.wake()
-        return resumed
+        return self.control_many((task_id,), "resume")
 
     def _run_claimed(self, task: DownloadTask, control: _TaskControl) -> Dict[str, Any]:
         self._execution.control = control
@@ -2115,6 +2723,8 @@ class DownloadQueue(_SerialDownloadQueue):
                     current.state = "paused"
                     current.progress = 0.0
                     current.error = ""
+                    current.control_action = ""
+                    current.delete_file = False
                     self._write(tasks)
                 return
             except Exception as exc:
@@ -2143,6 +2753,8 @@ class DownloadQueue(_SerialDownloadQueue):
                 return
             try:
                 current.state = state
+                current.control_action = ""
+                current.delete_file = False
                 if state == "failed":
                     current.error = error
                     current.downloaded_bytes = 0
@@ -2154,6 +2766,8 @@ class DownloadQueue(_SerialDownloadQueue):
                     current.downloaded_bytes = _regular_file_size(output)
                 task.state = current.state
                 task.error = current.error
+                task.control_action = ""
+                task.delete_file = False
                 task.progress = current.progress
                 task.output = current.output
                 task.completed_at = current.completed_at
@@ -2173,6 +2787,8 @@ class DownloadQueue(_SerialDownloadQueue):
             return
         if intent.state == "completed":
             self._persist_completion_outbox(intent)
+        if intent.state == "failed":
+            intent.error = _redact_error_urls(intent.error)
         self._persist_state_transition(
             intent.task,
             intent.state,
@@ -2202,11 +2818,15 @@ class DownloadQueue(_SerialDownloadQueue):
     def _replay_terminal_intents(self) -> None:
         completed: List[_TerminalIntent] = []
         failed: List[_TerminalIntent] = []
+        now = time.monotonic()
         with self._lock:
             for task_id, intent in list(self._pending_terminal.items()):
+                if intent.retry_at > now:
+                    continue
                 try:
                     self._persist_terminal_intent(intent)
                 except Exception:
+                    intent.retry_at = now + 0.25
                     LOGGER.warning("LunaTV terminal transition replay failed for %s", task_id)
                     continue
                 if intent.state == "completed":
@@ -2236,8 +2856,8 @@ class DownloadQueue(_SerialDownloadQueue):
         except Exception:
             LOGGER.exception("LunaTV completion hook failed")
             with self._lock:
+                intent.retry_at = time.monotonic() + 0.25
                 self._pending_terminal[task_id] = intent
-                self._drain_failed = True
                 self._release(task_id, release_destination=False)
             return False
         try:
@@ -2246,8 +2866,8 @@ class DownloadQueue(_SerialDownloadQueue):
         except Exception:
             LOGGER.exception("LunaTV completion outbox acknowledgement failed")
             with self._lock:
+                intent.retry_at = time.monotonic() + 0.25
                 self._pending_terminal[task_id] = intent
-                self._drain_failed = True
                 self._release(task_id, release_destination=False)
             return False
         try:
@@ -2260,6 +2880,7 @@ class DownloadQueue(_SerialDownloadQueue):
     def _finish_failed(
         self, task: DownloadTask, control: _TaskControl, exc: Exception
     ) -> Dict[str, Any]:
+        safe_error = _redact_error_urls(exc)
         with self._lock:
             if control.action == "remove":
                 state = "remove"
@@ -2273,18 +2894,26 @@ class DownloadQueue(_SerialDownloadQueue):
                         task=task,
                         control=control,
                         state=state,
-                        error=str(exc),
+                        error=safe_error,
                     )
                 )
             except Exception:
-                self._defer_terminal(task, control, state, error=str(exc))
+                self._defer_terminal(task, control, state, error=safe_error)
                 persisted = False
             else:
                 self._release(task.task_id)
                 persisted = True
         if state == "failed" and persisted:
-            self._notify("LunaTV 下载失败", f"{self._notification_text(task)}：{exc}")
-            return {"processed": 1, "task_id": task.task_id, "state": state, "error": str(exc)}
+            self._notify(
+                "LunaTV 下载失败",
+                f"{self._notification_text(task)}：{safe_error}",
+            )
+            return {
+                "processed": 1,
+                "task_id": task.task_id,
+                "state": state,
+                "error": safe_error,
+            }
         return {"processed": 1, "task_id": task.task_id, "state": state}
 
     def _finish_completed(
@@ -2339,31 +2968,180 @@ class DownloadQueue(_SerialDownloadQueue):
             self._idle_event.set()
         self._drain_wakeup.set()
 
+    def control_many(
+        self,
+        task_ids: Iterable[str],
+        action: str,
+        delete_file: bool = False,
+    ) -> bool:
+        """Durably apply one batch control request before waking workers."""
+        action = str(action or "").strip().lower()
+        if action not in {"pause", "remove", "resume"}:
+            return False
+        raw_ids = (task_ids,) if isinstance(task_ids, str) else task_ids
+        normalized_ids: List[str] = []
+        for value in raw_ids:
+            task_id = str(value or "").strip()
+            if task_id and task_id not in normalized_ids:
+                normalized_ids.append(task_id)
+        if not normalized_ids:
+            return False
+
+        with self._lock:
+            if any(task_id in self._pending_terminal for task_id in normalized_ids):
+                return False
+            tasks = self._read()
+            by_id = {task.task_id: task for task in tasks}
+            if any(task_id not in by_id for task_id in normalized_ids):
+                return False
+
+            if action == "resume":
+                resumed = [by_id[task_id] for task_id in normalized_ids]
+                if any(task.state != "paused" for task in resumed):
+                    return False
+                for task in resumed:
+                    task.state = "pending"
+                    task.progress = 0.0
+                    task.error = ""
+                    task.control_action = ""
+                    task.delete_file = False
+                self._write(tasks)
+                self.wake()
+                return True
+
+            controls: List[tuple[str, _TaskControl, str, bool]] = []
+            removed: List[DownloadTask] = []
+            changed = False
+            for task_id in normalized_ids:
+                task = by_id[task_id]
+                control = self._active.get(task_id)
+                if action == "pause":
+                    if task.state == "paused":
+                        continue
+                    if task.state == "pending":
+                        task.state = "paused"
+                        task.progress = 0.0
+                        task.error = ""
+                        task.control_action = ""
+                        task.delete_file = False
+                        changed = True
+                        continue
+                    if task.state != "running" or control is None:
+                        return False
+                    if control.action == "remove":
+                        continue
+                    task.control_action = "pause"
+                    task.delete_file = False
+                    controls.append((task_id, control, "pause", False))
+                    changed = True
+                    continue
+
+                if task.state == "completed" and control is not None:
+                    return False
+                if task.state == "running":
+                    if control is None:
+                        return False
+                    requested_delete = bool(task.delete_file or delete_file)
+                    task.control_action = "remove"
+                    task.delete_file = requested_delete
+                    controls.append(
+                        (task_id, control, "remove", requested_delete)
+                    )
+                    changed = True
+                else:
+                    removed.append(task)
+
+            if removed:
+                removed_ids = {task.task_id for task in removed}
+                tasks = [task for task in tasks if task.task_id not in removed_ids]
+                changed = True
+            if changed:
+                try:
+                    self._write(tasks)
+                except Exception:
+                    try:
+                        persisted_by_id = {
+                            task.task_id: task for task in self._read()
+                        }
+                    except Exception:
+                        persisted_by_id = None
+                    if persisted_by_id is not None:
+                        removed_ids = {task.task_id for task in removed}
+                        for (
+                            task_id,
+                            control,
+                            control_action,
+                            requested_delete,
+                        ) in controls:
+                            expected = by_id[task_id]
+                            persisted = persisted_by_id.get(task_id)
+                            if persisted is None or (
+                                persisted.state,
+                                persisted.progress,
+                                persisted.control_action,
+                                persisted.delete_file,
+                            ) != (
+                                expected.state,
+                                expected.progress,
+                                expected.control_action,
+                                expected.delete_file,
+                            ):
+                                continue
+                            control.action = control_action
+                            control.delete_file = (
+                                control.delete_file or requested_delete
+                            )
+                            control.event.set()
+                        for task in removed:
+                            if task.task_id in persisted_by_id:
+                                continue
+                            self._cleanup_m3u8_cache(task)
+                            if delete_file:
+                                self._delete_task_files(task)
+                        if all(
+                            (
+                                task_id not in persisted_by_id
+                                if task_id in removed_ids
+                                else (
+                                    persisted_by_id[task_id].state,
+                                    persisted_by_id[task_id].progress,
+                                    persisted_by_id[task_id].control_action,
+                                    persisted_by_id[task_id].delete_file,
+                                )
+                                == (
+                                    by_id[task_id].state,
+                                    by_id[task_id].progress,
+                                    by_id[task_id].control_action,
+                                    by_id[task_id].delete_file,
+                                )
+                            )
+                            for task_id in normalized_ids
+                            if task_id in removed_ids
+                            or task_id in persisted_by_id
+                        ) and all(
+                            task_id in removed_ids
+                            or task_id in persisted_by_id
+                            for task_id in normalized_ids
+                        ):
+                            return True
+                    raise
+
+            for _, control, control_action, requested_delete in controls:
+                control.action = control_action
+                control.delete_file = control.delete_file or requested_delete
+                control.event.set()
+            for task in removed:
+                self._cleanup_m3u8_cache(task)
+                if delete_file:
+                    self._delete_task_files(task)
+            return True
+
     def pause(self, task_id: str) -> bool:
         with self._lock:
             intent = self._pending_terminal.get(task_id)
             if intent is not None:
                 return intent.state in {"pause", "remove"}
-            tasks = self._read()
-            task = next((item for item in tasks if item.task_id == task_id), None)
-            if task is None or task.state == "completed":
-                return False
-            if task.state == "paused":
-                return True
-            control = self._active.get(task_id)
-            if task.state == "running" and control is not None:
-                if control.action == "remove":
-                    return True
-                control.action = "pause"
-                control.event.set()
-                return True
-            if task.state == "pending":
-                task.state = "paused"
-                task.progress = 0.0
-                task.error = ""
-                self._write(tasks)
-                return True
-            return False
+        return self.control_many((task_id,), "pause")
 
     def remove(self, task_id: str, delete_file: bool = False) -> bool:
         with self._lock:
@@ -2374,23 +3152,7 @@ class DownloadQueue(_SerialDownloadQueue):
                 intent.control.delete_file = intent.control.delete_file or delete_file
                 self._drain_wakeup.set()
                 return True
-            tasks = self._read()
-            task = next((item for item in tasks if item.task_id == task_id), None)
-            if task is None:
-                return False
-            control = self._active.get(task_id)
-            if task.state == "completed" and control is not None:
-                # The completion hook may currently be moving/organizing the
-                # file. Removing queue state underneath that operation can
-                # lose both its durable history and the remaining season.
-                return False
-            if task.state == "running" and control is not None:
-                control.action = "remove"
-                control.delete_file = control.delete_file or delete_file
-                control.event.set()
-                return True
-            self._persist_removal(tasks, task, delete_file=delete_file)
-            return True
+        return self.control_many((task_id,), "remove", delete_file=delete_file)
 
     def wake(self) -> bool:
         with self._lock:
@@ -2545,22 +3307,32 @@ class DownloadQueue(_SerialDownloadQueue):
             return str(destination)
         temp_path = destination.with_suffix(destination.suffix + ".part")
         try:
-            if not self._run_m3u8_engines(task, temp_path):
+            staged_output = self._run_m3u8_engines(task, temp_path)
+            if not staged_output:
                 raise RuntimeError("N_m3u8DL-RE 不可用或下载失败")
         except Exception:
             # Never invoke a plugin fallback. Keep engine cache for retry.
             temp_path.unlink(missing_ok=True)
             self._remove_empty_parents(destination.parent, root)
             raise
-        if not temp_path.exists() or temp_path.stat().st_size <= 0:
-            temp_path.unlink(missing_ok=True)
+        source_path = (
+            Path(staged_output)
+            if isinstance(staged_output, (str, os.PathLike))
+            else temp_path
+        )
+        try:
+            self._atomic_commit_file_below_root(root, destination, source_path)
+        except Exception:
+            if source_path == temp_path:
+                source_path.unlink(missing_ok=True)
             self._remove_empty_parents(destination.parent, root)
-            raise IOError("N_m3u8DL-RE 未生成有效文件")
-        os.replace(temp_path, destination)
+            raise
+        if source_path == temp_path:
+            source_path.unlink(missing_ok=True)
         self._cleanup_m3u8_cache(task, destination.parent)
         return str(destination)
 
-    def _run_m3u8_engines(self, task: DownloadTask, output: Path) -> bool:
+    def _run_m3u8_engines(self, task: DownloadTask, output: Path) -> bool | Path:
         if self._control_event.is_set():
             raise _QueueControl("controlled")
         if not self._m3u8_engines:
@@ -2575,14 +3347,13 @@ class DownloadQueue(_SerialDownloadQueue):
                 self._allowed_private_ranges,
                 lambda url: proxy.url_for(url, ad=True),
                 (
-                    lambda url: bool(self._ad_filter_pattern.search(url))
-                    if self._ad_filter_pattern is not None
-                    else False
+                    self._is_ad_segment_url
                 ),
             )
             segments = self._playlist_segment_count(Path(input_url))
             engine = self._m3u8_engines[0]
-            kwargs = dict(
+            engine_output = None if isinstance(engine, N_m3u8DLEngine) else output
+            kwargs: Dict[str, Any] = dict(
                 task_id=task.task_id,
                 ffmpeg_path=task.ffmpeg_path,
                 control_event=self._control_event,
@@ -2591,11 +3362,16 @@ class DownloadQueue(_SerialDownloadQueue):
                 ad_keyword=self._ad_keyword,
             )
             try:
-                engine.download(input_url, output, thread_count=self.segment_thread_count, **kwargs)
+                result = engine.download(
+                    input_url,
+                    engine_output,
+                    thread_count=self.segment_thread_count,
+                    **kwargs,
+                )
             except TypeError as exc:
                 if "thread_count" not in str(exc):
                     raise
-                engine.download(input_url, output, **kwargs)
+                result = engine.download(input_url, engine_output, **kwargs)
             except M3U8EngineCancelled:
                 raise _QueueControl("controlled")
             except M3U8EngineUnavailable as exc:
@@ -2611,7 +3387,7 @@ class DownloadQueue(_SerialDownloadQueue):
                     raise _QueueControl("controlled") from exc
                 LOGGER.warning("LunaTV N_m3u8DL-RE failed for %s: %s", task.task_id, exc)
                 return False
-        return True
+            return result if engine_output is None else True
 
     def task_cache_size(self, task_id: str) -> int:
         """Return bytes in the controlled cache/stage tree for one task only."""

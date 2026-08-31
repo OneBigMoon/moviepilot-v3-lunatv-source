@@ -17,6 +17,40 @@ from lunatvsource_test.downloader import (
 )
 
 
+def _payload_items(payload):
+    return payload["items"] if isinstance(payload, dict) else payload
+
+
+def test_download_task_public_dict_redacts_private_error_url(tmp_path: Path):
+    task = DownloadTask(
+        task_id="public-task",
+        source_key="lunatv",
+        media_id="site:public",
+        title="公开任务",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://source.example/video.m3u8?token=source-secret",
+        root=str(tmp_path),
+        state="failed",
+        error=(
+            "下载失败 https://alice:password@example.test/video.m3u8"
+            "?token=error-secret#fragment"
+        ),
+    )
+
+    assert task.public_dict() == {
+        "task_id": "public-task",
+        "title": "公开任务",
+        "state": "failed",
+        "error": "下载失败 https://example.test/video.m3u8",
+    }
+    task.error = "下载失败 HTTPS://alice:password@example.test/video.m3u8?token=secret"
+    assert task.public_dict()["error"] == "下载失败 https://example.test/video.m3u8"
+    assert task.to_dict()["url"].endswith("token=source-secret")
+
+
 def test_queue_disables_invalid_ad_filter_regex(caplog):
     with caplog.at_level("WARNING", logger="LunaTVSource"):
         queue = DownloadQueue(
@@ -28,6 +62,29 @@ def test_queue_disables_invalid_ad_filter_regex(caplog):
 
     assert queue._ad_filter_regex == ""
     assert "广告正则无效" in caplog.text
+
+
+def test_queue_default_ad_filter_matches_decoded_path_only():
+    default_queue = DownloadQueue(
+        {}.get,
+        lambda *_args: None,
+        lambda *_args: None,
+        ad_filter_regex=downloader_module.DEFAULT_HLS_AD_FILTER_REGEX,
+    )
+    custom_queue = DownloadQueue(
+        {}.get,
+        lambda *_args: None,
+        lambda *_args: None,
+        ad_filter_regex=r"customer_ad_id",
+    )
+
+    assert not default_queue._is_ad_segment_url(
+        "https://cdn.example/show/part.ts?customer_ad_id=123"
+    )
+    assert default_queue._is_ad_segment_url("https://cdn.example/ads/spot.ts")
+    assert custom_queue._is_ad_segment_url(
+        "https://cdn.example/show/part.ts?customer_ad_id=123"
+    )
 
 
 def test_download_queue_passes_combined_ad_keyword_to_engine(monkeypatch, tmp_path: Path):
@@ -134,7 +191,7 @@ def test_queue_persistence_keeps_non_terminal_tasks_and_caps_terminal_history(
         ]
     )
 
-    persisted = data[queue.DATA_KEY]
+    persisted = _payload_items(data[queue.DATA_KEY])
     assert [item["task_id"] for item in persisted] == (
         [f"terminal-{index}" for index in range(1, 501)]
         + pending_ids
@@ -157,7 +214,7 @@ def test_queue_persistence_keeps_non_terminal_tasks_and_caps_terminal_history(
     assert executed == pending_ids
     assert sum(
         item["state"] in {"completed", "failed"}
-        for item in data[queue.DATA_KEY]
+        for item in _payload_items(data[queue.DATA_KEY])
     ) == 500
 
 
@@ -264,7 +321,9 @@ def test_queue_recovers_after_running_state_persistence_failure(tmp_path: Path):
 
     def save(key, value):
         nonlocal fail_running_save
-        if fail_running_save and any(item["state"] == "running" for item in value):
+        if fail_running_save and any(
+            item["state"] == "running" for item in _payload_items(value)
+        ):
             fail_running_save = False
             running_save_failed.set()
             raise RuntimeError("temporary persistence failure")
@@ -305,7 +364,7 @@ def test_queue_recovers_after_running_state_persistence_failure(tmp_path: Path):
         assert queue._current_task_id == ""
         assert queue._control_action == ""
         assert queue._idle_event.is_set()
-    assert data[queue.DATA_KEY][0]["state"] == "pending"
+    assert _payload_items(data[queue.DATA_KEY])[0]["state"] == "pending"
 
     assert queue.wake() is True
     assert completed.wait(timeout=2)
@@ -550,7 +609,7 @@ def test_queue_clears_stale_progress_during_pending_pause_and_resume(tmp_path: P
     assert queue.list_tasks()[0]["state"] == "paused"
     assert queue.list_tasks()[0]["progress"] == 0.0
 
-    data["download_tasks_v1"][0]["progress"] = 0.3846
+    _payload_items(data["download_tasks_v1"])[0]["progress"] = 0.3846
     resume_started = threading.Event()
     release_resume = threading.Event()
 
@@ -642,6 +701,63 @@ def test_queue_safely_removes_running_task(tmp_path: Path):
     assert queue.list_tasks() == []
 
 
+@pytest.mark.parametrize("action", ["pause", "remove"])
+def test_running_control_intent_survives_restart(tmp_path: Path, action: str):
+    data = {}
+    data_path = tmp_path / "queue-data"
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        data_path=data_path,
+    )
+    task = DownloadTask(
+        task_id=f"restart-{action}",
+        source_key="lunatv",
+        media_id=f"site:restart-{action}",
+        title="重启控制",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/restart-control.m3u8",
+        root=str(tmp_path / "downloads"),
+    )
+    assert queue.enqueue(task)
+    assert queue._claim_next() is not None
+
+    _root, destination = queue._destination_for_task(task)
+    if action == "remove":
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("media", encoding="utf-8")
+        Path(f"{destination}.part").write_text("partial", encoding="utf-8")
+        assert queue.remove(task.task_id, delete_file=True)
+    else:
+        assert queue.pause(task.task_id)
+
+    stored = _payload_items(data[queue.DATA_KEY])[0]
+    assert stored["state"] == "running"
+    assert stored["control_action"] == action
+    assert stored["delete_file"] is (action == "remove")
+
+    restarted = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        data_path=data_path,
+    )
+    if action == "pause":
+        recovered = restarted.list_tasks()
+        assert len(recovered) == 1
+        assert recovered[0]["state"] == "paused"
+        assert recovered[0]["control_action"] == ""
+        assert recovered[0]["delete_file"] is False
+    else:
+        assert restarted.list_tasks() == []
+        assert not destination.exists()
+        assert not Path(f"{destination}.part").exists()
+
+
 def test_queue_persists_active_engine_progress(tmp_path: Path):
     data = {}
     queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
@@ -653,7 +769,8 @@ def test_queue_persists_active_engine_progress(tmp_path: Path):
     queue.enqueue(task)
     # enqueue() normally stores pending; emulate the active worker state.
     raw = data[queue.DATA_KEY]
-    raw[0]["state"] = "running"
+    raw_items = _payload_items(raw)
+    raw_items[0]["state"] = "running"
     data[queue.DATA_KEY] = raw
     queue._update_progress(task.task_id, 0.42)
     assert queue.list_tasks()[0]["progress"] == 0.42
@@ -764,6 +881,7 @@ def test_prepare_hls_input_marks_regex_ad_urls_in_python(monkeypatch, tmp_path: 
 show/main.ts
 #EXTINF:5,
 ads/spot.ts
+#EXT-X-ENDLIST
 """
     monkeypatch.setattr(
         downloader_module,
@@ -832,7 +950,7 @@ def test_segment_proxy_forwards_byte_ranges_and_preserves_partial_response():
         thread.join(timeout=2)
 
 
-def test_prepare_hls_input_fails_open_for_unclosed_cue_markers(
+def test_prepare_hls_input_marks_closed_cues_before_unclosed_tail(
     monkeypatch, tmp_path: Path, caplog
 ):
     playlist = b'''#EXTM3U
@@ -851,6 +969,7 @@ c.ts
 #EXT-X-DATERANGE:ID="scte",SCTE35-OUT=0xFC
 #EXT-X-DATERANGE:ID="program",CLASS="program-transition"
 #EXT-X-DISCONTINUITY
+#EXT-X-ENDLIST
 '''
 
     monkeypatch.setattr(
@@ -871,8 +990,14 @@ c.ts
     }
 
     with caplog.at_level("INFO", logger="LunaTVSource"):
+        normal_urls = []
+        ad_urls = []
         local = DownloadQueue._prepare_hls_input(
-            "https://media.example/path/index.m3u8", tmp_path
+            "https://media.example/path/index.m3u8",
+            tmp_path,
+            lambda url: normal_urls.append(url) or f"normal:{len(normal_urls)}",
+            (),
+            lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
         )
     content = Path(local).read_text(encoding="utf-8")
     for marker in (
@@ -885,7 +1010,12 @@ c.ts
     ):
         assert marker in content
     assert "闭合候选=1 [0-30s]" in caplog.text
-    assert "待过滤=0分片/0.0秒" in caplog.text
+    assert ad_urls == [
+        "https://media.example/path/a.ts",
+        "https://media.example/path/b.ts",
+    ]
+    assert normal_urls == ["https://media.example/path/c.ts"]
+    assert "待过滤=2分片/30.0秒" in caplog.text
     assert "未闭合=1" in caplog.text
     assert "DATERANGE广告候选=2/3" in caplog.text
 
@@ -907,6 +1037,7 @@ ad-b.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:10,
 main-b.ts
+#EXT-X-ENDLIST
 '''
     monkeypatch.setattr(
         downloader_module,
@@ -964,6 +1095,7 @@ ad.ts
 #EXT-X-CUE-IN
 #EXTINF:10,
 tail.ts
+#EXT-X-ENDLIST
 """,
     }
     monkeypatch.setattr(
@@ -1016,6 +1148,7 @@ ad-b.m4s
 #EXT-X-CUE-IN
 #EXTINF:6,
 main.m4s
+#EXT-X-ENDLIST
 '''
     monkeypatch.setattr(
         downloader_module,
@@ -1061,6 +1194,7 @@ first.ts
 #EXT-X-DISCONTINUITY
 #EXTINF:10,
 second.ts
+#EXT-X-ENDLIST
 '''
     monkeypatch.setattr(
         downloader_module,
@@ -1089,8 +1223,58 @@ second.ts
     assert "#EXT-X-DISCONTINUITY" in content
 
 
+def test_strip_closed_cue_segments_preserves_unclosed_tail():
+    playlist = """#EXTM3U
+#EXTINF:10,
+main.ts
+#EXT-X-CUE-OUT:5
+#EXTINF:5,
+ad.ts
+#EXT-X-CUE-IN
+#EXT-X-CUE-OUT:5
+#EXTINF:5,
+tail.ts
+#EXT-X-ENDLIST
+"""
+
+    stripped, segments, seconds = DownloadQueue._strip_closed_cue_segments(playlist)
+
+    assert segments == 1
+    assert seconds == 5.0
+    assert "ad.ts" not in stripped
+    assert "main.ts" in stripped
+    assert "#EXT-X-CUE-OUT:5\n#EXTINF:5,\ntail.ts" in stripped
+
+
+def test_prepare_hls_input_rejects_open_media_but_recurses_from_master(
+    monkeypatch, tmp_path: Path
+):
+    playlists = {
+        "https://media.example/open.m3u8": b"#EXTM3U\n#EXTINF:1,\npart.ts\n",
+        "https://media.example/ll-open.m3u8": (
+            b'#EXTM3U\n#EXT-X-PART:DURATION=0.333,URI="part.ts"\n'
+            b'#EXT-X-PRELOAD-HINT:TYPE=PART,URI="next.ts"\n'
+        ),
+        "https://media.example/master.m3u8": b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nvariant.m3u8\n",
+        "https://media.example/variant.m3u8": b"#EXTM3U\n#EXTINF:1,\npart.ts\n#EXT-X-ENDLIST\n",
+    }
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlists[url], url),
+    )
+
+    with pytest.raises(RuntimeError, match="缺少 EXT-X-ENDLIST"):
+        DownloadQueue._prepare_hls_input("https://media.example/open.m3u8", tmp_path)
+    with pytest.raises(RuntimeError, match="缺少 EXT-X-ENDLIST"):
+        DownloadQueue._prepare_hls_input("https://media.example/ll-open.m3u8", tmp_path)
+    assert Path(
+        DownloadQueue._prepare_hls_input("https://media.example/master.m3u8", tmp_path)
+    ).exists()
+
+
 def test_prepare_hls_input_decodes_zstd_and_absolutizes_urls(monkeypatch, tmp_path: Path):
-    playlist = b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:10,\nsegment.ts\n'
+    playlist = b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:10,\nsegment.ts\n#EXT-X-ENDLIST\n'
     monkeypatch.setattr(
         downloader_module,
         "_fetch_public_url",
@@ -1194,7 +1378,7 @@ def test_prepare_hls_input_rejects_oversized_playlist(monkeypatch, tmp_path: Pat
 
 def test_prepare_hls_input_caps_aggregate_playlist_bytes(monkeypatch, tmp_path: Path):
     root = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nchild.m3u8\n"
-    child = b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n"
+    child = b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n"
     monkeypatch.setattr(downloader_module, "_HLS_PLAYLIST_MAX_BYTES", 1024)
     monkeypatch.setattr(
         downloader_module,
@@ -1218,7 +1402,7 @@ one.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2
 two.m3u8
 """
-    child = b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n"
+    child = b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n"
     monkeypatch.setattr(downloader_module, "_HLS_PLAYLIST_MAX_COUNT", 2)
     monkeypatch.setattr(
         downloader_module,
@@ -1265,7 +1449,7 @@ def test_prepare_hls_input_rejects_non_http_nested_uri(monkeypatch, tmp_path: Pa
         downloader_module,
         "_fetch_public_url",
         lambda url, *_args, **_kwargs: (
-            f"#EXTM3U\n#EXTINF:1,\n{uri}\n".encode("utf-8"),
+            f"#EXTM3U\n#EXTINF:1,\n{uri}\n#EXT-X-ENDLIST\n".encode("utf-8"),
             url,
         ),
     )
@@ -1501,7 +1685,9 @@ def test_queue_remove_deletes_only_after_durable_state_removal(
     assert queue.enqueue(task) is True
 
     def fail_removal_write(key, value):
-        if not any(item["task_id"] == task.task_id for item in value):
+        if not any(
+            item["task_id"] == task.task_id for item in _payload_items(value)
+        ):
             if persist_before_error:
                 data[key] = value
             raise RuntimeError("simulated removal persistence failure")
@@ -1509,8 +1695,11 @@ def test_queue_remove_deletes_only_after_durable_state_removal(
 
     queue._save = fail_removal_write
 
-    with pytest.raises(RuntimeError, match="removal persistence failure"):
-        queue.remove(task.task_id, delete_file=True)
+    if persist_before_error:
+        assert queue.remove(task.task_id, delete_file=True) is True
+    else:
+        with pytest.raises(RuntimeError, match="removal persistence failure"):
+            queue.remove(task.task_id, delete_file=True)
 
     restarted = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
     if persist_before_error:
@@ -1687,7 +1876,14 @@ def test_queue_replays_control_after_target_persistence_failure(
     task_id = f"control-save-{action}-{int(persist_before_error)}"
 
     def targets_control_state(value):
-        current = next((item for item in value if item["task_id"] == task_id), None)
+        current = next(
+            (
+                item
+                for item in _payload_items(value)
+                if item["task_id"] == task_id
+            ),
+            None,
+        )
         if action == "pause":
             return current is not None and current["state"] == "paused"
         return current is None
@@ -1760,7 +1956,14 @@ def test_queue_stop_retries_interrupted_pause_persistence(tmp_path: Path):
     task_id = "stop-save-failure"
 
     def save(key, value):
-        current = next((item for item in value if item["task_id"] == task_id), None)
+        current = next(
+            (
+                item
+                for item in _payload_items(value)
+                if item["task_id"] == task_id
+            ),
+            None,
+        )
         if (
             current is not None
             and current["state"] == "paused"
@@ -1936,3 +2139,454 @@ def test_queue_engine_cache_lifecycle_and_resume(monkeypatch, tmp_path: Path):
     assert queue.remove(task.task_id) is True
     assert not cache.exists()
     assert engine.cleaned == 1
+
+
+@pytest.mark.parametrize(
+    ("store_key", "quarantine_key", "payload"),
+    [
+        (
+            DownloadQueue.DATA_KEY,
+            DownloadQueue.DATA_QUARANTINE_KEY,
+            {"schema": 2, "items": []},
+        ),
+        (
+            DownloadQueue.DATA_KEY,
+            DownloadQueue.DATA_QUARANTINE_KEY,
+            {"schema": 1, "items": [{"task_id": "broken"}]},
+        ),
+        (
+            DownloadQueue.COMPLETION_OUTBOX_KEY,
+            DownloadQueue.COMPLETION_OUTBOX_QUARANTINE_KEY,
+            {"schema": 2, "items": []},
+        ),
+        (
+            DownloadQueue.COMPLETION_OUTBOX_KEY,
+            DownloadQueue.COMPLETION_OUTBOX_QUARANTINE_KEY,
+            {"schema": 1, "items": [{"task": "broken"}]},
+        ),
+    ],
+)
+def test_corrupt_persistence_is_quarantined_and_fails_closed(
+    store_key: str,
+    quarantine_key: str,
+    payload,
+):
+    data = {store_key: payload}
+
+    with pytest.raises(ValueError, match="持久化数据损坏"):
+        DownloadQueue(data.get, data.__setitem__, lambda *_args: None)
+
+    assert data[store_key] == payload
+    quarantine = data[quarantine_key]
+    assert quarantine["schema"] == 1
+    assert quarantine["source_key"] == store_key
+    assert quarantine["payload"] == payload
+
+
+def test_legacy_task_and_outbox_lists_remain_readable(tmp_path: Path):
+    task = DownloadTask(
+        task_id="legacy-outbox",
+        source_key="lunatv",
+        media_id="site:legacy-outbox",
+        title="Legacy",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/legacy.m3u8",
+        root=str(tmp_path),
+        state="completed",
+        progress=1.0,
+        output=str(tmp_path / "legacy.mp4"),
+    )
+    data = {
+        DownloadQueue.DATA_KEY: [task.to_dict()],
+        DownloadQueue.COMPLETION_OUTBOX_KEY: [
+            {"task": task.to_dict(), "output": task.output}
+        ],
+    }
+
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_args: None)
+
+    assert queue.list_tasks()[0]["task_id"] == task.task_id
+    assert queue.finalizing_task_ids() == {task.task_id}
+    assert DownloadQueue.DATA_QUARANTINE_KEY not in data
+    assert DownloadQueue.COMPLETION_OUTBOX_QUARANTINE_KEY not in data
+
+
+def test_terminal_pruning_cleans_cache_only_after_successful_save(tmp_path: Path):
+    data = {}
+    cleaned: list[str] = []
+
+    class Engine:
+        def cleanup_task(self, task_id: str, _parent=None):
+            cleaned.append(task_id)
+
+    def save(key, value):
+        assert cleaned == []
+        data[key] = value
+
+    queue = DownloadQueue(data.get, save, lambda *_args: None)
+    queue._m3u8_engines = (Engine(),)
+    tasks = [
+        DownloadTask(
+            task_id=f"terminal-{index}",
+            source_key="lunatv",
+            media_id=f"site:terminal-{index}",
+            title=f"Terminal {index}",
+            year="2026",
+            media_type="movie",
+            season=1,
+            episode=index + 1,
+            url=f"https://example.test/{index}.m3u8",
+            root=str(tmp_path),
+            state="completed",
+        )
+        for index in range(501)
+    ]
+
+    queue._write(tasks)
+
+    assert data[queue.DATA_KEY]["schema"] == 1
+    assert len(data[queue.DATA_KEY]["items"]) == 500
+    assert cleaned == ["terminal-0"]
+
+    cleaned.clear()
+    queue._save = lambda *_args: (_ for _ in ()).throw(RuntimeError("save failed"))
+    with pytest.raises(RuntimeError, match="save failed"):
+        queue._write(tasks)
+    assert cleaned == []
+
+
+def test_startup_removes_only_unreferenced_controlled_cache(tmp_path: Path):
+    data_path = tmp_path / "data"
+    engine = downloader_module.N_m3u8DLEngine(data_path)
+    task = DownloadTask(
+        task_id="referenced-cache",
+        source_key="lunatv",
+        media_id="site:referenced-cache",
+        title="Referenced",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/referenced.m3u8",
+        root=str(tmp_path),
+    )
+    referenced = engine.task_cache_dir(task.task_id)
+    orphan = engine.task_cache_dir("orphan-cache")
+    unmanaged = data_path / "m3u8-cache" / "notes"
+    referenced.mkdir(parents=True)
+    orphan.mkdir(parents=True)
+    unmanaged.mkdir(parents=True)
+    data = {DownloadQueue.DATA_KEY: [task.to_dict()]}
+
+    DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_args: None,
+        data_path=data_path,
+    )
+
+    assert referenced.is_dir()
+    assert not orphan.parent.exists()
+    assert unmanaged.is_dir()
+
+
+def test_startup_recovery_finishes_applied_remove_after_save_error(tmp_path: Path):
+    data_path = tmp_path / "data"
+    output = tmp_path / "downloads" / "removed.mp4"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"media")
+    task = DownloadTask(
+        task_id="startup-applied-remove",
+        source_key="lunatv",
+        media_id="site:startup-applied-remove",
+        title="Removed",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/remove.m3u8",
+        root=str(tmp_path / "downloads"),
+        state="running",
+        control_action="remove",
+        delete_file=True,
+        output=str(output),
+    )
+    cache = downloader_module.N_m3u8DLEngine(data_path).task_cache_dir(task.task_id)
+    cache.mkdir(parents=True)
+    (cache / "segment.ts").write_bytes(b"partial")
+    data = {DownloadQueue.DATA_KEY: [task.to_dict()]}
+    failed = False
+
+    def save(key, value):
+        nonlocal failed
+        data[key] = value
+        if key == DownloadQueue.DATA_KEY and not _payload_items(value) and not failed:
+            failed = True
+            raise RuntimeError("save reported failure after commit")
+
+    queue = DownloadQueue(
+        data.get,
+        save,
+        lambda *_args: None,
+        data_path=data_path,
+    )
+
+    assert queue.list_tasks() == []
+    assert not output.exists()
+    assert not cache.exists()
+
+
+def test_failed_task_redacts_persisted_notified_and_returned_error(tmp_path: Path):
+    data = {}
+    notifications = []
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda title, body: notifications.append((title, body)),
+    )
+    task = DownloadTask(
+        task_id="redacted-failure",
+        source_key="lunatv",
+        media_id="site:redacted-failure",
+        title="Redacted",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/redacted.m3u8",
+        root=str(tmp_path),
+    )
+    assert queue.enqueue(task)
+    queue._execute = lambda _task: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError(
+            "failed https://alice:password@example.test/video.m3u8"
+            "?token=secret#fragment"
+        )
+    )
+
+    result = queue.run_one()
+
+    expected = "failed https://example.test/video.m3u8"
+    assert result["error"] == expected
+    assert queue.list_tasks()[0]["error"] == expected
+    assert _payload_items(data[queue.DATA_KEY])[0]["error"] == expected
+    assert notifications == [("LunaTV 下载失败", f"Redacted：{expected}")]
+
+
+def test_prepare_hls_input_skips_bad_variant_and_reports_all_failures(
+    monkeypatch, tmp_path: Path
+):
+    playlists = {
+        "https://media.example/master.m3u8": b"""#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1
+bad.m3u8?token=variant-secret
+#EXT-X-STREAM-INF:BANDWIDTH=2
+good.m3u8
+""",
+        "https://media.example/bad.m3u8?token=variant-secret": b"not a playlist",
+        "https://media.example/good.m3u8": (
+            b"#EXTM3U\n#EXTINF:1,\ngood.ts\n#EXT-X-ENDLIST\n"
+        ),
+    }
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlists[url], url),
+    )
+
+    local = DownloadQueue._prepare_hls_input(
+        "https://media.example/master.m3u8", tmp_path
+    )
+    content = Path(local).read_text(encoding="utf-8")
+    assert "BANDWIDTH=1" not in content
+    assert "BANDWIDTH=2" in content
+
+    playlists["https://media.example/master.m3u8"] = b"""#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1
+bad.m3u8?token=variant-secret
+"""
+    with pytest.raises(RuntimeError, match="所有 variant.*bad.m3u8.*不是有效 m3u8") as exc:
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/master.m3u8", tmp_path
+        )
+    assert "variant-secret" not in str(exc.value)
+
+
+def test_prepare_hls_input_expands_define_variables_before_safe_url_mapping(
+    monkeypatch, tmp_path: Path
+):
+    playlists = {
+        "https://media.example/master.m3u8": b"""#EXTM3U
+#EXT-X-DEFINE:NAME="variant",VALUE="video"
+#EXT-X-DEFINE:NAME="asset",VALUE="assets"
+#EXT-X-STREAM-INF:BANDWIDTH=1
+{$variant}/index.m3u8
+""",
+        "https://media.example/video/index.m3u8": b"""#EXTM3U
+#EXT-X-DEFINE:IMPORT="asset"
+#EXT-X-KEY:METHOD=AES-128,URI="{$asset}/key.bin"
+#EXT-X-MAP:URI="{$asset}/init.mp4"
+#EXT-X-PART:DURATION=0.5,URI="{$asset}/part.m4s"
+#EXTINF:1,
+{$asset}/segment.m4s
+#EXT-X-ENDLIST
+""",
+    }
+    fetched = []
+    mapped = []
+
+    def fetch(url, *_args, **_kwargs):
+        fetched.append(url)
+        return playlists[url], url
+
+    monkeypatch.setattr(downloader_module, "_fetch_public_url", fetch)
+    DownloadQueue._prepare_hls_input(
+        "https://media.example/master.m3u8",
+        tmp_path,
+        lambda url: mapped.append(url) or f"mapped:{len(mapped)}",
+    )
+
+    assert fetched == [
+        "https://media.example/master.m3u8",
+        "https://media.example/video/index.m3u8",
+    ]
+    assert mapped == [
+        "https://media.example/video/assets/key.bin",
+        "https://media.example/video/assets/init.mp4",
+        "https://media.example/video/assets/part.m4s",
+        "https://media.example/video/assets/segment.m4s",
+    ]
+
+    playlists["https://media.example/master.m3u8"] = (
+        b"#EXTM3U\n#EXTINF:1,\n{$missing}/segment.ts\n#EXT-X-ENDLIST\n"
+    )
+    fetched.clear()
+    with pytest.raises(RuntimeError, match="未定义变量.*missing"):
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/master.m3u8", tmp_path
+        )
+    assert fetched == ["https://media.example/master.m3u8"]
+
+    playlists["https://media.example/master.m3u8"] = (
+        b'#EXTM3U\n#EXT-X-DEFINE:IMPORT="missing"\n'
+        b'#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n'
+    )
+    with pytest.raises(RuntimeError, match="未定义 IMPORT.*missing"):
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/master.m3u8", tmp_path
+        )
+
+
+def test_prepare_hls_input_retries_only_transient_fetch_failures(
+    monkeypatch, tmp_path: Path
+):
+    attempts = []
+
+    def transient(url, *_args, **_kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise TimeoutError("temporary timeout")
+        return b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n", url
+
+    monkeypatch.setattr(downloader_module, "_fetch_public_url", transient)
+    assert Path(
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/retry.m3u8", tmp_path
+        )
+    ).exists()
+    assert len(attempts) == 2
+
+    attempts.clear()
+
+    def wrapped_dns(url, *_args, **_kwargs):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise ValueError("probe host cannot resolved") from OSError(
+                "temporary DNS failure"
+            )
+        return b"#EXTM3U\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n", url
+
+    monkeypatch.setattr(downloader_module, "_fetch_public_url", wrapped_dns)
+    assert Path(
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/dns-retry.m3u8", tmp_path
+        )
+    ).exists()
+    assert len(attempts) == 2
+
+    attempts.clear()
+
+    def permanent(url, *_args, **_kwargs):
+        attempts.append(url)
+        raise OSError("probe request returned HTTP 404")
+
+    monkeypatch.setattr(downloader_module, "_fetch_public_url", permanent)
+    with pytest.raises(OSError, match="HTTP 404"):
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/missing.m3u8", tmp_path
+        )
+    assert len(attempts) == 1
+
+    attempts.clear()
+
+    def unsafe_value_error(url, *_args, **_kwargs):
+        attempts.append(url)
+        raise ValueError("non-public redirect target")
+
+    monkeypatch.setattr(
+        downloader_module, "_fetch_public_url", unsafe_value_error
+    )
+    with pytest.raises(ValueError, match="non-public"):
+        DownloadQueue._prepare_hls_input(
+            "https://media.example/unsafe.m3u8", tmp_path
+        )
+    assert len(attempts) == 1
+
+
+def test_media_commit_rejects_parent_swapped_to_symlink(
+    monkeypatch, tmp_path: Path
+):
+    root = tmp_path / "downloads"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    stage = tmp_path / "data" / "m3u8-cache" / "task" / "stage" / "media.mp4"
+    stage.parent.mkdir(parents=True)
+    stage.write_bytes(b"media")
+    queue = DownloadQueue({}.get, lambda *_args: None, lambda *_args: None)
+    task = DownloadTask(
+        task_id="commit-symlink-swap",
+        source_key="lunatv",
+        media_id="site:commit-symlink-swap",
+        title="Swap",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://media.example/index.m3u8",
+        root=str(root),
+    )
+    monkeypatch.setattr(queue, "_run_m3u8_engines", lambda *_args: stage)
+    _root, destination = queue._destination_for_task(task)
+    detached = tmp_path / "detached-parent"
+    real_replace = downloader_module.os.replace
+    swapped = False
+
+    def replace(source, target, *args, **kwargs):
+        nonlocal swapped
+        if kwargs.get("dst_dir_fd") is not None and not swapped:
+            swapped = True
+            destination.parent.rename(detached)
+            destination.parent.symlink_to(outside, target_is_directory=True)
+        return real_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(downloader_module.os, "replace", replace)
+
+    with pytest.raises(OSError, match="目标目录.*变化"):
+        queue._execute(task)
+
+    assert stage.read_bytes() == b"media"
+    assert not (outside / destination.name).exists()
+    assert not (detached / destination.name).exists()

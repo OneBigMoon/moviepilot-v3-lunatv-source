@@ -21,19 +21,16 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 LOGGER = logging.getLogger(__name__)
 
 
+_NUMBER_PATTERN = r"(?:\d{1,4}|[零一二两三四五六七八九十百千万]+)"
 _EPISODE_RE = re.compile(
     r"(?:S(?P<season>\d{1,3})\s*E(?P<episode>\d{1,4}))|"
-    r"(?:第\s*(?P<cn_episode>\d{1,4})\s*[集话])|"
+    rf"(?:第\s*(?P<cn_episode>{_NUMBER_PATTERN})\s*[集话])|"
     r"(?:^|[\s._\-])(?P<bare_episode>\d{1,4})(?:$|[\s._\-])",
     re.IGNORECASE,
 )
 _SEASON_RE = re.compile(
-    r"(?:S\s*(?P<s_season>\d{1,3})\s*(?:季|SEASON)?|"
-    r"第\s*(?P<season>\d{1,3})\s*季)",
-    re.IGNORECASE,
-)
-_CN_SEASON_RE = re.compile(
-    r"(?:第\s*)(?P<season>[一二两三四五六七八九十百千万]+)\s*季",
+    rf"(?:S(?:EASON)?\s*(?P<s_season>\d{{1,3}})\s*(?:季|SEASON)?|"
+    rf"第\s*(?P<season>{_NUMBER_PATTERN})\s*季)",
     re.IGNORECASE,
 )
 _TV_TYPE_NAMES = frozenset(
@@ -89,7 +86,7 @@ _JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 _TV_EPISODE_ROW_TITLE_RE = re.compile(
     r"^(?P<title>.+?)(?:\s*[-_.·:：]*\s*)"
     r"(?:S\s*(?P<season>\d{1,3})\s*E\s*(?P<episode>\d{1,4})|"
-    r"第\s*(?P<cn_episode>\d{1,4})\s*[集话])\s*$",
+    rf"第\s*(?P<cn_episode>{_NUMBER_PATTERN})\s*[集话])\s*$",
     re.IGNORECASE,
 )
 # Apple CMS pages normally contain 10 or 20 rows. Keep a finite bound even for
@@ -128,12 +125,20 @@ def _chinese_number(value: str) -> int:
         for char in text:
             result = result * 10 + digits[char]
         return result
-    if "十" in text:
-        left, _, right = text.partition("十")
-        tens = digits.get(left, 1) if left else 1
-        ones = digits.get(right, 0) if right else 0
-        return tens * 10 + ones
-    return 0
+    units = {"十": 10, "百": 100, "千": 1000}
+    total = section = number = 0
+    for char in text:
+        if char in digits:
+            number = digits[char]
+        elif char in units:
+            section += (number or 1) * units[char]
+            number = 0
+        elif char == "万":
+            total += (section + number) * 10000
+            section = number = 0
+        else:
+            return 0
+    return total + section + number
 
 
 def _json_get(
@@ -584,18 +589,18 @@ def _split_player_values(value: str) -> List[str]:
 def _extract_season_episode(label: str, default_season: int = 1) -> Tuple[int, int]:
     match = _EPISODE_RE.search(_text(label))
     if not match:
-        return default_season, 1
-    season = int(match.group("season") or default_season)
-    episode = int(match.group("episode") or match.group("cn_episode") or match.group("bare_episode") or 1)
+        return default_season, 0
+    season_value = match.group("season")
+    episode_value = match.group("episode") or match.group("cn_episode") or match.group("bare_episode")
+    season = _chinese_number(season_value) if season_value else default_season
+    episode = _chinese_number(episode_value)
     return season, episode
 
 
 def _extract_season(label: str, default_season: int = 1) -> int:
     match = _SEASON_RE.search(_text(label))
-    if match:
-        return int(match.group("season") or match.group("s_season"))
-    match = _CN_SEASON_RE.search(_text(label))
-    return _chinese_number(match.group("season")) if match else default_season
+    season_value = match.group("season") or match.group("s_season") if match else ""
+    return _chinese_number(season_value) if season_value else default_season
 
 
 def _season_hint(label: str, default_season: int = 1) -> int:
@@ -604,13 +609,7 @@ def _season_hint(label: str, default_season: int = 1) -> int:
 
 
 def _has_explicit_season(label: str) -> bool:
-    value = _text(label)
-    return bool(
-        re.search(r"S\s*\d{1,3}\s*E\s*\d{1,4}", value, re.IGNORECASE)
-        or re.search(r"(?:第\s*)?\d{1,3}\s*季", value, re.IGNORECASE)
-        or _CN_SEASON_RE.search(value)
-        or re.search(r"\bS\s*\d{1,3}\b", value, re.IGNORECASE)
-    )
+    return bool(_SEASON_RE.search(_text(label)))
 
 
 def _parse_play_urls(
@@ -646,7 +645,7 @@ def _parse_play_urls(
 
     if from_values:
         pairs = list(zip(from_values, url_values))
-        has_season_groups = any(_extract_season(name, 0) > 0 for name, _ in pairs)
+        has_season_groups = any(_has_explicit_season(name) for name, _ in pairs)
         preferred = [
             pair
             for pair in pairs
@@ -699,6 +698,7 @@ def _parse_play_urls(
                     label,
                     _season_hint(group_name, default_season),
                 )
+                episode = episode or (ordinal if label else 1)
             season_known = default_season_known or _has_explicit_season(group_name) or _has_explicit_season(label)
             episodes.append(
                 CmsEpisode(
@@ -858,8 +858,7 @@ def _media_type(item: Mapping[str, Any]) -> str:
         play_url = _text(item.get("vod_play_url"))
         if (
             _SEASON_RE.search(title)
-            or _CN_SEASON_RE.search(title)
-            or re.search(r"第\s*\d{1,4}\s*[集话]", title)
+            or re.search(rf"第\s*{_NUMBER_PATTERN}\s*[集话]", title)
             or "#" in play_url
         ):
             return "tv"

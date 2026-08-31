@@ -68,7 +68,6 @@ async function saveConfig() {
       source_allowlist: String(config.source_allowlist || '').trim(),
       probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim(),
       hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim(),
-      source_strategy: 'first',
       download_root: String(config.download_root || '').trim(),
       ai_enabled: true,
       tmdb_association: true,

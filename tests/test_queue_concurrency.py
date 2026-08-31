@@ -8,6 +8,10 @@ import lunatvsource_test.downloader as downloader_module
 from lunatvsource_test.downloader import DownloadQueue, DownloadTask
 
 
+def _payload_items(payload):
+    return payload["items"] if isinstance(payload, dict) else payload
+
+
 def make_task(task_id: str, root: Path) -> DownloadTask:
     return DownloadTask(
         task_id=task_id,
@@ -163,6 +167,97 @@ def test_queue_pause_and_remove_are_isolated_per_running_task(tmp_path: Path):
     remaining = queue.list_tasks()[0]
     assert remaining["task_id"] == "pause"
     assert remaining["state"] == "paused"
+
+
+def test_control_many_persists_before_signalling_and_rolls_back_on_save_failure(
+    tmp_path: Path,
+):
+    data = {}
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        max_concurrent_tasks=2,
+    )
+    for task_id in ("one", "two"):
+        assert queue.enqueue(make_task(task_id, tmp_path))
+        assert queue._claim_next() is not None
+    controls = [queue._active[task_id] for task_id in ("one", "two")]
+
+    failed_writes = 0
+
+    def fail_save(_key, _value):
+        nonlocal failed_writes
+        failed_writes += 1
+        assert all(not control.action for control in controls)
+        assert all(not control.event.is_set() for control in controls)
+        raise RuntimeError("queue save failed")
+
+    queue._save = fail_save
+    with pytest.raises(RuntimeError, match="queue save failed"):
+        queue.control_many(("one", "two"), "pause")
+
+    assert failed_writes == 1
+    assert all(not control.action for control in controls)
+    assert all(not control.event.is_set() for control in controls)
+    assert {
+        item["control_action"] for item in _payload_items(data[queue.DATA_KEY])
+    } == {""}
+
+    successful_writes = 0
+
+    def save_after_asserting_no_signal(key, value):
+        nonlocal successful_writes
+        successful_writes += 1
+        assert all(not control.action for control in controls)
+        assert all(not control.event.is_set() for control in controls)
+        data[key] = value
+
+    queue._save = save_after_asserting_no_signal
+    assert queue.control_many(("one", "two"), "pause")
+    assert successful_writes == 1
+    assert all(control.action == "pause" for control in controls)
+    assert all(control.event.is_set() for control in controls)
+    assert {
+        item["control_action"] for item in _payload_items(data[queue.DATA_KEY])
+    } == {"pause"}
+
+
+def test_control_many_resume_is_one_write_and_wakes_only_after_success(
+    monkeypatch,
+    tmp_path: Path,
+):
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_args: None)
+    for task_id in ("resume-one", "resume-two"):
+        assert queue.enqueue(make_task(task_id, tmp_path))
+        assert queue.pause(task_id)
+
+    wakes = []
+    monkeypatch.setattr(queue, "wake", lambda: wakes.append("wake") or True)
+    queue._save = lambda *_args: (_ for _ in ()).throw(RuntimeError("save failed"))
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        queue.control_many(("resume-one", "resume-two"), "resume")
+
+    assert wakes == []
+    assert {task["state"] for task in queue.list_tasks()} == {"paused"}
+
+    writes = 0
+
+    def save(key, value):
+        nonlocal writes
+        writes += 1
+        assert wakes == []
+        data[key] = value
+
+    queue._save = save
+    assert queue.control_many(("resume-one", "resume-two"), "resume")
+
+    assert writes == 1
+    assert wakes == ["wake"]
+    assert {task["state"] for task in queue.list_tasks()} == {"pending"}
+    assert data[queue.DATA_KEY]["schema"] == 1
 
 
 def test_queue_concurrent_completion_rereads_persisted_tasks(tmp_path: Path):
@@ -434,7 +529,14 @@ def test_queue_replays_unpersisted_terminal_without_rerunning_task(
         if key != DownloadQueue.DATA_KEY:
             data[key] = value
             return
-        first = next((item for item in value if item["task_id"] == first_id), None)
+        first = next(
+            (
+                item
+                for item in _payload_items(value)
+                if item["task_id"] == first_id
+            ),
+            None,
+        )
         terminal_write = (
             first is None
             if terminal == "remove"
@@ -487,6 +589,60 @@ def test_queue_replays_unpersisted_terminal_without_rerunning_task(
         assert tasks[first.task_id]["state"] == expected_state
 
 
+@pytest.mark.parametrize("failure", ["callback", "outbox_ack"])
+def test_terminal_delivery_failure_does_not_block_unrelated_task(
+    monkeypatch,
+    tmp_path: Path,
+    failure: str,
+):
+    data = {}
+    release_failure = threading.Event()
+    second_completed = threading.Event()
+
+    def on_complete(task: DownloadTask, _output: str) -> None:
+        if task.task_id == "blocked" and failure == "callback":
+            if not release_failure.is_set():
+                raise RuntimeError("completion callback unavailable")
+        if task.task_id == "unrelated":
+            second_completed.set()
+
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        on_complete=on_complete,
+    )
+    for task_id in ("blocked", "unrelated"):
+        assert queue.enqueue(make_task(task_id, tmp_path))
+
+    if failure == "outbox_ack":
+        clear_outbox = queue._clear_completion_outbox
+
+        def fail_first_ack(task_id: str) -> None:
+            if task_id == "blocked" and not release_failure.is_set():
+                raise RuntimeError("completion outbox unavailable")
+            clear_outbox(task_id)
+
+        monkeypatch.setattr(queue, "_clear_completion_outbox", fail_first_ack)
+
+    queue._execute = lambda task: str(  # type: ignore[method-assign]
+        tmp_path / f"{task.task_id}.mp4"
+    )
+    assert queue.wake()
+    assert second_completed.wait(timeout=2)
+    wait_until(lambda: queue.finalizing_task_ids() == {"blocked"})
+    assert queue.finalizing_task_ids() == {"blocked"}
+    states = {item["task_id"]: item["state"] for item in queue.list_tasks()}
+    assert states == {"blocked": "completed", "unrelated": "completed"}
+    assert data[queue.COMPLETION_OUTBOX_KEY]
+
+    release_failure.set()
+    assert queue.wake()
+    wait_until(lambda: not queue.finalizing_task_ids())
+    assert queue.wait_until_idle(timeout=1)
+    assert _payload_items(data[queue.COMPLETION_OUTBOX_KEY]) == []
+
+
 def test_completion_outbox_replays_after_restart_without_redownload(tmp_path: Path):
     data = {}
     callbacks: list[str] = []
@@ -533,7 +689,7 @@ def test_completion_outbox_replays_after_restart_without_redownload(tmp_path: Pa
     wait_until(lambda: callbacks == ["failed", "replayed"])
     assert restarted.wait_until_idle(timeout=1)
     assert executions == 1
-    assert data[restarted.COMPLETION_OUTBOX_KEY] == []
+    assert _payload_items(data[restarted.COMPLETION_OUTBOX_KEY]) == []
     assert restarted.list_tasks()[0]["state"] == "completed"
 
 
@@ -597,6 +753,38 @@ def test_failed_task_reenqueue_reuses_existing_record(tmp_path: Path):
     assert tasks[0]["progress"] == 0.0
     assert tasks[0]["error"] == ""
     assert tasks[0]["root"] == replacement.root
+    assert replacement.task_id == failed.task_id
+
+
+@pytest.mark.parametrize("action", ["pause", "remove"])
+def test_control_many_signals_durably_applied_running_control_after_save_error(
+    tmp_path: Path,
+    action: str,
+):
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    task = make_task(f"applied-{action}", tmp_path)
+    assert queue.enqueue(task)
+    assert queue._claim_next() is not None
+    control = queue._active[task.task_id]
+
+    def persist_then_raise(key, value):
+        data[key] = value
+        raise RuntimeError("save reported failure after commit")
+
+    queue._save = persist_then_raise
+
+    assert queue.control_many(
+        (task.task_id,),
+        action,
+        delete_file=action == "remove",
+    ) is True
+    assert control.action == action
+    assert control.delete_file is (action == "remove")
+    assert control.event.is_set()
+    stored = _payload_items(data[queue.DATA_KEY])[0]
+    assert stored["control_action"] == action
+    assert stored["delete_file"] is (action == "remove")
 
 
 def test_startup_recovery_removes_duplicate_task_ids_and_keeps_completion(

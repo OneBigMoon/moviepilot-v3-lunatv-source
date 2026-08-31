@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.60"
+    expected_version = "0.4.61"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -197,6 +197,17 @@ def test_app_page_queue_summary_is_independent_from_source_count():
     assert "{{ loading ? '…' : sources.length }}" in app_page
 
 
+def test_app_page_disables_health_check_when_plugin_is_disabled_and_labels_source_count():
+    project_root = Path(__file__).resolve().parents[1]
+    app_page = (
+        project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
+    ).read_text(encoding="utf-8")
+
+    assert ':disabled="status.enabled !== true || healthCheckStarting || sourceHealth.running"' in app_page
+    assert "请先启用插件后进行健康检查" in app_page
+    assert "<div class=\"section-title\">资源站数量" in app_page
+
+
 def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     project_root = Path(__file__).resolve().parents[1]
     app_page = (
@@ -251,6 +262,19 @@ def test_frontend_supports_failed_task_retry_and_optional_download_directory():
     assert "下载目录（可留空）" in config_page
     assert "MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录" in config_page
     assert "config.download_root = defaults.download_root" not in config_page
+
+
+def test_config_preserves_source_strategy_while_defaulting_to_first():
+    project_root = Path(__file__).resolve().parents[1]
+    config_page = (
+        project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "Config.vue"
+    ).read_text(encoding="utf-8")
+    defaults = config_page.split("const defaults = {", 1)[1].split("const config", 1)[0]
+    payload = config_page.split("const payload = {", 1)[1].split("const response", 1)[0]
+
+    assert "source_strategy: 'first'," in defaults
+    assert "...config," in payload
+    assert "source_strategy:" not in payload
 
 
 def test_source_health_ui_uses_cached_reads_and_persists_interval():

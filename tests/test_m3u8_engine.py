@@ -1488,3 +1488,33 @@ def test_cross_filesystem_move_accepts_name_max_output_without_temp_residue(
     assert stat.S_IMODE(output.stat().st_mode) == 0o640
     assert not candidate.exists()
     assert not list(output_parent.glob(".lunatv-transfer-*"))
+
+
+def test_n_download_can_leave_completed_media_in_controlled_stage(
+    monkeypatch, tmp_path: Path
+):
+    engine = N_m3u8DLEngine(tmp_path / "plugin-data")
+    task_id = "stage-only"
+    monkeypatch.setattr(
+        engine._installer,
+        "ensure_binary",
+        lambda control_event=None: Path("/bin/n_m3u8dl"),
+    )
+
+    def run_command(*_args, **_kwargs):
+        stage_dir = engine.stage_dir(task_id)
+        (stage_dir / "media.mp4").write_bytes(b"media")
+
+    monkeypatch.setattr(engine, "_run_command", run_command)
+
+    output = engine.download(
+        "https://example.test/index.m3u8",
+        None,
+        task_id=task_id,
+        ffmpeg_path="ffmpeg",
+        control_event=None,
+        progress_callback=None,
+    )
+
+    assert output == engine.stage_dir(task_id) / "media.mp4"
+    assert output.read_bytes() == b"media"

@@ -245,10 +245,11 @@ onBeforeUnmount(clearHealthPoll)
         <button class="button secondary" :disabled="loading" @click="load">刷新状态</button>
         <button
           class="button"
-          :disabled="healthCheckStarting || sourceHealth.running"
-          :aria-label="sourceHealth.running ? '健康检查进行中' : '立即健康检查所有来源'"
+          :disabled="status.enabled !== true || healthCheckStarting || sourceHealth.running"
+          :aria-label="status.enabled !== true ? '请先启用插件' : (sourceHealth.running ? '健康检查进行中' : '立即健康检查所有来源')"
           @click="startHealthCheck"
         >{{ healthCheckStarting || sourceHealth.running ? '健康检查中…' : '立即健康检查' }}</button>
+        <span v-if="status.enabled === false" class="source-caption">请先启用插件后进行健康检查</span>
       </div>
     </div>
 
@@ -280,7 +281,7 @@ onBeforeUnmount(clearHealthPoll)
 
     <section class="panel">
       <div class="section-heading">
-        <div class="section-title">资源站 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
+        <div class="section-title">资源站数量 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
         <span class="source-caption">打开页面仅读取缓存；搜索仅使用健康且已启用的来源</span>
       </div>
       <div v-if="loading" class="empty">正在读取资源站配置…</div>

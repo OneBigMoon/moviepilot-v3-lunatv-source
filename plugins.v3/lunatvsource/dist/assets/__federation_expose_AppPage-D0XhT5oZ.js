@@ -20,63 +20,67 @@ const _hoisted_6 = ["disabled"];
 const _hoisted_7 = ["disabled", "aria-label"];
 const _hoisted_8 = {
   key: 0,
-  class: "alert error"
+  class: "source-caption"
 };
 const _hoisted_9 = {
-  key: 1,
+  key: 0,
   class: "alert error"
 };
 const _hoisted_10 = {
-  key: 2,
-  class: "alert warning"
+  key: 1,
+  class: "alert error"
 };
 const _hoisted_11 = {
-  key: 3,
+  key: 2,
   class: "alert warning"
 };
 const _hoisted_12 = {
+  key: 3,
+  class: "alert warning"
+};
+const _hoisted_13 = {
   key: 4,
   class: "alert warning"
 };
-const _hoisted_13 = { class: "setup-strip" };
-const _hoisted_14 = { class: "panel" };
-const _hoisted_15 = { class: "section-heading" };
-const _hoisted_16 = { class: "section-title" };
-const _hoisted_17 = { class: "muted" };
-const _hoisted_18 = {
+const _hoisted_14 = { class: "setup-strip" };
+const _hoisted_15 = { class: "panel" };
+const _hoisted_16 = { class: "section-heading" };
+const _hoisted_17 = { class: "section-title" };
+const _hoisted_18 = { class: "muted" };
+const _hoisted_19 = {
   key: 0,
   class: "empty"
 };
-const _hoisted_19 = {
+const _hoisted_20 = {
   key: 1,
   class: "empty"
 };
-const _hoisted_20 = {
+const _hoisted_21 = {
   key: 2,
   class: "source-table-wrap"
 };
-const _hoisted_21 = { class: "source-table" };
-const _hoisted_22 = { class: "health-status" };
-const _hoisted_23 = ["title"];
-const _hoisted_24 = { class: "source-name" };
-const _hoisted_25 = ["href"];
-const _hoisted_26 = {
+const _hoisted_22 = { class: "source-table" };
+const _hoisted_23 = { class: "health-status" };
+const _hoisted_24 = ["title"];
+const _hoisted_25 = { class: "source-name" };
+const _hoisted_26 = ["href"];
+const _hoisted_27 = {
   key: 1,
   class: "muted"
 };
-const _hoisted_27 = { class: "source-actions" };
-const _hoisted_28 = ["disabled", "aria-label", "onClick"];
+const _hoisted_28 = { class: "source-actions" };
 const _hoisted_29 = ["disabled", "aria-label", "onClick"];
-const _hoisted_30 = {
+const _hoisted_30 = ["disabled", "aria-label", "onClick"];
+const _hoisted_31 = {
   key: 5,
   class: "panel"
 };
-const _hoisted_31 = { class: "section-heading" };
-const _hoisted_32 = { class: "section-title" };
-const _hoisted_33 = { class: "muted" };
-const _hoisted_34 = { class: "source-name" };
-const _hoisted_35 = { class: "source-error" };
-const _hoisted_36 = ["disabled", "aria-label", "onClick"];
+const _hoisted_32 = { class: "section-heading" };
+const _hoisted_33 = { class: "section-title" };
+const _hoisted_34 = { class: "muted" };
+const _hoisted_35 = { class: "source-name" };
+const _hoisted_36 = { class: "source-error" };
+const _hoisted_37 = ["disabled", "aria-label", "onClick"];
 
 const {computed,onBeforeUnmount,onMounted,ref} = await importShared('vue');
 
@@ -336,27 +340,30 @@ return (_ctx, _cache) => {
         }, "刷新状态", 8, _hoisted_6),
         _createElementVNode("button", {
           class: "button",
-          disabled: healthCheckStarting.value || sourceHealth.value.running,
-          "aria-label": sourceHealth.value.running ? '健康检查进行中' : '立即健康检查所有来源',
+          disabled: status.value.enabled !== true || healthCheckStarting.value || sourceHealth.value.running,
+          "aria-label": status.value.enabled !== true ? '请先启用插件' : (sourceHealth.value.running ? '健康检查进行中' : '立即健康检查所有来源'),
           onClick: startHealthCheck
-        }, _toDisplayString(healthCheckStarting.value || sourceHealth.value.running ? '健康检查中…' : '立即健康检查'), 9, _hoisted_7)
+        }, _toDisplayString(healthCheckStarting.value || sourceHealth.value.running ? '健康检查中…' : '立即健康检查'), 9, _hoisted_7),
+        (status.value.enabled === false)
+          ? (_openBlock(), _createElementBlock("span", _hoisted_8, "请先启用插件后进行健康检查"))
+          : _createCommentVNode("", true)
       ])
     ]),
     (error.value)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_8, _toDisplayString(error.value), 1))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_9, _toDisplayString(error.value), 1))
       : (sourceHealth.value.last_error)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_9, " 最近一次健康检查失败：" + _toDisplayString(sourceHealth.value.last_error), 1))
+        ? (_openBlock(), _createElementBlock("div", _hoisted_10, " 最近一次健康检查失败：" + _toDisplayString(sourceHealth.value.last_error), 1))
         : _createCommentVNode("", true),
     (status.value.source_config?.error)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_10, " 远程来源清单刷新失败，当前使用" + _toDisplayString(status.value.source_config?.origin || '缓存') + "：" + _toDisplayString(status.value.source_config.error), 1))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_11, " 远程来源清单刷新失败，当前使用" + _toDisplayString(status.value.source_config?.origin || '缓存') + "：" + _toDisplayString(status.value.source_config.error), 1))
       : _createCommentVNode("", true),
     (subscriptionRefreshStatus.value.error)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_11, " 最近一次追更失败：" + _toDisplayString(subscriptionRefreshStatus.value.error), 1))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_12, " 最近一次追更失败：" + _toDisplayString(subscriptionRefreshStatus.value.error), 1))
       : _createCommentVNode("", true),
     (mediaSyncStatus.value.error)
-      ? (_openBlock(), _createElementBlock("div", _hoisted_12, " 最近一次媒体库或订阅进度同步失败：" + _toDisplayString(mediaSyncStatus.value.error), 1))
+      ? (_openBlock(), _createElementBlock("div", _hoisted_13, " 最近一次媒体库或订阅进度同步失败：" + _toDisplayString(mediaSyncStatus.value.error), 1))
       : _createCommentVNode("", true),
-    _createElementVNode("section", _hoisted_13, [
+    _createElementVNode("section", _hoisted_14, [
       _createElementVNode("span", null, "目录：" + _toDisplayString(directoryStatus.value.configured_root || directoryStatus.value.auto_roots?.[0]?.download_path || '未配置'), 1),
       _createElementVNode("span", null, "来源：" + _toDisplayString(directoryStatus.value.source || '未配置'), 1),
       _createElementVNode("span", null, "当前队列：运行 " + _toDisplayString(queueStatus.value.running || 0) + " · 等待 " + _toDisplayString(queueStatus.value.pending || 0) + " · 暂停 " + _toDisplayString(queueStatus.value.paused || 0) + " · 失败 " + _toDisplayString(queueStatus.value.failed || 0) + " · 共 " + _toDisplayString(queueTotal.value) + " 任务", 1),
@@ -367,20 +374,20 @@ return (_ctx, _cache) => {
       _cache[1] || (_cache[1] = _createElementVNode("span", null, "缓存：完成后才整理", -1)),
       _createElementVNode("span", null, "来源健康检查：每 " + _toDisplayString(sourceHealth.value.interval_minutes || 60) + " 分钟", 1)
     ]),
-    _createElementVNode("section", _hoisted_14, [
-      _createElementVNode("div", _hoisted_15, [
-        _createElementVNode("div", _hoisted_16, [
-          _cache[2] || (_cache[2] = _createTextVNode("资源站 ", -1)),
-          _createElementVNode("span", _hoisted_17, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
+    _createElementVNode("section", _hoisted_15, [
+      _createElementVNode("div", _hoisted_16, [
+        _createElementVNode("div", _hoisted_17, [
+          _cache[2] || (_cache[2] = _createTextVNode("资源站数量 ", -1)),
+          _createElementVNode("span", _hoisted_18, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
         ]),
         _cache[3] || (_cache[3] = _createElementVNode("span", { class: "source-caption" }, "打开页面仅读取缓存；搜索仅使用健康且已启用的来源", -1))
       ]),
       (loading.value)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_18, "正在读取资源站配置…"))
+        ? (_openBlock(), _createElementBlock("div", _hoisted_19, "正在读取资源站配置…"))
         : (!sources.value.length)
-          ? (_openBlock(), _createElementBlock("div", _hoisted_19, "暂未读取到资源站配置"))
-          : (_openBlock(), _createElementBlock("div", _hoisted_20, [
-              _createElementVNode("table", _hoisted_21, [
+          ? (_openBlock(), _createElementBlock("div", _hoisted_20, "暂未读取到资源站配置"))
+          : (_openBlock(), _createElementBlock("div", _hoisted_21, [
+              _createElementVNode("table", _hoisted_22, [
                 _cache[5] || (_cache[5] = _createElementVNode("thead", null, [
                   _createElementVNode("tr", null, [
                     _createElementVNode("th", { scope: "col" }, "状态"),
@@ -406,7 +413,7 @@ return (_ctx, _cache) => {
                           }, null, -1)),
                           _createTextVNode(" " + _toDisplayString(source.status_label || '已加载'), 1)
                         ], 2),
-                        _createElementVNode("div", _hoisted_22, [
+                        _createElementVNode("div", _hoisted_23, [
                           _createElementVNode("span", {
                             class: _normalizeClass(['health-state', `is-${source.health_status || 'unknown'}`])
                           }, _toDisplayString(source.health_label || '未检查'), 3),
@@ -415,12 +422,12 @@ return (_ctx, _cache) => {
                                 key: 0,
                                 class: "source-error",
                                 title: source.last_error
-                              }, _toDisplayString(source.last_error), 9, _hoisted_23))
+                              }, _toDisplayString(source.last_error), 9, _hoisted_24))
                             : _createCommentVNode("", true)
                         ])
                       ]),
                       _createElementVNode("td", null, [
-                        _createElementVNode("span", _hoisted_24, _toDisplayString(source.name), 1)
+                        _createElementVNode("span", _hoisted_25, _toDisplayString(source.name), 1)
                       ]),
                       _createElementVNode("td", null, [
                         (sourceUrl(source))
@@ -430,8 +437,8 @@ return (_ctx, _cache) => {
                               href: sourceUrl(source),
                               target: "_blank",
                               rel: "noopener noreferrer"
-                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_25))
-                          : (_openBlock(), _createElementBlock("span", _hoisted_26, "—"))
+                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_26))
+                          : (_openBlock(), _createElementBlock("span", _hoisted_27, "—"))
                       ]),
                       _createElementVNode("td", null, [
                         _createElementVNode("span", {
@@ -440,13 +447,13 @@ return (_ctx, _cache) => {
                       ]),
                       _createElementVNode("td", null, _toDisplayString(formattedTime(source.last_checked)), 1),
                       _createElementVNode("td", null, [
-                        _createElementVNode("div", _hoisted_27, [
+                        _createElementVNode("div", _hoisted_28, [
                           _createElementVNode("button", {
                             class: "source-action",
                             disabled: sourceIsBusy(source) || sourceHealth.value.running,
                             "aria-label": `${source.manual_disabled ? '重新启用' : '永久停用'}来源 ${source.name || source.key}`,
                             onClick: $event => (setSourceEnabled(source, source.manual_disabled))
-                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_28),
+                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_29),
                           (!source.manual_disabled && !source.enabled && source.disabled_reason !== 'configured')
                             ? (_openBlock(), _createElementBlock("button", {
                                 key: 0,
@@ -454,7 +461,7 @@ return (_ctx, _cache) => {
                                 disabled: sourceIsBusy(source) || sourceHealth.value.running,
                                 "aria-label": `立即复检来源 ${source.name || source.key}`,
                                 onClick: $event => (recheckSource(source))
-                              }, "立即复检", 8, _hoisted_29))
+                              }, "立即复检", 8, _hoisted_30))
                             : _createCommentVNode("", true)
                         ])
                       ])
@@ -465,11 +472,11 @@ return (_ctx, _cache) => {
             ]))
     ]),
     (failedTasks.value.length)
-      ? (_openBlock(), _createElementBlock("section", _hoisted_30, [
-          _createElementVNode("div", _hoisted_31, [
-            _createElementVNode("div", _hoisted_32, [
+      ? (_openBlock(), _createElementBlock("section", _hoisted_31, [
+          _createElementVNode("div", _hoisted_32, [
+            _createElementVNode("div", _hoisted_33, [
               _cache[6] || (_cache[6] = _createTextVNode("失败任务 ", -1)),
-              _createElementVNode("span", _hoisted_33, _toDisplayString(failedTasks.value.length), 1)
+              _createElementVNode("span", _hoisted_34, _toDisplayString(failedTasks.value.length), 1)
             ]),
             _cache[7] || (_cache[7] = _createElementVNode("span", { class: "source-caption" }, "重试会将任务重新排入下载队列", -1))
           ]),
@@ -479,25 +486,25 @@ return (_ctx, _cache) => {
               class: "source-actions"
             }, [
               _createElementVNode("div", null, [
-                _createElementVNode("div", _hoisted_34, _toDisplayString(task.title || '未命名任务'), 1),
-                _createElementVNode("div", _hoisted_35, _toDisplayString(task.error || '下载失败'), 1)
+                _createElementVNode("div", _hoisted_35, _toDisplayString(task.title || '未命名任务'), 1),
+                _createElementVNode("div", _hoisted_36, _toDisplayString(task.error || '下载失败'), 1)
               ]),
               _createElementVNode("button", {
                 class: "source-action",
                 disabled: taskIsRetrying(task),
                 "aria-label": `重试任务 ${task.title || task.task_id}`,
                 onClick: $event => (retryTask(task))
-              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_36)
+              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_37)
             ]))
           }), 128))
         ]))
       : _createCommentVNode("", true),
-    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-a4dd5cca><div class=\"section-title\" data-v-a4dd5cca>使用说明</div><div class=\"help-grid\" data-v-a4dd5cca><p data-v-a4dd5cca><strong data-v-a4dd5cca>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-a4dd5cca><strong data-v-a4dd5cca>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-5aa39099><div class=\"section-title\" data-v-5aa39099>使用说明</div><div class=\"help-grid\" data-v-5aa39099><p data-v-5aa39099><strong data-v-5aa39099>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-5aa39099><strong data-v-5aa39099>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-5aa39099><strong data-v-5aa39099>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-5aa39099><strong data-v-5aa39099>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-5aa39099><strong data-v-5aa39099>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a4dd5cca"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5aa39099"]]);
 
 export { AppPage as default };

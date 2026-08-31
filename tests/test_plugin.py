@@ -7,7 +7,7 @@ from lunatvsource_test.cms import (
     CmsSource,
     _result_from_item,
 )
-from lunatvsource_test.downloader import DownloadTask
+from lunatvsource_test.downloader import DownloadQueue, DownloadTask
 from lunatvsource_test.naming import media_path
 from pathlib import Path
 from collections.abc import Mapping
@@ -171,6 +171,103 @@ def test_manual_download_wakes_queue_once_only_for_new_task(monkeypatch, tmp_pat
     assert wakeups == [True]
 
 
+def test_stop_service_waits_for_queue_shutdown():
+    plugin = LunaTVSource()
+    calls = []
+    plugin._queue = SimpleNamespace(
+        stop_and_wait=lambda timeout: calls.append(timeout) or True
+    )
+
+    plugin.stop_service()
+
+    assert calls == [plugin_module._QUEUE_RELOAD_STOP_TIMEOUT_SECONDS]
+
+
+@pytest.mark.skipif(plugin_module.fcntl is None, reason="requires fcntl")
+def test_queue_data_path_lock_is_held_until_queue_stops(monkeypatch, tmp_path: Path):
+    first = LunaTVSource()
+    second = LunaTVSource()
+    monkeypatch.setattr(first, "get_data_path", lambda: tmp_path, raising=False)
+    monkeypatch.setattr(second, "get_data_path", lambda: tmp_path, raising=False)
+    first.init_plugin({"enabled": False})
+    original_stop = first._queue.stop_and_wait
+    monkeypatch.setattr(first._queue, "stop_and_wait", lambda *, timeout: False)
+
+    first.stop_service()
+    second.init_plugin({"enabled": False})
+
+    assert second._queue is None
+    assert "其他实例占用" in second._source_config_error
+
+    monkeypatch.setattr(first._queue, "stop_and_wait", original_stop)
+    first.stop_service()
+    second.init_plugin({"enabled": False})
+    assert second._queue is not None
+    second.stop_service()
+
+
+def test_init_plugin_does_not_mask_falsy_corrupt_queue_payload():
+    plugin = LunaTVSource()
+    plugin.save_data(DownloadQueue.DATA_KEY, "")
+
+    with pytest.raises(ValueError, match="持久化数据损坏"):
+        plugin.init_plugin({"enabled": False})
+
+    assert plugin._queue is None
+    assert plugin.get_data(DownloadQueue.DATA_QUARANTINE_KEY)["payload"] == ""
+
+
+def test_manual_download_uses_url_digest_when_media_id_is_missing(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    first = plugin.api_download({"url": "https://example.test/first.m3u8"})
+    second = plugin.api_download({"url": "https://example.test/second.m3u8"})
+
+    assert first["success"] is True
+    assert second["success"] is True
+    media_ids = [task["media_id"] for task in plugin._queue.list_tasks()]
+    assert len(set(media_ids)) == 2
+    assert all(media_id.startswith("manual:") for media_id in media_ids)
+    assert all("example.test" not in media_id for media_id in media_ids)
+
+
+def test_api_download_ignores_root_and_ffmpeg_overrides(monkeypatch, tmp_path: Path):
+    configured_root = tmp_path / "configured"
+    plugin = LunaTVSource()
+    plugin.init_plugin({
+        "enabled": True,
+        "download_root": str(configured_root),
+        "ffmpeg_path": "/configured/ffmpeg",
+    })
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    manual = plugin.api_download({
+        "url": "https://example.test/manual.m3u8",
+        "root": str(tmp_path / "override"),
+        "ffmpeg_path": "/payload/ffmpeg",
+    })
+    resource = plugin.api_download({
+        "title": "示例剧",
+        "media_type": "tv",
+        "media_id": "demo:override",
+        "root": str(tmp_path / "override"),
+        "ffmpeg_path": "/payload/ffmpeg",
+        "episodes": [{
+            "url": "https://example.test/s01e02.m3u8",
+            "season": 1,
+            "episode": 2,
+        }],
+    })
+
+    assert manual["success"] is True
+    assert resource["success"] is True
+    tasks = plugin._queue.list_tasks()
+    assert {task["root"] for task in tasks} == {str(configured_root)}
+    assert {task["ffmpeg_path"] for task in tasks} == {"/configured/ffmpeg"}
+
+
 def test_api_search_expands_episode_rows_for_downloadable_results(monkeypatch):
     calls = []
 
@@ -187,6 +284,35 @@ def test_api_search_expands_episode_rows_for_downloadable_results(monkeypatch):
 
     assert response == {"success": True, "data": []}
     assert calls and calls[0][1]["expand_tv_episode_rows"] is True
+
+
+def test_tasks_api_exposes_only_public_fields_and_redacts_error_urls():
+    plugin = LunaTVSource()
+    task = DownloadTask(
+        task_id="public-task",
+        source_key="demo",
+        media_id="secret-media-id",
+        title="示例",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://user:password@example.test/video.m3u8?token=secret",
+        root="/private/downloads",
+        ffmpeg_path="/private/ffmpeg",
+        state="failed",
+        error="请求 https://user:password@example.test/video.m3u8?token=secret 失败",
+    )
+    plugin._queue = SimpleNamespace(list_tasks=lambda: [task.to_dict()])
+
+    response = plugin.api_tasks()
+
+    assert response["success"] is True
+    assert set(response["data"][0]) == {"task_id", "title", "state", "error"}
+    public_text = str(response["data"][0])
+    assert "secret" not in public_text
+    assert "password" not in public_text
+    assert "/private" not in public_text
 
 
 def test_api_download_enqueues_lunatv_season_token_once(monkeypatch, tmp_path: Path):
@@ -831,10 +957,30 @@ def test_resource_torrents_targets_native_identity_for_tv_and_movie(monkeypatch)
             "vod_play_url": "正片$https://example.test/movie.m3u8",
         },
     )
+    wrong_title = _result_from_item(
+        source,
+        {
+            "vod_id": "wrong-title",
+            "vod_name": "钢之炼金术师",
+            "vod_year": "2013",
+            "type_name": "电视剧",
+            "vod_play_url": "01$https://example.test/wrong-title.m3u8",
+        },
+    )
+    wrong_year = _result_from_item(
+        source,
+        {
+            "vod_id": "wrong-year",
+            "vod_name": "进击的巨人",
+            "vod_year": "2024",
+            "type_name": "电视剧",
+            "vod_play_url": "01$https://example.test/wrong-year.m3u8",
+        },
+    )
 
     class Client:
         def search(self, _query, **_kwargs):
-            return [tv_result, movie_result]
+            return [tv_result, movie_result, wrong_title, wrong_year]
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
@@ -897,6 +1043,91 @@ def test_resource_torrents_targets_native_identity_for_tv_and_movie(monkeypatch)
     assert movie_payload["source_name"] == "演示源"
     assert movie_payload["host_media_source"] == "anilist"
     assert movie_payload["host_media_id"] == "anilist:anime_123"
+
+
+def test_resource_torrents_only_associates_matching_context(monkeypatch):
+    class TorrentInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    results = [
+        CmsResult(
+            source_key="target",
+            source_name="目标源",
+            vod_id="matched",
+            title="目标片",
+            year="",
+            media_type="movie",
+            remark="",
+            episodes=(CmsEpisode(1, 1, "正片", "https://example.test/matched.m3u8"),),
+        ),
+        CmsResult(
+            source_key="noise",
+            source_name="噪声源",
+            vod_id="wrong-year",
+            title="目标片",
+            year="2025",
+            media_type="movie",
+            remark="",
+            episodes=(CmsEpisode(1, 1, "正片", "https://example.test/wrong-year.m3u8"),),
+        ),
+        CmsResult(
+            source_key="noise",
+            source_name="噪声源",
+            vod_id="wrong-title",
+            title="其它片",
+            year="2024",
+            media_type="movie",
+            remark="",
+            episodes=(CmsEpisode(1, 1, "正片", "https://example.test/wrong-title.m3u8"),),
+        ),
+        CmsResult(
+            source_key="noise",
+            source_name="噪声源",
+            vod_id="wrong-type",
+            title="目标片",
+            year="2024",
+            media_type="tv",
+            remark="",
+            episodes=(CmsEpisode(1, 1, "第1集", "https://example.test/wrong-type.m3u8"),),
+        ),
+    ]
+
+    class Client:
+        def search(self, *_args, **_kwargs):
+            return results
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin_module, "_HostTorrentInfo", TorrentInfo)
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(
+        plugin,
+        "_associate_tmdb",
+        lambda *_args, **_kwargs: {
+            "status": "matched",
+            "media_source": "themoviedb",
+            "media_id": "123",
+            "title": "目标片",
+            "year": "2024",
+        },
+    )
+    monkeypatch.setattr(plugin, "_probe_resource_urls", lambda _urls: {})
+
+    items = plugin._resource_torrents("目标片")
+    payloads = {
+        plugin._decode_resource_token(item.enclosure)["media_id"]: item
+        for item in items
+    }
+
+    assert payloads["target:matched"].media_source == "themoviedb"
+    assert payloads["target:matched"].media_id == "123"
+    assert payloads["noise:wrong-year"].media_source == "lunatv"
+    assert payloads["noise:wrong-year"].media_id == "noise:wrong-year"
+    assert payloads["noise:wrong-title"].media_source == "lunatv"
+    assert payloads["noise:wrong-title"].media_id == "noise:wrong-title"
+    assert payloads["noise:wrong-type"].media_source == "lunatv"
+    assert payloads["noise:wrong-type"].media_id == "noise:wrong-type"
 
 
 def test_resource_torrents_forwards_lunatv_progress_callback(monkeypatch):
@@ -1829,7 +2060,7 @@ def test_resource_torrents_keep_complete_season_quality_variants_as_more_sources
     )
 
 
-def test_resource_torrents_tv_sources_share_matched_identity_card_and_rank_resolution(
+def test_resource_torrents_tv_sources_isolate_year_mismatch_and_rank_resolution(
     monkeypatch,
 ):
     class TorrentInfo:
@@ -1912,12 +2143,16 @@ def test_resource_torrents_tv_sources_share_matched_identity_card_and_rank_resol
     assert [
         item.title.rsplit(" · ", 1)[0]
         for item in items
-    ] == ["侠探杰克 (2022)"] * 3
+    ] == ["侠探杰克 (2022)", "侠探杰克 (2026)", "侠探杰克 (2022)"]
     assert [
         plugin._decode_resource_token(item.enclosure)["resolution"]
         for item in items
     ] == ["1080P", "960P", "720P"]
-    assert [item.media_id for item in items] == ["343611"] * 3
+    assert [item.media_id for item in items] == [
+        "343611",
+        "shared:middle-s04",
+        "343611",
+    ]
 
 
 def test_resource_torrents_choose_highest_url_for_conflicting_episode(monkeypatch):
@@ -3395,6 +3630,14 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
         task("season-1-paused", 3, "paused").to_dict(),
         task("season-2-pending", 1, "pending", season=2).to_dict(),
     ])
+    batch_calls = []
+    original_control_many = plugin._queue.control_many
+
+    def control_many(task_ids, action, delete_file=False):
+        batch_calls.append((tuple(task_ids), action, delete_file))
+        return original_control_many(task_ids, action, delete_file=delete_file)
+
+    monkeypatch.setattr(plugin._queue, "control_many", control_many)
 
     torrents = plugin.list_torrents(downloader="LunaTVSource")
     assert len(torrents) == 2
@@ -3427,6 +3670,13 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
     remaining = {item["task_id"] for item in plugin._queue.list_tasks()}
     assert remaining == {"season-2-pending"}
     assert completed_output.exists()
+    assert [call[1] for call in batch_calls] == ["pause", "resume", "remove"]
+    assert set(batch_calls[0][0]) == {"season-1-pending", "season-1-paused"}
+    assert set(batch_calls[2][0]) == {
+        "season-1-completed",
+        "season-1-pending",
+        "season-1-paused",
+    }
 
 
 def test_native_resume_wakes_serial_queue(monkeypatch, tmp_path: Path):
@@ -5098,6 +5348,20 @@ def test_local_episode_path_requires_completed_download_or_strm_artifact(tmp_pat
 
         output.write_text("#EXTM3U" if mode == "strm" else "completed", encoding="utf-8")
         assert plugin._local_episode_path(task) == output
+
+
+def test_tv_path_strips_chinese_episode_suffix_and_keeps_season_zero():
+    directory, filename = media_path(
+        "/media/incoming",
+        "小猪佩奇 第八季 第四十五集",
+        "2024",
+        "tv",
+        0,
+        1,
+        "x.m3u8",
+    )
+    assert directory == "小猪佩奇 (2024)/Season 00"
+    assert filename == "小猪佩奇 (2024) - S00E01.mp4"
 
 
 def test_record_completion_writes_original_download_output(monkeypatch, tmp_path: Path):
