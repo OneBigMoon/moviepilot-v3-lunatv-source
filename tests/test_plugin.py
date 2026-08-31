@@ -5576,10 +5576,12 @@ def test_sync_media_server_runs_async_and_deduplicates_active_sync(monkeypatch):
             return None
 
     monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
-    monkeypatch.setattr(plugin_module.threading, "Thread", DeferredThread)
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    threading_proxy = SimpleNamespace(**vars(threading))
+    threading_proxy.Thread = DeferredThread
+    monkeypatch.setattr(plugin_module, "threading", threading_proxy)
 
     assert plugin._sync_media_server() is True
     assert sync_calls == []
