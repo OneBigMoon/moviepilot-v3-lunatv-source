@@ -92,6 +92,16 @@ except Exception:
     _HostMediaServerChain = None
 
 try:  # pragma: no cover - exercised in a MoviePilot runtime
+    from app.sdk.services import MediaServerHelper as _HostMediaServerHelper
+except Exception:
+    try:  # pragma: no cover - compatibility with early V3 runtimes
+        from app.application.mediaserver import (
+            MediaServerHelper as _HostMediaServerHelper,
+        )
+    except Exception:
+        _HostMediaServerHelper = None
+
+try:  # pragma: no cover - exercised in a MoviePilot runtime
     from app.chain.subscribe import SubscribeChain as _HostSubscribeChain
 except Exception:
     _HostSubscribeChain = None
@@ -184,6 +194,8 @@ _QUEUE_RELOAD_STOP_TIMEOUT_SECONDS = 2.0
 _QUEUE_LOCK_FILENAME = ".lunatv-download-queue.lock"
 _MEDIA_SYNC_RETRY_LIMIT = 1
 _MEDIA_SYNC_RETRY_DELAY_SECONDS = 2.0
+_MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS = 60.0
+_MEDIA_SYNC_VISIBILITY_POLL_SECONDS = 1.0
 
 
 def _resource_sort_priority(height: int) -> int:
@@ -871,7 +883,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.62"
+    plugin_version = "0.4.63"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -905,6 +917,9 @@ class LunaTVSource(_PluginBase):
         self._media_sync_requested = False
         self._media_sync_refresh_ids: set[int] = set()
         self._media_sync_backfill: Dict[int, set[int]] = {}
+        self._media_sync_probes: Dict[
+            Tuple[str, str, str, int, int], Dict[str, Any]
+        ] = {}
         self._media_sync_generation = 0
         self._media_sync_stop = threading.Event()
         self._media_sync_thread: Optional[threading.Thread] = None
@@ -1619,10 +1634,6 @@ class LunaTVSource(_PluginBase):
         ]
 
     def stop_service(self) -> None:
-        _restore_search_bridge(self)
-        _restore_download_clients_bridge(self)
-        _restore_download_chain_bridge(self)
-        self._cancel_media_sync()
         with self._source_health_lock:
             self._enabled = False
             self._source_health_stop.set()
@@ -1631,6 +1642,10 @@ class LunaTVSource(_PluginBase):
             self._source_health_pending_keys.clear()
             self._source_health_pending_full = False
             self._source_health_revision += 1
+        _restore_search_bridge(self)
+        _restore_download_clients_bridge(self)
+        _restore_download_chain_bridge(self)
+        self._cancel_media_sync()
         with self._resource_search_lock:
             self._resource_search_cache.clear()
         if self._queue:
@@ -1650,6 +1665,7 @@ class LunaTVSource(_PluginBase):
                     self._release_queue_lock()
         else:
             self._release_queue_lock()
+        self._cancel_media_sync()
 
     def _source_allowlist(self) -> Tuple[str, ...]:
         # 空白表示直接使用订阅地址内全部资源站；只有用户明确填写白名单时才过滤。
@@ -3184,6 +3200,7 @@ class LunaTVSource(_PluginBase):
             self._media_sync_requested = False
             self._media_sync_refresh_ids.clear()
             self._media_sync_backfill.clear()
+            self._media_sync_probes.clear()
             self._media_sync_running = False
             self._media_sync_thread = None
             self._media_sync_stop = threading.Event()
@@ -3390,13 +3407,167 @@ class LunaTVSource(_PluginBase):
                     )
         return refreshed
 
+    def _media_server_services(self, server: Optional[str]) -> Dict[str, Any]:
+        """读取 MoviePilot 已配置且正在运行的媒体服务器实例。"""
+        if _HostMediaServerHelper is None:
+            self._logger.warning("MoviePilot 媒体服务器服务目录不可用，未请求媒体库刷新")
+            return {}
+        try:
+            helper = _HostMediaServerHelper()
+            try:
+                services = helper.get_services(
+                    name_filters=[server] if server else None
+                ) or {}
+            except TypeError:
+                services = helper.get_services() or {}
+                if server:
+                    services = {
+                        name: service
+                        for name, service in services.items()
+                        if str(name).strip() == server
+                    }
+        except Exception as exc:
+            self._logger.warning(
+                "获取 MoviePilot 媒体服务器实例失败：%s",
+                type(exc).__name__,
+            )
+            return {}
+        if not services:
+            self._logger.warning("未找到可刷新的 MoviePilot 媒体服务器实例")
+        return services
+
+    def _refresh_media_server_library(
+        self, server: Optional[str]
+    ) -> Tuple[Dict[str, Any], bool]:
+        """请求扫描媒体库，并返回已接受请求的服务及是否全部成功。"""
+
+        services = self._media_server_services(server)
+        if not services:
+            return {}, False
+
+        accepted_services: Dict[str, Any] = {}
+        all_succeeded = True
+        for name, service in services.items():
+            instance = getattr(service, "instance", None)
+            refresh = getattr(instance, "refresh_root_library", None)
+            if not callable(refresh):
+                self._logger.warning("媒体服务器 %s 不支持主动刷新媒体库", name)
+                all_succeeded = False
+                continue
+            try:
+                result = refresh()
+            except Exception as exc:
+                self._logger.warning(
+                    "媒体服务器 %s 刷新请求失败：%s",
+                    name,
+                    type(exc).__name__,
+                )
+                all_succeeded = False
+                continue
+            if result is False:
+                self._logger.warning("媒体服务器 %s 未接受媒体库刷新请求", name)
+                all_succeeded = False
+                continue
+            accepted_services[name] = service
+
+        return accepted_services, bool(accepted_services) and all_succeeded
+
+    def _wait_for_media_server_item(
+        self,
+        server: Optional[str],
+        media_probe: Dict[str, Any],
+        stop_event: threading.Event,
+        generation: int,
+        services: Optional[Dict[str, Any]] = None,
+        single_check: bool = False,
+    ) -> bool:
+        """等待媒体服务器实际返回本轮新整理的电影或剧集。"""
+
+        media_type = str(media_probe.get("media_type") or "").strip().lower()
+        title = str(media_probe.get("title") or "").strip()
+        year = str(media_probe.get("year") or "").strip() or None
+        if media_type not in {"movie", "tv"} or not title:
+            return True
+        target_services = (
+            services if services is not None else self._media_server_services(server)
+        )
+        if not target_services:
+            return False
+
+        try:
+            season = int(media_probe.get("season") or 0) or None
+        except (TypeError, ValueError):
+            season = None
+        try:
+            episode = int(media_probe.get("episode") or 0) or None
+        except (TypeError, ValueError):
+            episode = None
+        deadline = time.monotonic() + _MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS
+
+        while True:
+            if stop_event.is_set() or generation != self._media_sync_generation:
+                return False
+            all_visible = True
+            for service in target_services.values():
+                instance = getattr(service, "instance", None)
+                try:
+                    if media_type == "movie":
+                        query = getattr(instance, "get_movies", None)
+                        visible = bool(
+                            callable(query) and query(title=title, year=year)
+                        )
+                    else:
+                        query = getattr(instance, "get_tv_episodes", None)
+                        result = (
+                            query(title=title, year=year, season=season)
+                            if callable(query)
+                            else None
+                        )
+                        season_episodes = (
+                            result[1]
+                            if isinstance(result, tuple) and len(result) > 1
+                            else {}
+                        ) or {}
+                        if episode is None:
+                            visible = bool(season_episodes)
+                        else:
+                            values = season_episodes.get(season or 0) or season_episodes.get(
+                                str(season or 0)
+                            ) or []
+                            visible = episode in {
+                                int(value)
+                                for value in values
+                                if str(value).strip().isdigit()
+                            }
+                except Exception:
+                    visible = False
+                if not visible:
+                    all_visible = False
+                    break
+            if all_visible:
+                return True
+            if single_check:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            wait_seconds = min(_MEDIA_SYNC_VISIBILITY_POLL_SECONDS, remaining)
+            if stop_event.wait(max(0.0, wait_seconds)):
+                return False
+
+        self._logger.warning("媒体服务器刷新后仍未发现新媒体：%s (%s)", title, year or "")
+        return False
+
     def _sync_media_server(
         self,
         subscription_ids: Optional[set[int]] = None,
         episode: Optional[int] = None,
+        media_probe: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """后台同步媒体库，并批量提交本轮完成的原生订阅进度。"""
+        """后台刷新媒体服务器并同步索引，再提交原生订阅进度。"""
 
+        if not self._enabled:
+            return False
         normalized_ids: set[int] = set()
         for value in subscription_ids or set():
             try:
@@ -3411,6 +3582,35 @@ class LunaTVSource(_PluginBase):
             episode_number = None
         if episode_number is not None and episode_number <= 0:
             episode_number = None
+        normalized_probe: Optional[Dict[str, Any]] = None
+        if isinstance(media_probe, dict):
+            media_type = str(media_probe.get("media_type") or "").strip().lower()
+            title = str(media_probe.get("title") or "").strip()
+            if media_type in {"movie", "tv"} and title:
+                probe_numbers: Dict[str, Optional[int]] = {}
+                for key in ("season", "episode"):
+                    try:
+                        number = int(media_probe.get(key) or 0)
+                    except (TypeError, ValueError):
+                        number = 0
+                    probe_numbers[key] = number if number > 0 else None
+                normalized_probe = {
+                    "media_type": media_type,
+                    "title": title,
+                    "year": str(media_probe.get("year") or "").strip(),
+                    "season": probe_numbers["season"],
+                    "episode": probe_numbers["episode"],
+                }
+
+        def probe_key(probe: Dict[str, Any]) -> Tuple[str, str, str, int, int]:
+            return (
+                str(probe.get("media_type") or ""),
+                str(probe.get("title") or "").casefold(),
+                str(probe.get("year") or ""),
+                int(probe.get("season") or 0),
+                int(probe.get("episode") or 0),
+            )
+
         if _HostMediaServerChain is None and not (
             normalized_ids and episode_number is not None
         ):
@@ -3419,8 +3619,12 @@ class LunaTVSource(_PluginBase):
         started_at = time.time()
 
         with self._media_sync_lock:
+            if not self._enabled:
+                return False
             if _HostMediaServerChain is not None:
                 self._media_sync_requested = True
+                if normalized_probe is not None:
+                    self._media_sync_probes[probe_key(normalized_probe)] = normalized_probe
             self._media_sync_refresh_ids.update(normalized_ids)
             if episode_number is not None:
                 for subscribe_id in normalized_ids:
@@ -3444,33 +3648,147 @@ class LunaTVSource(_PluginBase):
             retry_count = 0
             completed_backfill_ids: set[int] = set()
             completed_refresh_ids: set[int] = set()
+            media_server_refresh_requested = False
+            media_server_refreshed = False
+            moviepilot_index_synced = False
             media_server_synced = False
+            runner_failed = False
+            runner_error = ""
+            failed_probe_keys: set[Tuple[str, str, str, int, int]] = set()
+            successful_media_batches = 0
+            failed_media_batches = 0
+            retry_sync_requested = False
+            retry_backfill: Dict[int, set[int]] = {}
+            retry_refresh_ids: set[int] = set()
+            retry_probes: List[Dict[str, Any]] = []
             while True:
                 if stop_event.is_set() or generation != self._media_sync_generation:
                     return
                 with self._media_sync_lock:
                     if generation != self._media_sync_generation:
                         return
-                    sync_requested = self._media_sync_requested
-                    self._media_sync_requested = False
-                    pending_backfill = {
-                        subscribe_id: set(episodes)
-                        for subscribe_id, episodes in self._media_sync_backfill.items()
-                    }
-                    self._media_sync_backfill.clear()
-                    refresh_ids = set(self._media_sync_refresh_ids)
-                    self._media_sync_refresh_ids.clear()
+                    if (
+                        retry_sync_requested
+                        or retry_backfill
+                        or retry_refresh_ids
+                        or retry_probes
+                    ):
+                        sync_requested = retry_sync_requested
+                        pending_backfill = {
+                            subscribe_id: set(episodes)
+                            for subscribe_id, episodes in retry_backfill.items()
+                        }
+                        refresh_ids = set(retry_refresh_ids)
+                        pending_probes = list(retry_probes)
+                        retry_sync_requested = False
+                        retry_backfill = {}
+                        retry_refresh_ids = set()
+                        retry_probes = []
+                    else:
+                        sync_requested = self._media_sync_requested
+                        self._media_sync_requested = False
+                        pending_backfill = {
+                            subscribe_id: set(episodes)
+                            for subscribe_id, episodes in self._media_sync_backfill.items()
+                        }
+                        self._media_sync_backfill.clear()
+                        refresh_ids = set(self._media_sync_refresh_ids)
+                        self._media_sync_refresh_ids.clear()
+                        pending_probes = list(self._media_sync_probes.values())
+                        self._media_sync_probes.clear()
 
-                sync_succeeded = False
+                refresh_requested = False
+                refresh_succeeded = False
+                refresh_request_succeeded = False
+                index_sync_succeeded = False
+                unresolved_probes: Dict[
+                    Tuple[str, str, str, int, int], Dict[str, Any]
+                ] = {}
                 if sync_requested and _HostMediaServerChain is not None:
                     with self._media_server_sync_lock:
                         if stop_event.is_set() or generation != self._media_sync_generation:
                             return
+                        refresh_result = self._refresh_media_server_library(server)
+                        accepted_services: Optional[Dict[str, Any]] = None
+                        if isinstance(refresh_result, tuple) and len(refresh_result) == 2:
+                            accepted_services = (
+                                refresh_result[0]
+                                if isinstance(refresh_result[0], dict)
+                                else {}
+                            )
+                            refresh_requested = bool(accepted_services)
+                            refresh_succeeded = bool(refresh_result[1])
+                        else:
+                            refresh_requested = bool(refresh_result)
+                            refresh_succeeded = refresh_requested
+                        refresh_request_succeeded = refresh_succeeded
+                        unresolved_probes = {
+                            probe_key(pending_probe): pending_probe
+                            for pending_probe in pending_probes
+                        }
+                        if refresh_requested and unresolved_probes:
+                            visibility_deadline = (
+                                time.monotonic()
+                                + _MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS
+                            )
+                            while unresolved_probes:
+                                for key, pending_probe in list(
+                                    unresolved_probes.items()
+                                ):
+                                    if self._wait_for_media_server_item(
+                                        server,
+                                        pending_probe,
+                                        stop_event,
+                                        generation,
+                                        services=accepted_services,
+                                        single_check=True,
+                                    ):
+                                        unresolved_probes.pop(key, None)
+                                if not unresolved_probes:
+                                    break
+                                if (
+                                    stop_event.is_set()
+                                    or generation != self._media_sync_generation
+                                ):
+                                    return
+                                remaining = visibility_deadline - time.monotonic()
+                                if remaining <= 0:
+                                    for pending_probe in unresolved_probes.values():
+                                        self._logger.warning(
+                                            "媒体服务器刷新后仍未发现新媒体：%s （%s）",
+                                            pending_probe.get("title") or "",
+                                            pending_probe.get("year") or "",
+                                        )
+                                    break
+                                if stop_event.wait(
+                                    min(_MEDIA_SYNC_VISIBILITY_POLL_SECONDS, remaining)
+                                ):
+                                    return
+                            refresh_succeeded = (
+                                refresh_succeeded and not unresolved_probes
+                            )
+                        if stop_event.is_set() or generation != self._media_sync_generation:
+                            return
                         try:
                             _HostMediaServerChain().sync(server=server)
-                            sync_succeeded = True
+                            index_sync_succeeded = True
                         except Exception as exc:
-                            self._logger.warning("媒体服务器同步失败：%s", exc)
+                            self._logger.warning(
+                                "MoviePilot 媒体服务器索引同步失败：%s",
+                                type(exc).__name__,
+                            )
+                sync_succeeded = refresh_succeeded and index_sync_succeeded
+                batch_failed_probe_keys: set[
+                    Tuple[str, str, str, int, int]
+                ] = set()
+                if sync_requested and pending_probes:
+                    if not refresh_request_succeeded or not index_sync_succeeded:
+                        batch_failed_probe_keys.update(
+                            probe_key(pending_probe)
+                            for pending_probe in pending_probes
+                        )
+                    else:
+                        batch_failed_probe_keys.update(unresolved_probes)
 
                 if stop_event.is_set() or generation != self._media_sync_generation:
                     return
@@ -3486,6 +3804,15 @@ class LunaTVSource(_PluginBase):
                         remaining_refresh_ids
                     )
                 completed_refresh_ids.update(refreshed_ids)
+                media_server_refresh_requested = (
+                    media_server_refresh_requested or refresh_requested
+                )
+                media_server_refreshed = (
+                    media_server_refreshed or refresh_succeeded
+                )
+                moviepilot_index_synced = (
+                    moviepilot_index_synced or index_sync_succeeded
+                )
                 media_server_synced = media_server_synced or sync_succeeded
 
                 failed_backfill_ids = set(pending_backfill).difference(handled_ids)
@@ -3495,34 +3822,47 @@ class LunaTVSource(_PluginBase):
                 ) or bool(failed_backfill_ids)
                 if retry_needed and retry_count < _MEDIA_SYNC_RETRY_LIMIT:
                     retry_count += 1
-                    with self._media_sync_lock:
-                        if generation != self._media_sync_generation:
-                            return
-                        if _HostMediaServerChain is not None:
-                            self._media_sync_requested = True
-                        self._media_sync_refresh_ids.update(failed_refresh_ids)
-                        for subscribe_id, episodes in pending_backfill.items():
-                            if subscribe_id not in handled_ids:
-                                self._media_sync_backfill.setdefault(
-                                    subscribe_id, set()
-                                ).update(episodes)
+                    if stop_event.is_set() or generation != self._media_sync_generation:
+                        return
+                    retry_sync_requested = _HostMediaServerChain is not None
+                    retry_refresh_ids = set(failed_refresh_ids)
+                    retry_backfill = {
+                        subscribe_id: set(episodes)
+                        for subscribe_id, episodes in pending_backfill.items()
+                        if subscribe_id not in handled_ids
+                    }
+                    retry_probes = [
+                        pending_probe
+                        for pending_probe in pending_probes
+                        if probe_key(pending_probe) in batch_failed_probe_keys
+                    ]
                     if stop_event.wait(_MEDIA_SYNC_RETRY_DELAY_SECONDS):
                         return
                     continue
+                if sync_requested:
+                    if sync_succeeded:
+                        successful_media_batches += 1
+                    else:
+                        failed_media_batches += 1
                 if retry_needed:
-                    error = "媒体库或订阅进度刷新重试仍失败，将由下一轮订阅刷新自愈"
-                    self._logger.warning(error)
-                else:
-                    error = ""
+                    runner_failed = True
+                    if sync_requested and not sync_succeeded:
+                        failed_probe_keys.update(batch_failed_probe_keys)
+                    if not runner_error:
+                        runner_error = (
+                            "媒体库或订阅进度刷新重试仍失败，将由下一轮订阅刷新自愈"
+                        )
+                    self._logger.warning(runner_error)
 
                 with self._media_sync_lock:
                     if generation != self._media_sync_generation:
                         return
                     if (
-                        self._media_sync_requested
-                        or self._media_sync_backfill
-                        or self._media_sync_refresh_ids
-                    ):
+                            self._media_sync_requested
+                            or self._media_sync_backfill
+                            or self._media_sync_refresh_ids
+                            or self._media_sync_probes
+                        ):
                         retry_count = 0
                         continue
                     self._media_sync_running = False
@@ -3530,10 +3870,20 @@ class LunaTVSource(_PluginBase):
                 self._record_followup_status(
                     "media_server_sync",
                     started_at=started_at,
-                    success=not retry_needed,
-                    error=error,
+                    success=not runner_failed,
+                    error=runner_error,
                     details={
                         "media_server_synced": media_server_synced,
+                        "media_server_refresh_requested": media_server_refresh_requested,
+                        "media_server_refreshed": media_server_refreshed,
+                        "moviepilot_index_synced": moviepilot_index_synced,
+                        "failed_media_probes": len(failed_probe_keys),
+                        "successful_media_batches": successful_media_batches,
+                        "failed_media_batches": failed_media_batches,
+                        "all_media_batches_synced": (
+                            successful_media_batches > 0
+                            and failed_media_batches == 0
+                        ),
                         "backfilled_subscriptions": len(completed_backfill_ids),
                         "refreshed_subscriptions": len(completed_refresh_ids),
                     },
@@ -3566,6 +3916,13 @@ class LunaTVSource(_PluginBase):
                 error=f"启动媒体服务器同步失败：{exc}",
                 details={
                     "media_server_synced": False,
+                    "media_server_refresh_requested": False,
+                    "media_server_refreshed": False,
+                    "moviepilot_index_synced": False,
+                    "failed_media_probes": 0,
+                    "successful_media_batches": 0,
+                    "failed_media_batches": 0,
+                    "all_media_batches_synced": False,
                     "backfilled_subscriptions": 0,
                     "refreshed_subscriptions": 0,
                 },
@@ -4029,12 +4386,29 @@ class LunaTVSource(_PluginBase):
         # 下载历史始终记录 ffmpeg 的原始产物。若原生整理成功，TransferChain
         # 会自行记录 TransferHistory；这里不能把整理目标伪装成下载源文件。
         self._record_native_history(task, output)
+        media_probe = (
+            {
+                "media_type": getattr(task, "media_type", None),
+                "title": getattr(task, "title", None),
+                "year": getattr(task, "year", None),
+                "season": getattr(task, "season", None),
+                "episode": getattr(task, "episode", None),
+            }
+            if organized
+            else None
+        )
         subscription_ids = self._native_subscription_ids(task)
         if subscription_ids:
-            self._sync_media_server(
+            sync_args = (
                 subscription_ids,
                 getattr(task, "episode", None) if organized else None,
             )
+            if media_probe:
+                self._sync_media_server(*sync_args, media_probe=media_probe)
+            else:
+                self._sync_media_server(*sync_args)
+        elif media_probe:
+            self._sync_media_server(media_probe=media_probe)
         else:
             self._sync_media_server()
 

@@ -173,8 +173,11 @@ def test_record_completion_schedules_backfill_only_after_native_transfer(
     monkeypatch.setattr(plugin, "_record_native_history", lambda *_args: calls.append("history"))
     monkeypatch.setattr(plugin, "_native_subscription_ids", lambda _task: {10, 11})
 
-    def sync(subscription_ids=None, episode=None):
+    probes = []
+
+    def sync(subscription_ids=None, episode=None, media_probe=None):
         calls.append(("sync", subscription_ids, episode))
+        probes.append(media_probe)
         return True
 
     monkeypatch.setattr(plugin, "_sync_media_server", sync)
@@ -188,6 +191,9 @@ def test_record_completion_schedules_backfill_only_after_native_transfer(
         "history",
         ("sync", {10, 11}, None),
     ]
+    assert probes[0]["media_type"] == "tv"
+    assert probes[0]["episode"] == 7
+    assert probes[1] is None
 
 
 def test_record_completion_replay_skips_duplicate_native_transfer(
@@ -227,7 +233,8 @@ def test_record_completion_replay_skips_duplicate_native_transfer(
     monkeypatch.setattr(
         plugin,
         "_sync_media_server",
-        lambda ids, episode=None: syncs.append((ids, episode)) or True,
+        lambda ids, episode=None, media_probe=None: syncs.append((ids, episode))
+        or True,
     )
 
     output = str(tmp_path / "episode-7.mp4")
@@ -319,6 +326,7 @@ def test_backfill_native_subscription_progress_rejects_invalid_ignored_episode(m
 def test_sync_media_server_replays_request_arriving_during_sync(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
     sync_calls = []
     backfills = []
     refreshes = []
@@ -359,6 +367,7 @@ def test_sync_media_server_replays_request_arriving_during_sync(monkeypatch):
 def test_sync_media_server_retries_once_after_transient_failure(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
     sync_calls = []
     refreshes = []
 
@@ -395,9 +404,567 @@ def test_sync_media_server_retries_once_after_transient_failure(monkeypatch):
     assert status["refreshed_subscriptions"] == 1
 
 
+def test_sync_media_server_does_not_report_success_when_library_refresh_fails(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    events = []
+    refresh_calls = []
+    sync_calls = []
+    subscription_refreshes = []
+
+    class MediaServer:
+        def refresh_root_library(self):
+            events.append("refresh")
+            refresh_calls.append("Emby")
+            return False
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            assert name_filters == ["Emby"]
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            events.append("sync")
+            sync_calls.append(server)
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        plugin,
+        "_refresh_native_subscription_progress",
+        lambda ids: subscription_refreshes.append(set(ids)) or set(ids),
+    )
+
+    assert plugin._sync_media_server({9}) is True
+    assert events == ["refresh", "sync", "refresh", "sync"]
+    assert refresh_calls == ["Emby", "Emby"]
+    assert sync_calls == ["Emby", "Emby"]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["media_server_synced"] is False
+    assert status["media_server_refreshed"] is False
+    assert status["moviepilot_index_synced"] is True
+    assert subscription_refreshes == []
+
+
+def test_sync_media_server_waits_only_for_services_accepting_refresh(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    events = []
+    sync_calls = []
+
+    class AcceptedMediaServer:
+        def refresh_root_library(self):
+            events.append("accepted-refresh")
+            return True
+
+        def get_movies(self, *, title, year=None):
+            events.append(("accepted-probe", title, year))
+            return [SimpleNamespace(item_id="new-movie")]
+
+    class RejectedMediaServer:
+        def refresh_root_library(self):
+            events.append("rejected-refresh")
+            return False
+
+        def get_movies(self, **_kwargs):
+            raise AssertionError("未接受刷新请求的服务不应参与可见性等待")
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            assert name_filters is None
+            return {
+                "Accepted": SimpleNamespace(instance=AcceptedMediaServer()),
+                "Rejected": SimpleNamespace(instance=RejectedMediaServer()),
+            }
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "部分成功", "year": "2026"}
+    ) is True
+    assert events == [
+        "accepted-refresh",
+        "rejected-refresh",
+        ("accepted-probe", "部分成功", "2026"),
+        "accepted-refresh",
+        "rejected-refresh",
+        ("accepted-probe", "部分成功", "2026"),
+    ]
+    assert sync_calls == [None, None]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["media_server_refresh_requested"] is True
+    assert status["media_server_refreshed"] is False
+    assert status["moviepilot_index_synced"] is True
+    assert status["media_server_synced"] is False
+
+
+def test_sync_media_server_waits_until_new_movie_is_visible_before_index_sync(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    events = []
+    movie_queries = iter(([], [SimpleNamespace(item_id="new-movie")]))
+
+    class MediaServer:
+        def refresh_root_library(self):
+            events.append("refresh")
+            return True
+
+        def get_movies(self, *, title, year=None):
+            events.append(("probe", title, year))
+            return next(movie_queries)
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            assert name_filters == ["Emby"]
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            events.append(("sync", server))
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_VISIBILITY_POLL_SECONDS", 0, raising=False)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "新电影", "year": "2026"}
+    ) is True
+    assert events == [
+        "refresh",
+        ("probe", "新电影", "2026"),
+        ("probe", "新电影", "2026"),
+        ("sync", "Emby"),
+    ]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is True
+    assert status["media_server_refresh_requested"] is True
+    assert status["media_server_refreshed"] is True
+    assert status["moviepilot_index_synced"] is True
+
+
+def test_sync_media_server_replays_probe_arriving_during_visibility_wait(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    probes = []
+    sync_calls = []
+    second_queued = False
+
+    class MediaServer:
+        def refresh_root_library(self):
+            return True
+
+        def get_movies(self, *, title, year=None):
+            nonlocal second_queued
+            probes.append((title, year))
+            if title == "第一部" and not second_queued:
+                second_queued = True
+                assert plugin._sync_media_server(
+                    media_probe={
+                        "media_type": "movie",
+                        "title": "第二部",
+                        "year": "2026",
+                    }
+                ) is False
+            return [SimpleNamespace(item_id=title)]
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "第一部", "year": "2026"}
+    ) is True
+    assert probes == [("第一部", "2026"), ("第二部", "2026")]
+    assert sync_calls == ["Emby", "Emby"]
+
+
+def test_sync_media_server_checks_all_probes_with_one_visibility_deadline(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    queries = []
+    sync_calls = []
+
+    class MediaServer:
+        def refresh_root_library(self):
+            return True
+
+        def get_movies(self, *, title, year=None):
+            queries.append((title, year))
+            if title == "已就绪":
+                return [SimpleNamespace(item_id="ready")]
+            return []
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    class DeferredThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", DeferredThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "未就绪", "year": "2026"}
+    ) is True
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "已就绪", "year": "2026"}
+    ) is False
+    worker = plugin._media_sync_thread
+    assert worker is not None
+    worker.target()
+
+    assert queries == [
+        ("未就绪", "2026"),
+        ("已就绪", "2026"),
+        ("未就绪", "2026"),
+    ]
+    assert sync_calls == ["Emby", "Emby"]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["failed_media_probes"] == 1
+
+
+def test_sync_media_server_keeps_failed_batch_visible_after_later_success(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    queries = []
+    sync_calls = []
+
+    class MediaServer:
+        def refresh_root_library(self):
+            return True
+
+        def get_movies(self, *, title, year=None):
+            queries.append((title, year))
+            return [SimpleNamespace(item_id="ready")] if title == "后来成功" else []
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+            if len(sync_calls) == 2:
+                assert plugin._sync_media_server(
+                    media_probe={
+                        "media_type": "movie",
+                        "title": "后来成功",
+                        "year": "2026",
+                    }
+                ) is False
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_RETRY_DELAY_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "持续失败", "year": "2026"}
+    ) is True
+
+    assert queries == [
+        ("持续失败", "2026"),
+        ("持续失败", "2026"),
+        ("后来成功", "2026"),
+    ]
+    assert sync_calls == ["Emby", "Emby", "Emby"]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["media_server_synced"] is True
+    assert status["failed_media_probes"] == 1
+    assert status["successful_media_batches"] == 1
+    assert status["failed_media_batches"] == 1
+    assert status["all_media_batches_synced"] is False
+    assert "重试仍失败" in status["error"]
+
+
+def test_sync_media_server_new_probe_during_retry_gets_full_budget(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    query_attempts = {"旧批失败": 0, "新批重试成功": 0}
+    sync_calls = []
+    queued_new_probe = False
+
+    class MediaServer:
+        def refresh_root_library(self):
+            return True
+
+        def get_movies(self, *, title, year=None):
+            query_attempts[title] += 1
+            if title == "新批重试成功" and query_attempts[title] == 2:
+                return [SimpleNamespace(item_id="ready")]
+            return []
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def queue_on_first_retry(_timeout):
+        nonlocal queued_new_probe
+        if not queued_new_probe:
+            queued_new_probe = True
+            assert plugin._sync_media_server(
+                media_probe={
+                    "media_type": "movie",
+                    "title": "新批重试成功",
+                    "year": "2026",
+                }
+            ) is False
+        return False
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module, "_MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(plugin._media_sync_stop, "wait", queue_on_first_retry)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "旧批失败", "year": "2026"}
+    ) is True
+
+    assert query_attempts == {"旧批失败": 2, "新批重试成功": 2}
+    assert sync_calls == ["Emby", "Emby", "Emby", "Emby"]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is False
+    assert status["media_server_synced"] is True
+    assert status["failed_media_probes"] == 1
+    assert status["successful_media_batches"] == 1
+    assert status["failed_media_batches"] == 1
+    assert status["all_media_batches_synced"] is False
+
+
+def test_sync_media_server_does_not_sync_index_after_stop_during_probe(
+    monkeypatch,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_calls = []
+
+    class MediaServer:
+        def refresh_root_library(self):
+            return True
+
+        def get_movies(self, *, title, year=None):
+            plugin._media_sync_stop.set()
+            return []
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "停止测试", "year": "2026"}
+    ) is True
+    assert sync_calls == []
+
+
+def test_sync_media_server_detects_visible_tv_episode(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    events = []
+
+    class MediaServer:
+        def refresh_root_library(self):
+            events.append("refresh")
+            return True
+
+        def get_tv_episodes(self, *, title, year=None, season=None):
+            events.append(("probe", title, year, season))
+            return [], {"2": ["3"]}
+
+    class MediaServerHelper:
+        def get_services(self, *, name_filters=None):
+            return {"Emby": SimpleNamespace(instance=MediaServer())}
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            events.append(("sync", server))
+
+    class ImmediateThread:
+        def __init__(self, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_HostMediaServerHelper",
+        MediaServerHelper,
+        raising=False,
+    )
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
+
+    assert plugin._sync_media_server(
+        media_probe={
+            "media_type": "tv",
+            "title": "新剧",
+            "year": "2026",
+            "season": 2,
+            "episode": 3,
+        }
+    ) is True
+    assert events == [
+        "refresh",
+        ("probe", "新剧", "2026", 2),
+        ("sync", "Emby"),
+    ]
+    status = plugin.api_status()["data"]["followup_status"]["media_server_sync"]
+    assert status["success"] is True
+    assert status["media_server_synced"] is True
+
+
 def test_sync_media_server_persists_failure_after_retry(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
     sync_calls = []
 
     class MediaServerChain:
@@ -433,6 +1000,7 @@ def test_sync_media_server_persists_failure_after_retry(monkeypatch):
 def test_sync_media_server_older_runner_cannot_overwrite_latest_status(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
 
     class MediaServerChain:
         def sync(self, *, server=None):
@@ -509,6 +1077,7 @@ def test_sync_media_server_retries_backfill_without_media_server(monkeypatch):
 def test_stop_service_prevents_inflight_sync_from_backfilling(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
     sync_started = threading.Event()
     release_sync = threading.Event()
     backfills = []
@@ -535,6 +1104,27 @@ def test_stop_service_prevents_inflight_sync_from_backfilling(monkeypatch):
 
     assert not worker.is_alive()
     assert backfills == []
+
+
+def test_stop_service_rejects_media_sync_from_late_completion(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    sync_calls = []
+
+    class MediaServerChain:
+        def sync(self, *, server=None):
+            sync_calls.append(server)
+
+    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", MediaServerChain)
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
+
+    plugin.stop_service()
+
+    assert plugin._sync_media_server(
+        media_probe={"media_type": "movie", "title": "停止后完成", "year": "2026"}
+    ) is False
+    assert sync_calls == []
+    assert plugin._media_sync_running is False
 
 
 def test_queue_holds_slot_during_completion_callback(tmp_path: Path):

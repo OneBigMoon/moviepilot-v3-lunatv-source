@@ -5652,6 +5652,7 @@ def test_sync_media_server_runs_async_and_deduplicates_active_sync(monkeypatch):
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
+    monkeypatch.setattr(plugin, "_refresh_media_server_library", lambda _server: True)
     threading_proxy = SimpleNamespace(**vars(threading))
     threading_proxy.Thread = DeferredThread
     monkeypatch.setattr(plugin_module, "threading", threading_proxy)

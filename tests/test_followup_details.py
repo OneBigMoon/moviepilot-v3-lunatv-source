@@ -566,7 +566,7 @@ def test_record_completion_removes_empty_download_tree_after_native_move(
 
     monkeypatch.setattr(plugin, "_native_transfer", move_with_moviepilot)
     monkeypatch.setattr(plugin, "_record_native_history", lambda *_args: None)
-    monkeypatch.setattr(plugin, "_sync_media_server", lambda: True)
+    monkeypatch.setattr(plugin, "_sync_media_server", lambda *_args, **_kwargs: True)
 
     plugin._record_completion(task, str(output))
 
