@@ -17,6 +17,8 @@ const busySourceKeys = ref(new Set())
 const retryingTaskIds = ref(new Set())
 let healthPollTimer = null
 let healthPollDeadline = 0
+const HEALTH_POLL_INTERVAL_MS = 1000
+const HEALTH_POLL_TIMEOUT_MS = 5 * 60 * 1000
 
 const apiCall = (method, path, payload) => {
   if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
@@ -52,7 +54,12 @@ async function load(options = {}) {
 }
 
 async function loadHealthStatus() {
-  status.value = unwrap(await apiCall('get', '/status'))
+  const [statusResponse, sourceResponse] = await Promise.all([
+    apiCall('get', '/status'),
+    apiCall('get', '/sources'),
+  ])
+  status.value = unwrap(statusResponse)
+  sources.value = unwrap(sourceResponse) || []
 }
 
 function clearHealthPoll() {
@@ -84,7 +91,7 @@ function scheduleHealthPoll() {
       healthCheckStarting.value = false
       clearHealthPoll()
     }
-  }, 2000)
+  }, HEALTH_POLL_INTERVAL_MS)
 }
 
 async function startHealthCheck() {
@@ -95,7 +102,7 @@ async function startHealthCheck() {
     unwrap(await apiCall('post', '/sources/refresh'))
     await loadHealthStatus()
     if (sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
       scheduleHealthPoll()
     } else {
       healthCheckStarting.value = false
@@ -120,7 +127,7 @@ async function setSourceEnabled(source, enabled) {
     const result = unwrap(await apiCall('post', '/sources/state', { source_key: source.key, enabled }))
     await load({ silent: true })
     if (enabled && result?.check_started && sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
       scheduleHealthPoll()
     }
   } catch (requestError) {
@@ -142,7 +149,7 @@ async function recheckSource(source) {
     unwrap(await apiCall('post', '/sources/refresh', { source_key: source.key }))
     await load({ silent: true })
     if (sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
       scheduleHealthPoll()
     }
   } catch (requestError) {
@@ -159,6 +166,17 @@ const downloadSettings = computed(() => status.value.download_settings || {})
 const engineStatus = computed(() => status.value.engine || {})
 const subscriptionStatus = computed(() => status.value.subscription || {})
 const sourceHealth = computed(() => status.value.source_health || {})
+const healthChecked = computed(() => Math.max(0, Number(sourceHealth.value.checked || 0)))
+const healthCheckTotal = computed(() => Math.max(0, Number(sourceHealth.value.check_total || 0)))
+const healthProgress = computed(() => {
+  if (!healthCheckTotal.value) return 0
+  return Math.min(100, Math.round((healthChecked.value / healthCheckTotal.value) * 100))
+})
+const healthProgressLabel = computed(() => {
+  if (sourceHealth.value.running && !healthCheckTotal.value) return '正在读取来源清单…'
+  if (!healthCheckTotal.value) return '尚未开始健康检查'
+  return `${sourceHealth.value.running ? '本轮进度' : '最近一轮'} ${healthChecked.value} / ${healthCheckTotal.value}`
+})
 const queueStatus = computed(() => status.value.queue || {})
 const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
   .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0))
@@ -175,6 +193,37 @@ function followupSummary(item) {
 
 function taskIsRetrying(task) {
   return retryingTaskIds.value.has(task.task_id)
+}
+
+function sourceVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.status || 'ready'
+}
+
+function sourceSearchVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.search_status || 'supported'
+}
+
+function sourceHealthVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.health_status || 'unknown'
+}
+
+function sourceCheckedLabel(source) {
+  return source?.check_state === 'pending' ? '等待本轮检查' : formattedTime(source?.last_checked)
 }
 
 async function retryTask(task) {
@@ -284,6 +333,29 @@ onBeforeUnmount(clearHealthPoll)
         <div class="section-title">资源站数量 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
         <span class="source-caption">打开页面仅读取缓存；搜索仅使用健康且已启用的来源</span>
       </div>
+      <div v-if="!loading && sources.length" :class="['health-overview', { 'is-running': sourceHealth.running }]">
+        <div class="health-progress-block">
+          <div class="health-progress-heading">
+            <span class="health-progress-title">{{ sourceHealth.running ? '正在逐个检查来源' : '来源健康状态' }}</span>
+            <span class="health-progress-count">{{ healthProgressLabel }}</span>
+          </div>
+          <div
+            class="health-progress-track"
+            role="progressbar"
+            :aria-label="healthProgressLabel"
+            :aria-valuemin="0"
+            :aria-valuemax="100"
+            :aria-valuenow="healthProgress"
+          >
+            <span :style="{ width: `${healthProgress}%` }"></span>
+          </div>
+        </div>
+        <div class="health-legend" aria-label="健康状态图例">
+          <span><i class="legend-dot is-pending" aria-hidden="true"></i>待检查</span>
+          <span><i class="legend-dot is-healthy" aria-hidden="true"></i>正常</span>
+          <span><i class="legend-dot is-failed" aria-hidden="true"></i>不可用</span>
+        </div>
+      </div>
       <div v-if="loading" class="empty">正在读取资源站配置…</div>
       <div v-else-if="!sources.length" class="empty">暂未读取到资源站配置</div>
       <div v-else class="source-table-wrap">
@@ -299,20 +371,25 @@ onBeforeUnmount(clearHealthPoll)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="source in sources" :key="source.key">
+            <tr v-for="source in sources" :key="source.key" :class="{ 'is-pending': source.check_state === 'pending' }">
               <td>
-                <span :class="['source-state', `is-${source.status || 'ready'}`]">
+                <span :class="['source-state', `is-${sourceVisualStatus(source)}`]">
                   <i class="state-dot" aria-hidden="true"></i>
                   {{ source.status_label || '已加载' }}
                 </span>
                 <div class="health-status">
-                  <span :class="['health-state', `is-${source.health_status || 'unknown'}`]">
+                  <span :class="['health-state', `is-${sourceHealthVisualStatus(source)}`]">
                     {{ source.health_label || '未检查' }}
                   </span>
-                  <span v-if="source.last_error" class="source-error" :title="source.last_error">{{ source.last_error }}</span>
+                  <span v-if="source.last_error && source.check_state !== 'pending'" class="source-error" :title="source.last_error">{{ source.last_error }}</span>
                 </div>
               </td>
-              <td><span class="source-name">{{ source.name }}</span></td>
+              <td>
+                <div class="source-identity">
+                  <span class="source-name">{{ source.name }}</span>
+                  <span class="source-key">{{ source.key }}</span>
+                </div>
+              </td>
               <td>
                 <a
                   v-if="sourceUrl(source)"
@@ -324,11 +401,11 @@ onBeforeUnmount(clearHealthPoll)
                 <span v-else class="muted">—</span>
               </td>
               <td>
-                <span :class="['search-state', `is-${source.search_status || 'supported'}`]">
+                <span :class="['search-state', `is-${sourceSearchVisualStatus(source)}`]">
                   {{ source.search_label || '支持' }}
                 </span>
               </td>
-              <td>{{ formattedTime(source.last_checked) }}</td>
+              <td><span :class="{ 'pending-time': source.check_state === 'pending' }">{{ sourceCheckedLabel(source) }}</span></td>
               <td>
                 <div class="source-actions">
                   <button
@@ -456,4 +533,178 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .help-grid p { margin: 0; }
 @media (max-width: 760px) { .lunatv-page { padding: 18px; } .lunatv-header { flex-direction: column; align-items: stretch; } .lunatv-actions { justify-content: flex-start; } .section-heading { align-items: flex-start; flex-direction: column; gap: 4px; } }
 @media (max-width: 760px) { .help-grid { grid-template-columns: 1fr; } }
+.lunatv-page {
+  padding: clamp(18px, 3vw, 32px);
+}
+
+.lunatv-header {
+  gap: 20px;
+}
+
+.panel {
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .12);
+}
+
+.health-overview {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12));
+  border-radius: 12px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+}
+
+.health-overview.is-running {
+  border-color: rgba(var(--v-theme-primary, 139, 92, 246), .38);
+  background: rgba(var(--v-theme-primary, 139, 92, 246), .07);
+}
+
+.health-progress-block {
+  flex: 1;
+  min-width: 220px;
+}
+
+.health-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.health-progress-title {
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.health-progress-count {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.health-progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .10);
+}
+
+.health-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgb(var(--v-theme-primary, 139, 92, 246)), rgb(var(--v-theme-success, 76, 175, 80)));
+  transition: width .25s ease;
+}
+
+.health-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.health-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .34);
+}
+
+.legend-dot.is-healthy { background: rgb(var(--v-theme-success, 76, 175, 80)); }
+.legend-dot.is-failed { background: rgb(var(--v-theme-error, 244, 67, 54)); }
+
+.source-table-wrap {
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .10));
+  border-radius: 12px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .018);
+}
+
+.source-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.source-table thead {
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .045);
+}
+
+.source-table th,
+.source-table td {
+  padding: 13px 12px;
+}
+
+.source-table tbody tr {
+  transition: background-color .18s ease;
+}
+
+.source-table tbody tr:hover,
+.source-table tbody tr.is-pending {
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .028);
+}
+
+.source-identity {
+  display: grid;
+  gap: 3px;
+}
+
+.source-key {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.source-state.is-muted,
+.search-state.is-muted {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .08);
+}
+
+.source-state.is-muted .state-dot,
+.legend-dot.is-pending {
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .34);
+}
+
+.health-state.is-pending,
+.health-state.is-unchecked,
+.health-state.is-unknown,
+.pending-time {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+}
+
+@media (max-width: 900px) {
+  .health-overview {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .health-legend {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 760px) {
+  .lunatv-page {
+    padding: 16px;
+  }
+
+  .health-progress-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+}
 </style>

@@ -8,7 +8,7 @@ const _export_sfc = (sfc, props) => {
   return target;
 };
 
-const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createTextVNode:_createTextVNode,renderList:_renderList,Fragment:_Fragment,createStaticVNode:_createStaticVNode} = await importShared('vue');
+const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createTextVNode:_createTextVNode,normalizeStyle:_normalizeStyle,renderList:_renderList,Fragment:_Fragment,createStaticVNode:_createStaticVNode} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "lunatv-page" };
@@ -47,43 +47,53 @@ const _hoisted_15 = { class: "panel" };
 const _hoisted_16 = { class: "section-heading" };
 const _hoisted_17 = { class: "section-title" };
 const _hoisted_18 = { class: "muted" };
-const _hoisted_19 = {
-  key: 0,
-  class: "empty"
-};
-const _hoisted_20 = {
+const _hoisted_19 = { class: "health-progress-block" };
+const _hoisted_20 = { class: "health-progress-heading" };
+const _hoisted_21 = { class: "health-progress-title" };
+const _hoisted_22 = { class: "health-progress-count" };
+const _hoisted_23 = ["aria-label", "aria-valuenow"];
+const _hoisted_24 = {
   key: 1,
   class: "empty"
 };
-const _hoisted_21 = {
+const _hoisted_25 = {
   key: 2,
+  class: "empty"
+};
+const _hoisted_26 = {
+  key: 3,
   class: "source-table-wrap"
 };
-const _hoisted_22 = { class: "source-table" };
-const _hoisted_23 = { class: "health-status" };
-const _hoisted_24 = ["title"];
-const _hoisted_25 = { class: "source-name" };
-const _hoisted_26 = ["href"];
-const _hoisted_27 = {
+const _hoisted_27 = { class: "source-table" };
+const _hoisted_28 = { class: "health-status" };
+const _hoisted_29 = ["title"];
+const _hoisted_30 = { class: "source-identity" };
+const _hoisted_31 = { class: "source-name" };
+const _hoisted_32 = { class: "source-key" };
+const _hoisted_33 = ["href"];
+const _hoisted_34 = {
   key: 1,
   class: "muted"
 };
-const _hoisted_28 = { class: "source-actions" };
-const _hoisted_29 = ["disabled", "aria-label", "onClick"];
-const _hoisted_30 = ["disabled", "aria-label", "onClick"];
-const _hoisted_31 = {
+const _hoisted_35 = { class: "source-actions" };
+const _hoisted_36 = ["disabled", "aria-label", "onClick"];
+const _hoisted_37 = ["disabled", "aria-label", "onClick"];
+const _hoisted_38 = {
   key: 5,
   class: "panel"
 };
-const _hoisted_32 = { class: "section-heading" };
-const _hoisted_33 = { class: "section-title" };
-const _hoisted_34 = { class: "muted" };
-const _hoisted_35 = { class: "source-name" };
-const _hoisted_36 = { class: "source-error" };
-const _hoisted_37 = ["disabled", "aria-label", "onClick"];
+const _hoisted_39 = { class: "section-heading" };
+const _hoisted_40 = { class: "section-title" };
+const _hoisted_41 = { class: "muted" };
+const _hoisted_42 = { class: "source-name" };
+const _hoisted_43 = { class: "source-error" };
+const _hoisted_44 = ["disabled", "aria-label", "onClick"];
 
 const {computed,onBeforeUnmount,onMounted,ref} = await importShared('vue');
 
+
+const HEALTH_POLL_INTERVAL_MS = 1000;
+const HEALTH_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
 
 const _sfc_main = {
@@ -107,7 +117,6 @@ const busySourceKeys = ref(new Set());
 const retryingTaskIds = ref(new Set());
 let healthPollTimer = null;
 let healthPollDeadline = 0;
-
 const apiCall = (method, path, payload) => {
   if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
   return Promise.reject(new Error('MoviePilot API 客户端未注入'))
@@ -142,7 +151,12 @@ async function load(options = {}) {
 }
 
 async function loadHealthStatus() {
-  status.value = unwrap(await apiCall('get', '/status'));
+  const [statusResponse, sourceResponse] = await Promise.all([
+    apiCall('get', '/status'),
+    apiCall('get', '/sources'),
+  ]);
+  status.value = unwrap(statusResponse);
+  sources.value = unwrap(sourceResponse) || [];
 }
 
 function clearHealthPoll() {
@@ -174,7 +188,7 @@ function scheduleHealthPoll() {
       healthCheckStarting.value = false;
       clearHealthPoll();
     }
-  }, 2000);
+  }, HEALTH_POLL_INTERVAL_MS);
 }
 
 async function startHealthCheck() {
@@ -185,7 +199,7 @@ async function startHealthCheck() {
     unwrap(await apiCall('post', '/sources/refresh'));
     await loadHealthStatus();
     if (sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000;
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
       scheduleHealthPoll();
     } else {
       healthCheckStarting.value = false;
@@ -210,7 +224,7 @@ async function setSourceEnabled(source, enabled) {
     const result = unwrap(await apiCall('post', '/sources/state', { source_key: source.key, enabled }));
     await load({ silent: true });
     if (enabled && result?.check_started && sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000;
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
       scheduleHealthPoll();
     }
   } catch (requestError) {
@@ -232,7 +246,7 @@ async function recheckSource(source) {
     unwrap(await apiCall('post', '/sources/refresh', { source_key: source.key }));
     await load({ silent: true });
     if (sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + 60000;
+      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
       scheduleHealthPoll();
     }
   } catch (requestError) {
@@ -249,6 +263,17 @@ const downloadSettings = computed(() => status.value.download_settings || {});
 const engineStatus = computed(() => status.value.engine || {});
 const subscriptionStatus = computed(() => status.value.subscription || {});
 const sourceHealth = computed(() => status.value.source_health || {});
+const healthChecked = computed(() => Math.max(0, Number(sourceHealth.value.checked || 0)));
+const healthCheckTotal = computed(() => Math.max(0, Number(sourceHealth.value.check_total || 0)));
+const healthProgress = computed(() => {
+  if (!healthCheckTotal.value) return 0
+  return Math.min(100, Math.round((healthChecked.value / healthCheckTotal.value) * 100))
+});
+const healthProgressLabel = computed(() => {
+  if (sourceHealth.value.running && !healthCheckTotal.value) return '正在读取来源清单…'
+  if (!healthCheckTotal.value) return '尚未开始健康检查'
+  return `${sourceHealth.value.running ? '本轮进度' : '最近一轮'} ${healthChecked.value} / ${healthCheckTotal.value}`
+});
 const queueStatus = computed(() => status.value.queue || {});
 const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
   .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0));
@@ -265,6 +290,37 @@ function followupSummary(item) {
 
 function taskIsRetrying(task) {
   return retryingTaskIds.value.has(task.task_id)
+}
+
+function sourceVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.status || 'ready'
+}
+
+function sourceSearchVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.search_status || 'supported'
+}
+
+function sourceHealthVisualStatus(source) {
+  if (
+    source?.manual_disabled
+    || source?.disabled_reason === 'configured'
+    || ['pending', 'unchecked'].includes(source?.health_status)
+  ) return 'muted'
+  return source?.health_status || 'unknown'
+}
+
+function sourceCheckedLabel(source) {
+  return source?.check_state === 'pending' ? '等待本轮检查' : formattedTime(source?.last_checked)
 }
 
 async function retryTask(task) {
@@ -382,13 +438,64 @@ return (_ctx, _cache) => {
         ]),
         _cache[3] || (_cache[3] = _createElementVNode("span", { class: "source-caption" }, "打开页面仅读取缓存；搜索仅使用健康且已启用的来源", -1))
       ]),
+      (!loading.value && sources.value.length)
+        ? (_openBlock(), _createElementBlock("div", {
+            key: 0,
+            class: _normalizeClass(['health-overview', { 'is-running': sourceHealth.value.running }])
+          }, [
+            _createElementVNode("div", _hoisted_19, [
+              _createElementVNode("div", _hoisted_20, [
+                _createElementVNode("span", _hoisted_21, _toDisplayString(sourceHealth.value.running ? '正在逐个检查来源' : '来源健康状态'), 1),
+                _createElementVNode("span", _hoisted_22, _toDisplayString(healthProgressLabel.value), 1)
+              ]),
+              _createElementVNode("div", {
+                class: "health-progress-track",
+                role: "progressbar",
+                "aria-label": healthProgressLabel.value,
+                "aria-valuemin": 0,
+                "aria-valuemax": 100,
+                "aria-valuenow": healthProgress.value
+              }, [
+                _createElementVNode("span", {
+                  style: _normalizeStyle({ width: `${healthProgress.value}%` })
+                }, null, 4)
+              ], 8, _hoisted_23)
+            ]),
+            _cache[4] || (_cache[4] = _createElementVNode("div", {
+              class: "health-legend",
+              "aria-label": "健康状态图例"
+            }, [
+              _createElementVNode("span", null, [
+                _createElementVNode("i", {
+                  class: "legend-dot is-pending",
+                  "aria-hidden": "true"
+                }),
+                _createTextVNode("待检查")
+              ]),
+              _createElementVNode("span", null, [
+                _createElementVNode("i", {
+                  class: "legend-dot is-healthy",
+                  "aria-hidden": "true"
+                }),
+                _createTextVNode("正常")
+              ]),
+              _createElementVNode("span", null, [
+                _createElementVNode("i", {
+                  class: "legend-dot is-failed",
+                  "aria-hidden": "true"
+                }),
+                _createTextVNode("不可用")
+              ])
+            ], -1))
+          ], 2))
+        : _createCommentVNode("", true),
       (loading.value)
-        ? (_openBlock(), _createElementBlock("div", _hoisted_19, "正在读取资源站配置…"))
+        ? (_openBlock(), _createElementBlock("div", _hoisted_24, "正在读取资源站配置…"))
         : (!sources.value.length)
-          ? (_openBlock(), _createElementBlock("div", _hoisted_20, "暂未读取到资源站配置"))
-          : (_openBlock(), _createElementBlock("div", _hoisted_21, [
-              _createElementVNode("table", _hoisted_22, [
-                _cache[5] || (_cache[5] = _createElementVNode("thead", null, [
+          ? (_openBlock(), _createElementBlock("div", _hoisted_25, "暂未读取到资源站配置"))
+          : (_openBlock(), _createElementBlock("div", _hoisted_26, [
+              _createElementVNode("table", _hoisted_27, [
+                _cache[6] || (_cache[6] = _createElementVNode("thead", null, [
                   _createElementVNode("tr", null, [
                     _createElementVNode("th", { scope: "col" }, "状态"),
                     _createElementVNode("th", { scope: "col" }, "资源名称"),
@@ -401,33 +508,37 @@ return (_ctx, _cache) => {
                 _createElementVNode("tbody", null, [
                   (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(sources.value, (source) => {
                     return (_openBlock(), _createElementBlock("tr", {
-                      key: source.key
+                      key: source.key,
+                      class: _normalizeClass({ 'is-pending': source.check_state === 'pending' })
                     }, [
                       _createElementVNode("td", null, [
                         _createElementVNode("span", {
-                          class: _normalizeClass(['source-state', `is-${source.status || 'ready'}`])
+                          class: _normalizeClass(['source-state', `is-${sourceVisualStatus(source)}`])
                         }, [
-                          _cache[4] || (_cache[4] = _createElementVNode("i", {
+                          _cache[5] || (_cache[5] = _createElementVNode("i", {
                             class: "state-dot",
                             "aria-hidden": "true"
                           }, null, -1)),
                           _createTextVNode(" " + _toDisplayString(source.status_label || '已加载'), 1)
                         ], 2),
-                        _createElementVNode("div", _hoisted_23, [
+                        _createElementVNode("div", _hoisted_28, [
                           _createElementVNode("span", {
-                            class: _normalizeClass(['health-state', `is-${source.health_status || 'unknown'}`])
+                            class: _normalizeClass(['health-state', `is-${sourceHealthVisualStatus(source)}`])
                           }, _toDisplayString(source.health_label || '未检查'), 3),
-                          (source.last_error)
+                          (source.last_error && source.check_state !== 'pending')
                             ? (_openBlock(), _createElementBlock("span", {
                                 key: 0,
                                 class: "source-error",
                                 title: source.last_error
-                              }, _toDisplayString(source.last_error), 9, _hoisted_24))
+                              }, _toDisplayString(source.last_error), 9, _hoisted_29))
                             : _createCommentVNode("", true)
                         ])
                       ]),
                       _createElementVNode("td", null, [
-                        _createElementVNode("span", _hoisted_25, _toDisplayString(source.name), 1)
+                        _createElementVNode("div", _hoisted_30, [
+                          _createElementVNode("span", _hoisted_31, _toDisplayString(source.name), 1),
+                          _createElementVNode("span", _hoisted_32, _toDisplayString(source.key), 1)
+                        ])
                       ]),
                       _createElementVNode("td", null, [
                         (sourceUrl(source))
@@ -437,23 +548,27 @@ return (_ctx, _cache) => {
                               href: sourceUrl(source),
                               target: "_blank",
                               rel: "noopener noreferrer"
-                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_26))
-                          : (_openBlock(), _createElementBlock("span", _hoisted_27, "—"))
+                            }, _toDisplayString(sourceHost(source)), 9, _hoisted_33))
+                          : (_openBlock(), _createElementBlock("span", _hoisted_34, "—"))
                       ]),
                       _createElementVNode("td", null, [
                         _createElementVNode("span", {
-                          class: _normalizeClass(['search-state', `is-${source.search_status || 'supported'}`])
+                          class: _normalizeClass(['search-state', `is-${sourceSearchVisualStatus(source)}`])
                         }, _toDisplayString(source.search_label || '支持'), 3)
                       ]),
-                      _createElementVNode("td", null, _toDisplayString(formattedTime(source.last_checked)), 1),
                       _createElementVNode("td", null, [
-                        _createElementVNode("div", _hoisted_28, [
+                        _createElementVNode("span", {
+                          class: _normalizeClass({ 'pending-time': source.check_state === 'pending' })
+                        }, _toDisplayString(sourceCheckedLabel(source)), 3)
+                      ]),
+                      _createElementVNode("td", null, [
+                        _createElementVNode("div", _hoisted_35, [
                           _createElementVNode("button", {
                             class: "source-action",
                             disabled: sourceIsBusy(source) || sourceHealth.value.running,
                             "aria-label": `${source.manual_disabled ? '重新启用' : '永久停用'}来源 ${source.name || source.key}`,
                             onClick: $event => (setSourceEnabled(source, source.manual_disabled))
-                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_29),
+                          }, _toDisplayString(sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用')), 9, _hoisted_36),
                           (!source.manual_disabled && !source.enabled && source.disabled_reason !== 'configured')
                             ? (_openBlock(), _createElementBlock("button", {
                                 key: 0,
@@ -461,24 +576,24 @@ return (_ctx, _cache) => {
                                 disabled: sourceIsBusy(source) || sourceHealth.value.running,
                                 "aria-label": `立即复检来源 ${source.name || source.key}`,
                                 onClick: $event => (recheckSource(source))
-                              }, "立即复检", 8, _hoisted_30))
+                              }, "立即复检", 8, _hoisted_37))
                             : _createCommentVNode("", true)
                         ])
                       ])
-                    ]))
+                    ], 2))
                   }), 128))
                 ])
               ])
             ]))
     ]),
     (failedTasks.value.length)
-      ? (_openBlock(), _createElementBlock("section", _hoisted_31, [
-          _createElementVNode("div", _hoisted_32, [
-            _createElementVNode("div", _hoisted_33, [
-              _cache[6] || (_cache[6] = _createTextVNode("失败任务 ", -1)),
-              _createElementVNode("span", _hoisted_34, _toDisplayString(failedTasks.value.length), 1)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_38, [
+          _createElementVNode("div", _hoisted_39, [
+            _createElementVNode("div", _hoisted_40, [
+              _cache[7] || (_cache[7] = _createTextVNode("失败任务 ", -1)),
+              _createElementVNode("span", _hoisted_41, _toDisplayString(failedTasks.value.length), 1)
             ]),
-            _cache[7] || (_cache[7] = _createElementVNode("span", { class: "source-caption" }, "重试会将任务重新排入下载队列", -1))
+            _cache[8] || (_cache[8] = _createElementVNode("span", { class: "source-caption" }, "重试会将任务重新排入下载队列", -1))
           ]),
           (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(failedTasks.value, (task) => {
             return (_openBlock(), _createElementBlock("div", {
@@ -486,25 +601,25 @@ return (_ctx, _cache) => {
               class: "source-actions"
             }, [
               _createElementVNode("div", null, [
-                _createElementVNode("div", _hoisted_35, _toDisplayString(task.title || '未命名任务'), 1),
-                _createElementVNode("div", _hoisted_36, _toDisplayString(task.error || '下载失败'), 1)
+                _createElementVNode("div", _hoisted_42, _toDisplayString(task.title || '未命名任务'), 1),
+                _createElementVNode("div", _hoisted_43, _toDisplayString(task.error || '下载失败'), 1)
               ]),
               _createElementVNode("button", {
                 class: "source-action",
                 disabled: taskIsRetrying(task),
                 "aria-label": `重试任务 ${task.title || task.task_id}`,
                 onClick: $event => (retryTask(task))
-              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_37)
+              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_44)
             ]))
           }), 128))
         ]))
       : _createCommentVNode("", true),
-    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-5aa39099><div class=\"section-title\" data-v-5aa39099>使用说明</div><div class=\"help-grid\" data-v-5aa39099><p data-v-5aa39099><strong data-v-5aa39099>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-5aa39099><strong data-v-5aa39099>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-5aa39099><strong data-v-5aa39099>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-5aa39099><strong data-v-5aa39099>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-5aa39099><strong data-v-5aa39099>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    _cache[9] || (_cache[9] = _createStaticVNode("<section class=\"panel help-panel\" data-v-6487eea5><div class=\"section-title\" data-v-6487eea5>使用说明</div><div class=\"help-grid\" data-v-6487eea5><p data-v-6487eea5><strong data-v-6487eea5>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-6487eea5><strong data-v-6487eea5>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-6487eea5><strong data-v-6487eea5>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-6487eea5><strong data-v-6487eea5>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-6487eea5><strong data-v-6487eea5>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-5aa39099"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-6487eea5"]]);
 
 export { AppPage as default };

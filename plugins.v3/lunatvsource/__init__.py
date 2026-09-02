@@ -892,7 +892,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.67"
+    plugin_version = "0.4.68"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -952,6 +952,8 @@ class LunaTVSource(_PluginBase):
         self._source_health_thread: Optional[threading.Thread] = None
         self._source_health_pending_keys: set[str] = set()
         self._source_health_pending_full = False
+        self._source_health_run_keys: set[str] = set()
+        self._source_health_completed_keys: set[str] = set()
         self._source_health_last_error = ""
         self._source_health_last_finished = 0.0
         self._source_health_revision = 0
@@ -1037,6 +1039,8 @@ class LunaTVSource(_PluginBase):
             self._source_health_thread = None
             self._source_health_pending_keys.clear()
             self._source_health_pending_full = False
+            self._source_health_run_keys.clear()
+            self._source_health_completed_keys.clear()
         self._config = dict(config or {})
         loaded_followup_status = self.get_data(FOLLOWUP_STATUS_KEY) or {}
         with self._followup_status_lock:
@@ -1653,6 +1657,8 @@ class LunaTVSource(_PluginBase):
             self._source_health_thread = None
             self._source_health_pending_keys.clear()
             self._source_health_pending_full = False
+            self._source_health_run_keys.clear()
+            self._source_health_completed_keys.clear()
             self._source_health_revision += 1
         _restore_search_bridge(self)
         _restore_download_clients_bridge(self)
@@ -1733,10 +1739,20 @@ class LunaTVSource(_PluginBase):
 
     def _source_payload(self, source: CmsSource) -> Dict[str, Any]:
         payload = source.to_dict()
-        record = self._source_health_record(source)
+        source_key = source.key.lower()
+        with self._source_health_lock:
+            record = self._source_health_record(source)
+            check_running = self._source_health_running
+            check_targeted = source_key in self._source_health_run_keys
+            check_complete = source_key in self._source_health_completed_keys
+        if check_running and check_targeted:
+            check_state = "checked" if check_complete else "pending"
+        else:
+            check_state = "idle"
         configured_searchable = self._configured_source_searchable(source)
         manual_disabled = bool(record.get("manual_disabled"))
         health_status = str(record.get("health_status") or "unchecked")
+        display_health_status = "pending" if check_state == "pending" else health_status
         auto_disabled = health_status == "failed"
         enabled = (
             configured_searchable
@@ -1753,7 +1769,8 @@ class LunaTVSource(_PluginBase):
                 "enabled": enabled,
                 "manual_disabled": manual_disabled,
                 "auto_disabled": auto_disabled,
-                "health_status": health_status,
+                "health_status": display_health_status,
+                "check_state": check_state,
                 "last_checked": float(record.get("last_checked") or 0),
                 "last_error": str(record.get("last_error") or ""),
                 "failures": max(0, int(record.get("failures") or 0)),
@@ -1765,6 +1782,9 @@ class LunaTVSource(_PluginBase):
         elif not configured_searchable:
             health_label = "配置禁用"
             disabled_reason = "configured"
+        elif display_health_status == "pending":
+            health_label = "待检查"
+            disabled_reason = "health" if auto_disabled else "unchecked"
         elif auto_disabled:
             health_label = "自动禁用"
             disabled_reason = "health"
@@ -2106,6 +2126,56 @@ class LunaTVSource(_PluginBase):
                 continue
             candidates.append(source)
 
+        applied_updates: Dict[str, Dict[str, Any]] = {}
+
+        def persist_progress(
+            candidate_updates: Dict[str, Dict[str, Any]],
+        ) -> Dict[str, Dict[str, Any]]:
+            with self._source_health_lock:
+                if stop_event.is_set() or self._source_health_stop is not stop_event:
+                    return {}
+                valid_updates = {
+                    key: update
+                    for key, update in candidate_updates.items()
+                    if not bool(
+                        (self._source_health.get(key) or {}).get("manual_disabled")
+                    )
+                    and self._source_health_generation(
+                        self._source_health.get(key) or {}
+                    )
+                    == expected_generations.get(key, 0)
+                    and str(
+                        (self._source_health.get(key) or {}).get("api") or ""
+                    )
+                    == expected_record_apis.get(key, "")
+                }
+                completed_keys = set(candidate_updates).intersection(
+                    self._source_health_run_keys
+                )
+                progress_changed = not completed_keys.issubset(
+                    self._source_health_completed_keys
+                )
+                if valid_updates:
+                    self._persist_source_health_locked(valid_updates)
+                self._source_health_completed_keys.update(completed_keys)
+                if progress_changed and not valid_updates:
+                    self._source_health_revision += 1
+                return valid_updates
+
+        with self._source_health_lock:
+            if stop_event.is_set() or self._source_health_stop is not stop_event:
+                return {
+                    "success": False,
+                    "cancelled": True,
+                    "checked": 0,
+                    "message": "来源健康检查已停止",
+                }
+            self._source_health_run_keys = set(expected_generations)
+            self._source_health_completed_keys.clear()
+            self._source_health_revision += 1
+
+        applied_updates.update(persist_progress(updates))
+
         timeout = min(
             10.0,
             max(2.0, float(self._config.get("request_timeout") or 15)),
@@ -2136,13 +2206,14 @@ class LunaTVSource(_PluginBase):
                     key = source.key.lower()
                     previous = self._source_health_record(source)
                     failures = max(0, int(previous.get("failures") or 0))
-                    updates[key] = {
+                    update = {
                         "api": source.api,
                         "health_status": "failed" if error else "healthy",
-                        "last_checked": checked_at,
+                        "last_checked": time.time(),
                         "last_error": error,
                         "failures": failures + 1 if error else 0,
                     }
+                    applied_updates.update(persist_progress({key: update}))
 
         if cancelled():
             return {
@@ -2151,36 +2222,19 @@ class LunaTVSource(_PluginBase):
                 "checked": 0,
                 "message": "来源健康检查已停止",
             }
-        with self._source_health_lock:
-            if stop_event.is_set() or self._source_health_stop is not stop_event:
-                return {
-                    "success": False,
-                    "cancelled": True,
-                    "checked": 0,
-                    "message": "来源健康检查已停止",
-                }
-            updates = {
-                key: update
-                for key, update in updates.items()
-                if not bool(
-                    (self._source_health.get(key) or {}).get("manual_disabled")
-                )
-                and self._source_health_generation(
-                    self._source_health.get(key) or {}
-                )
-                == expected_generations.get(key, 0)
-                and str(
-                    (self._source_health.get(key) or {}).get("api") or ""
-                )
-                == expected_record_apis.get(key, "")
-            }
-            if updates:
-                self._persist_source_health_locked(updates)
-        failed = sum(1 for update in updates.values() if update.get("health_status") == "failed")
-        healthy = sum(1 for update in updates.values() if update.get("health_status") == "healthy")
+        failed = sum(
+            1
+            for update in applied_updates.values()
+            if update.get("health_status") == "failed"
+        )
+        healthy = sum(
+            1
+            for update in applied_updates.values()
+            if update.get("health_status") == "healthy"
+        )
         return {
             "success": True,
-            "checked": len(updates),
+            "checked": len(applied_updates),
             "healthy": healthy,
             "disabled": failed,
             "skipped_manual": skipped_manual,
@@ -2205,6 +2259,8 @@ class LunaTVSource(_PluginBase):
                     "queued": True,
                 }
             self._source_health_running = True
+            self._source_health_run_keys.clear()
+            self._source_health_completed_keys.clear()
             stop_event = self._source_health_stop
         try:
             result = self._run_source_health_refresh(
@@ -2237,6 +2293,8 @@ class LunaTVSource(_PluginBase):
                     self._source_health_pending_full = True
                 return True
             self._source_health_running = True
+            self._source_health_run_keys.clear()
+            self._source_health_completed_keys.clear()
             stop_event = self._source_health_stop
 
         def runner() -> None:
@@ -3974,6 +4032,8 @@ class LunaTVSource(_PluginBase):
             running = self._source_health_running
             last_error = self._source_health_last_error
             last_finished = self._source_health_last_finished
+            check_total = len(self._source_health_run_keys)
+            checked = len(self._source_health_completed_keys)
         return {
             "interval_minutes": int(
                 self._config.get("source_check_minutes")
@@ -3982,6 +4042,9 @@ class LunaTVSource(_PluginBase):
             "running": running,
             "last_error": last_error,
             "last_finished": last_finished,
+            "check_total": check_total,
+            "checked": checked,
+            "pending": max(0, check_total - checked),
             "last_checked": max(
                 (float(item.get("last_checked") or 0) for item in payloads),
                 default=0.0,

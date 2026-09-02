@@ -139,6 +139,66 @@ def test_health_failure_disables_search_and_later_success_recovers(monkeypatch):
     assert {source.key for source in plugin._client().sources} == {"healthy", "failing"}
 
 
+def test_health_results_are_exposed_before_the_batch_finishes(monkeypatch):
+    first = make_source("progress-first")
+    second = make_source("progress-second")
+    sources = [first, second]
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    save_catalog(plugin, *sources)
+    monkeypatch.setattr(
+        plugin_module,
+        "load_sources_from_url",
+        lambda *_args, **_kwargs: list(sources),
+    )
+
+    first_finished = threading.Event()
+    release_second = threading.Event()
+
+    def verify(_client, source, _query="1"):
+        if source.key == second.key:
+            assert release_second.wait(timeout=2)
+            return
+        first_finished.set()
+
+    monkeypatch.setattr(AppleCmsClient, "verify_search", verify)
+    assert plugin._start_source_health_refresh() is True
+
+    try:
+        assert first_finished.wait(timeout=2)
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            by_key = {
+                item["key"]: item for item in plugin.api_sources()["data"]
+            }
+            progress = plugin.api_status()["data"]["source_health"]
+            if (
+                by_key[first.key]["health_status"] == "healthy"
+                and progress["checked"] == 1
+            ):
+                break
+            time.sleep(0.01)
+
+        assert progress["running"] is True
+        assert progress["check_total"] == 2
+        assert progress["checked"] == 1
+        assert progress["pending"] == 1
+        assert by_key[first.key]["health_status"] == "healthy"
+        assert by_key[second.key]["health_status"] == "pending"
+        assert by_key[second.key]["health_label"] == "待检查"
+    finally:
+        release_second.set()
+        with plugin._source_health_lock:
+            thread = plugin._source_health_thread
+        if thread is not None:
+            thread.join(timeout=2)
+
+    progress = plugin.api_status()["data"]["source_health"]
+    assert progress["running"] is False
+    assert progress["checked"] == 2
+    assert progress["pending"] == 0
+
+
 @pytest.mark.parametrize("entrypoint", ["api_search", "api_discover", "search_medias"])
 def test_search_entrypoints_drop_results_disabled_during_request(
     monkeypatch, entrypoint
