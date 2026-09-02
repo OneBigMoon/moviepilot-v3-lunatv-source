@@ -164,6 +164,9 @@ LOGGER = logging.getLogger("LunaTVSource")
 DEFAULT_CONFIG_URL = (
     "https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json"
 )
+FRONTEND_REMOTE_ENTRY = (
+    Path(__file__).resolve().parent / "dist" / "assets" / "remoteEntry.js"
+)
 FALLBACK_CONFIG_PATH = Path(__file__).with_name("fallback_sources.json")
 SOURCE_CACHE_KEY = "luna_source_config_v1"
 SOURCE_HEALTH_KEY = "luna_source_health_v1"
@@ -889,7 +892,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.66"
+    plugin_version = "0.4.67"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1159,8 +1162,11 @@ class LunaTVSource(_PluginBase):
         return self._enabled
 
     @staticmethod
-    def get_render_mode() -> Tuple[str, str]:
-        return "vue", "dist/assets"
+    def get_render_mode() -> Tuple[str, Optional[str]]:
+        """仅在安装目录存在联邦入口时启用 Vue 工作台。"""
+        if FRONTEND_REMOTE_ENTRY.is_file():
+            return "vue", "dist/assets"
+        return "vuetify", None
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
         """Do not add a parallel subscription page; use MoviePilot's native one."""

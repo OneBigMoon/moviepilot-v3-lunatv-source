@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+import lunatvsource_test as plugin_module
 from lunatvsource_test import LunaTVSource
 from lunatvsource_test.m3u8_engine import N_M3U8DL_RE_SPEC
 
@@ -24,6 +25,25 @@ def test_generate_nfo_config_is_exposed_and_disabled_by_default():
 
     assert "generate_nfo" in models
     assert defaults["generate_nfo"] is False
+
+
+def test_render_mode_uses_vue_when_remote_entry_exists(monkeypatch, tmp_path: Path):
+    remote_entry = tmp_path / "dist" / "assets" / "remoteEntry.js"
+    remote_entry.parent.mkdir(parents=True)
+    remote_entry.write_text("export {};", encoding="utf-8")
+    monkeypatch.setattr(plugin_module, "FRONTEND_REMOTE_ENTRY", remote_entry)
+
+    assert LunaTVSource.get_render_mode() == ("vue", "dist/assets")
+
+
+def test_render_mode_falls_back_when_remote_entry_is_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        plugin_module,
+        "FRONTEND_REMOTE_ENTRY",
+        tmp_path / "missing" / "remoteEntry.js",
+    )
+
+    assert LunaTVSource.get_render_mode() == ("vuetify", None)
 
 
 def test_manifest_and_plugin_icons_use_https_url():
@@ -73,7 +93,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.66"
+    expected_version = "0.4.67"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
