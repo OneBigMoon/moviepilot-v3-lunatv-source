@@ -892,7 +892,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.68"
+    plugin_version = "0.4.69"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -4931,7 +4931,20 @@ class LunaTVSource(_PluginBase):
                 if not root:
                     skipped_no_directory += 1
                     continue
-                for episode in result.episodes:
+                result_episodes = result.episodes
+                if result.media_type == "movie" and len(result_episodes) > 1:
+                    heights = self._probe_resource_urls(
+                        [episode.url for episode in result_episodes if episode.url]
+                    )
+                    _, best_episode = max(
+                        enumerate(result_episodes),
+                        key=lambda item: (
+                            heights.get(item[1].url, 0),
+                            -item[0],
+                        ),
+                    )
+                    result_episodes = (best_episode,)
+                for episode in result_episodes:
                     if season > 0 and episode.season != season:
                         continue
                     tmdb_source = _coerce_media_identity_source(association.get("media_source"))

@@ -1321,6 +1321,65 @@ def test_native_tmdb_season_subscription_queues_all_new_episode_rows(
     assert plugin.refresh_subscriptions()["queued"] == 0
 
 
+def test_movie_subscription_queues_only_highest_resolution_play_line(
+    monkeypatch, tmp_path: Path
+):
+    source = CmsSource("movie", "电影源", "https://movie.example/vod")
+    result = CmsResult(
+        source_key=source.key,
+        source_name=source.name,
+        vod_id="movie-1",
+        title="多线路电影",
+        year="2026",
+        media_type="movie",
+        remark="",
+        episodes=(
+            CmsEpisode(1, 1, "1080P", "https://example.test/movie-1080.m3u8"),
+            CmsEpisode(1, 1, "4K", "https://example.test/movie-2160.m3u8"),
+        ),
+        season_range=(1, 1),
+        season_ambiguous=False,
+    )
+    subscribe = SimpleNamespace(
+        state="R",
+        name="多线路电影",
+        year="2026",
+        type="电影",
+        season=0,
+        media_source="",
+        media_id="",
+        save_path=str(tmp_path),
+    )
+    _install_subscription_operator(monkeypatch, subscribe)
+
+    class Client:
+        @staticmethod
+        def search(*_args, **_kwargs):
+            return [result]
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda item: (item, {}))
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+    monkeypatch.setattr(plugin, "_native_history_has_episode", lambda _task: False)
+    monkeypatch.setattr(
+        plugin,
+        "_probe_resource_urls",
+        lambda urls: {
+            url: 2160 if "2160" in url else 1080
+            for url in urls
+        },
+    )
+
+    response = plugin.refresh_subscriptions()
+    tasks = plugin._queue.list_tasks()
+
+    assert response["queued"] == 1
+    assert len(tasks) == 1
+    assert tasks[0]["url"] == "https://example.test/movie-2160.m3u8"
+
+
 def test_default_subscription_dedupes_pending_episodes_when_best_source_changes(
     monkeypatch, tmp_path: Path
 ):
