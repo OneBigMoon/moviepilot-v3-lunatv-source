@@ -360,6 +360,34 @@ def test_engine_reads_carriage_return_progress_and_enforces_watchdog(
 
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires a POSIX PTY")
+def test_engine_can_attach_child_output_to_a_pty(tmp_path: Path):
+    engine = ENGINE_UNDER_TEST(tmp_path)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    progress = []
+
+    engine._run_command(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os, sys; "
+                "is_tty = os.isatty(sys.stdout.fileno()) and "
+                "os.isatty(sys.stderr.fileno()); "
+                "print('PT: 1/1 speed %:100.0', flush=True); "
+                "raise SystemExit(0 if is_tty else 9)"
+            ),
+        ],
+        cache_dir=cache_dir,
+        control_event=None,
+        progress_callback=progress.append,
+        use_pty=True,
+    )
+
+    assert max(progress) == pytest.approx(0.99)
+
+
 def test_engine_no_progress_watchdog_ignores_logs_and_repeated_progress(
     monkeypatch, tmp_path: Path
 ):

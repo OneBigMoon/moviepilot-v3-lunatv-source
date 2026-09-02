@@ -30,7 +30,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Callable, Dict, Iterator, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
 
 LOGGER = logging.getLogger("LunaTVSource")
@@ -865,11 +865,15 @@ class _BaseM3U8Engine:
         control_event: Optional[threading.Event],
         progress_callback: Optional[Callable[[float], None]],
         expected_segments: int = 0,
+        use_pty: bool = False,
     ) -> None:
         """Run an engine with nonblocking CR/LF parsing and watchdogs."""
         self._raise_if_cancelled(control_event)
         selector = selectors.DefaultSelector()
         process: Optional[subprocess.Popen] = None
+        streams: Dict[str, Any] = {}
+        pty_master_fd: Optional[int] = None
+        pty_slave_fd: Optional[int] = None
         output_tail = ""
         buffers = {"stdout": "", "stderr": ""}
         decoders = {
@@ -940,20 +944,45 @@ class _BaseM3U8Engine:
                 record_line(stream_name, line)
 
         try:
-            popen_kwargs: Dict[str, object] = {
+            popen_kwargs: Dict[str, Any] = {
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "bufsize": 0,
             }
             if os.name == "posix":
                 popen_kwargs["start_new_session"] = True
+                if use_pty:
+                    pty_master_fd, pty_slave_fd = os.openpty()
+                    try:
+                        import fcntl
+                        import struct
+                        import termios
+
+                        fcntl.ioctl(
+                            pty_slave_fd,
+                            termios.TIOCSWINSZ,
+                            struct.pack("HHHH", 24, 160, 0, 0),
+                        )
+                    except (ImportError, OSError):
+                        pass
+                    popen_kwargs["stdout"] = pty_slave_fd
+                    popen_kwargs["stderr"] = pty_slave_fd
             elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
                 popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             process = subprocess.Popen(list(command), **popen_kwargs)
-            streams = {
-                "stdout": process.stdout,
-                "stderr": process.stderr,
-            }
+            if pty_slave_fd is not None:
+                os.close(pty_slave_fd)
+                pty_slave_fd = None
+            if pty_master_fd is not None:
+                streams = {
+                    "stdout": os.fdopen(pty_master_fd, "rb", buffering=0),
+                }
+                pty_master_fd = None
+            else:
+                streams = {
+                    "stdout": process.stdout,
+                    "stderr": process.stderr,
+                }
             for stream_name, stream in streams.items():
                 if stream is None:
                     continue
@@ -985,6 +1014,7 @@ class _BaseM3U8Engine:
                     except BlockingIOError:
                         continue
                     except OSError:
+                        # Linux PTY masters report EIO when the slave closes.
                         data = b""
                     if data:
                         consume(key.data, data)
@@ -1053,6 +1083,15 @@ class _BaseM3U8Engine:
             if process_group_alive():
                 self._terminate(process)
             selector.close()
+            for stream in streams.values():
+                try:
+                    stream.close()
+                except (AttributeError, OSError):
+                    pass
+            if pty_master_fd is not None:
+                os.close(pty_master_fd)
+            if pty_slave_fd is not None:
+                os.close(pty_slave_fd)
 
 
 class N_m3u8DLEngine(_BaseM3U8Engine):
@@ -1328,6 +1367,7 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
             control_event=control_event,
             progress_callback=progress_callback,
             expected_segments=expected_segments,
+            use_pty=True,
         )
         candidate = self._output_from_stage(stage_dir)
         if output is None:
