@@ -2049,7 +2049,7 @@ def test_resource_torrents_keep_complete_season_quality_variants_as_more_sources
     items = plugin._resource_torrents("示例剧")
     payloads = [plugin._decode_resource_token(item.enclosure) for item in items]
 
-    assert [item.pri_order for item in items] == [108, 48]
+    assert [item.pri_order for item in items] == [999108, 999048]
     assert [payload["resolution"] for payload in payloads] == ["1080P", "480P"]
     assert [len(payload["episodes"]) for payload in payloads] == [2, 2]
     assert all("1080-" in item["url"] for item in payloads[0]["episodes"])
@@ -2139,7 +2139,7 @@ def test_resource_torrents_tv_sources_isolate_year_mismatch_and_rank_resolution(
 
     items = plugin._resource_torrents("侠探杰克", mtype="tv")
 
-    assert [item.pri_order for item in items] == [108, 96, 72]
+    assert [item.pri_order for item in items] == [996108, 996096, 996072]
     assert [
         item.title.rsplit(" · ", 1)[0]
         for item in items
@@ -2215,7 +2215,7 @@ def test_resource_torrents_choose_highest_url_for_conflicting_episode(monkeypatc
     assert item.site_name == "演示源 · 1080P · 86ms"
     assert item.title == "示例剧 · 第1季"
     assert payload["resolution_height"] == 1080
-    assert item.pri_order == 108
+    assert item.pri_order == 999108
     assert payload["resolution"] not in item.description
     assert payload["resolution"] in item.labels
     assert "86ms" in item.labels
@@ -2279,7 +2279,7 @@ def test_resource_torrents_marks_sample_unknown_when_probe_fails(monkeypatch):
 
     assert payload["resolution"] == "未知"
     assert payload["resolution_height"] == 0
-    assert item.pri_order == 0
+    assert item.pri_order == 999000
     assert "未知" in item.site_name
     assert "全2集实测" not in item.description
     assert "已测" not in item.description
@@ -2346,7 +2346,7 @@ def test_resource_torrents_probes_one_episode_in_large_seasons(monkeypatch):
 
         assert [urls for urls in probe_calls if urls] == [expected_urls]
         assert len(expected_urls) == 1
-        assert item.pri_order == 108
+        assert item.pri_order == 999108
         assert f"全{count}集实测" not in item.description
         assert "已测" not in item.description
         assert payload["resolution_scope"] == "sample"
@@ -2445,7 +2445,7 @@ def test_resource_torrents_probes_all_conflicts_and_large_seasons(monkeypatch):
     assert payload["episodes"][0]["url"] == high_url
     assert payload["resolution"] == "1080P"
     assert payload["resolution_height"] == 1080
-    assert item.pri_order == 108
+    assert item.pri_order == 999108
     assert "1080P" in item.site_name
     assert "全52集实测" not in item.description
     assert "已测" not in item.description

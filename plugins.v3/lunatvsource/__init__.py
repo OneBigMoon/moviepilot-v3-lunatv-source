@@ -203,6 +203,12 @@ def _resource_sort_priority(height: int) -> int:
     return min(999, max(0, int(height or 0) // 10))
 
 
+def _tv_resource_sort_priority(season: int, height: int) -> int:
+    """Sort numbered seasons ascending, then quality descending."""
+    season_order = 1000 - min(999, max(0, int(season or 0)))
+    return season_order * 1000 + _resource_sort_priority(height)
+
+
 def _field(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(key, default)
@@ -883,7 +889,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.64"
+    plugin_version = "0.4.65"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -6558,7 +6564,7 @@ class LunaTVSource(_PluginBase):
                 seeders=1,
                 uploadvolumefactor=1.0,
                 downloadvolumefactor=1.0,
-                pri_order=_resource_sort_priority(height),
+                pri_order=_tv_resource_sort_priority(season, height),
                 category="电视剧",
                 labels=labels,
             )

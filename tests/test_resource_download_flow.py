@@ -114,7 +114,7 @@ def test_search_tv_resources_are_season_cards_and_download_runs_episodes_seriall
         "示例剧 · 第1季",
     ]
     assert all("集" not in item.title for item in resources)
-    assert [item.pri_order for item in resources] == [108, 48]
+    assert [item.pri_order for item in resources] == [999108, 999048]
     high_payload = plugin._decode_resource_token(resources[0].enclosure)
     assert [episode["episode"] for episode in high_payload["episodes"]] == [1, 2]
 
@@ -141,6 +141,64 @@ def test_search_tv_resources_are_season_cards_and_download_runs_episodes_seriall
         (1, "https://video.example/1080-e1.m3u8"),
         (2, "https://video.example/1080-e2.m3u8"),
     ]
+
+
+def test_search_tv_resources_sort_seasons_ascending_before_quality(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    season_three = _result_from_item(
+        source,
+        {
+            "vod_id": "season-three",
+            "vod_name": "示例剧 第三季",
+            "type_name": "电视剧",
+            "vod_play_url": "第1集$https://video.example/1080-s03e01.m3u8",
+        },
+    )
+    season_one = _result_from_item(
+        source,
+        {
+            "vod_id": "season-one",
+            "vod_name": "示例剧 第一季",
+            "type_name": "电视剧",
+            "vod_play_url": "第1集$https://video.example/720-s01e01.m3u8",
+        },
+    )
+    season_two = _result_from_item(
+        source,
+        {
+            "vod_id": "season-two",
+            "vod_name": "示例剧 第二季",
+            "type_name": "电视剧",
+            "vod_play_url": "第1集$https://video.example/2160-s02e01.m3u8",
+        },
+    )
+    plugin = _configured_plugin(monkeypatch, [season_three, season_one, season_two])
+    monkeypatch.setattr(
+        plugin,
+        "_probe_resource_urls",
+        lambda urls: {
+            url: 2160 if "2160" in url else 1080 if "1080" in url else 720
+            for url in urls
+        },
+    )
+
+    resources = plugin.search_torrents(
+        {"id": "demo"}, "示例剧", mtype="电视剧"
+    )
+    host_sorted = sorted(
+        resources,
+        key=lambda item: str(item.pri_order or 0).rjust(3, "0"),
+        reverse=True,
+    )
+
+    assert [
+        plugin._decode_resource_token(item.enclosure)["season"]
+        for item in resources
+    ] == [1, 2, 3]
+    assert [
+        plugin._decode_resource_token(item.enclosure)["season"]
+        for item in host_sorted
+    ] == [1, 2, 3]
 
 
 def test_long_season_cards_probe_one_episode_and_keep_full_hd_download(
@@ -191,7 +249,7 @@ def test_long_season_cards_probe_one_episode_and_keep_full_hd_download(
         {"id": "demo"}, "长季剧", mtype="电视剧"
     )
 
-    assert [item.pri_order for item in resources] == [108, 108]
+    assert [item.pri_order for item in resources] == [999108, 999108]
     assert [item.title for item in resources] == [
         "长季剧 · 第1季",
         "长季剧 · 第1季",
