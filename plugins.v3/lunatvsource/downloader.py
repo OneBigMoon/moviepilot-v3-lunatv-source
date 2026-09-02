@@ -1887,6 +1887,92 @@ class _SerialDownloadQueue:
         newline = "\n" if text.endswith(("\n", "\r")) else ""
         return "\n".join(output) + newline, removed_segments, removed_seconds
 
+    @staticmethod
+    def _segment_asset_key(url: str) -> tuple[str, str]:
+        """Group HLS segments by the media asset that owns their directory."""
+        parsed = urllib.parse.urlsplit(url)
+        parts = [
+            urllib.parse.unquote(part)
+            for part in parsed.path.split("/")
+            if part
+        ]
+        directories = parts[:-1]
+        if len(directories) >= 2 and directories[-1].casefold() == "hls":
+            directories = directories[:-2]
+        elif directories:
+            directories = directories[:-1]
+        return (parsed.hostname or "").casefold(), "/".join(directories)
+
+    @staticmethod
+    def _closed_discontinuity_ad_segments(
+        lines: List[str],
+        resolve_url: Callable[[str], str],
+    ) -> tuple[set[int], int, float]:
+        """Find short foreign-asset blocks bracketed by HLS discontinuities."""
+        segments: List[tuple[int, float, tuple[str, str]]] = []
+        boundaries: List[int] = []
+        pending_duration: Optional[float] = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper == "#EXT-X-DISCONTINUITY":
+                if pending_duration is not None:
+                    return set(), 0, 0.0
+                boundaries.append(len(segments))
+                continue
+            if upper.startswith("#EXTINF:"):
+                if pending_duration is not None:
+                    return set(), 0, 0.0
+                try:
+                    pending_duration = max(
+                        0.0,
+                        float(stripped.partition(":")[2].partition(",")[0]),
+                    )
+                except ValueError:
+                    return set(), 0, 0.0
+                continue
+            if pending_duration is None or not stripped or stripped.startswith("#"):
+                continue
+            try:
+                asset_key = DownloadQueue._segment_asset_key(resolve_url(stripped))
+            except (RuntimeError, ValueError):
+                return set(), 0, 0.0
+            segments.append((index, pending_duration, asset_key))
+            pending_duration = None
+
+        if pending_duration is not None or len(boundaries) < 2:
+            return set(), 0, 0.0
+
+        boundaries = sorted(set(boundaries))
+        marked_segment_indexes: set[int] = set()
+        for start, end in zip(boundaries, boundaries[1:]):
+            if start <= 0 or end <= start or end >= len(segments):
+                continue
+            outer_key = segments[start - 1][2]
+            if not all(outer_key) or segments[end][2] != outer_key:
+                continue
+            candidate = segments[start:end]
+            candidate_keys = {segment[2] for segment in candidate}
+            candidate_seconds = sum(segment[1] for segment in candidate)
+            if (
+                len(candidate) > 60
+                or candidate_seconds > 120.0
+                or len(candidate_keys) != 1
+                or outer_key in candidate_keys
+            ):
+                continue
+            marked_segment_indexes.update(range(start, end))
+
+        if not marked_segment_indexes:
+            return set(), 0, 0.0
+        uri_line_indexes = {
+            segments[index][0] for index in marked_segment_indexes
+        }
+        removed_seconds = sum(
+            segments[index][1] for index in marked_segment_indexes
+        )
+        return uri_line_indexes, len(marked_segment_indexes), removed_seconds
+
     def _is_ad_segment_url(self, url: str) -> bool:
         """Match the built-in rule against a decoded path; custom rules see the URL."""
         if self._ad_filter_pattern is None:
@@ -1920,6 +2006,8 @@ class _SerialDownloadQueue:
         marker_totals = DownloadQueue._detect_hls_markers("")
         removed_cue_segments = 0
         removed_cue_seconds = 0.0
+        removed_splice_segments = 0
+        removed_splice_seconds = 0.0
         regex_ad_segments = 0
         playlist_count = 0
         total_playlist_bytes = 0
@@ -1931,7 +2019,9 @@ class _SerialDownloadQueue:
             parent_variables: Optional[Dict[str, str]] = None,
         ) -> str:
             nonlocal playlist_count, total_playlist_bytes
-            nonlocal removed_cue_segments, removed_cue_seconds, regex_ad_segments
+            nonlocal removed_cue_segments, removed_cue_seconds
+            nonlocal removed_splice_segments, removed_splice_seconds
+            nonlocal regex_ad_segments
             requested_url = DownloadQueue._validate_hls_remote_uri(playlist_url)
             if requested_url in visited:
                 return visited[requested_url]
@@ -2067,6 +2157,22 @@ class _SerialDownloadQueue:
                     value = expanded
                 raise RuntimeError("m3u8 变量展开循环")
 
+            if ad_segment_url_mapper is not None:
+                (
+                    splice_uri_indexes,
+                    splice_segments,
+                    splice_seconds,
+                ) = DownloadQueue._closed_discontinuity_ad_segments(
+                    lines,
+                    lambda value: DownloadQueue._validate_hls_remote_uri(
+                        urllib.parse.urljoin(playlist_url, expand_uri(value))
+                    ),
+                )
+            else:
+                splice_uri_indexes, splice_segments, splice_seconds = set(), 0, 0.0
+            removed_splice_segments += splice_segments
+            removed_splice_seconds += splice_seconds
+
             detected = DownloadQueue._detect_hls_markers(text)
             for key in (
                 "cue_out",
@@ -2144,6 +2250,11 @@ class _SerialDownloadQueue:
                         rewritten.append(
                             materialize(absolute, depth + 1, variables)
                         )
+                    elif (
+                        index in splice_uri_indexes
+                        and ad_segment_url_mapper is not None
+                    ):
+                        rewritten.append(ad_segment_url_mapper(absolute))
                     elif in_closed_cue and ad_segment_url_mapper is not None:
                         rewritten.append(ad_segment_url_mapper(absolute))
                     elif (
@@ -2190,7 +2301,8 @@ class _SerialDownloadQueue:
         LOGGER.info(
             "LunaTV HLS 标记扫描: CUE-OUT=%d, CUE-IN=%d, CUE-OUT-CONT=%d, "
             "闭合候选=%d [%s], 待过滤=%d分片/%.1f秒, 未闭合=%d, "
-            "正则待过滤=%d分片, DATERANGE广告候选=%d/%d, "
+            "结构待过滤=%d分片/%.1f秒, 正则待过滤=%d分片, "
+            "DATERANGE广告候选=%d/%d, "
             "DISCONTINUITY边界=%d",
             marker_totals["cue_out"],
             marker_totals["cue_in"],
@@ -2200,23 +2312,35 @@ class _SerialDownloadQueue:
             removed_cue_segments,
             removed_cue_seconds,
             marker_totals["unclosed_cue"],
+            removed_splice_segments,
+            removed_splice_seconds,
             regex_ad_segments,
             marker_totals["daterange_candidates"],
             marker_totals["daterange"],
             marker_totals["discontinuity"],
         )
         if ad_scan_callback is not None:
-            ad_scan_callback(
-                {
-                    "cue_segments": removed_cue_segments,
-                    "cue_seconds": removed_cue_seconds,
-                    "regex_segments": regex_ad_segments,
-                    "total_segments": removed_cue_segments + regex_ad_segments,
-                    "unclosed_cue": marker_totals["unclosed_cue"],
-                    "daterange_candidates": marker_totals["daterange_candidates"],
-                    "discontinuity": marker_totals["discontinuity"],
-                }
-            )
+            summary = {
+                "cue_segments": removed_cue_segments,
+                "cue_seconds": removed_cue_seconds,
+                "regex_segments": regex_ad_segments,
+                "total_segments": (
+                    removed_cue_segments
+                    + removed_splice_segments
+                    + regex_ad_segments
+                ),
+                "unclosed_cue": marker_totals["unclosed_cue"],
+                "daterange_candidates": marker_totals["daterange_candidates"],
+                "discontinuity": marker_totals["discontinuity"],
+            }
+            if removed_splice_segments:
+                summary.update(
+                    {
+                        "splice_segments": removed_splice_segments,
+                        "splice_seconds": removed_splice_seconds,
+                    }
+                )
+            ad_scan_callback(summary)
         return local_input
 
     @staticmethod
@@ -2329,13 +2453,16 @@ class DownloadQueue(_SerialDownloadQueue):
     def _log_ad_scan(task: DownloadTask, summary: Dict[str, Any]) -> None:
         LOGGER.info(
             "LunaTV HLS 去广告任务: task_id=%s, title=%s, "
-            "CUE待过滤=%d分片/%.1f秒, 正则待过滤=%d分片, "
+            "CUE待过滤=%d分片/%.1f秒, 结构待过滤=%d分片/%.1f秒, "
+            "正则待过滤=%d分片, "
             "总计待过滤=%d分片, 未闭合CUE=%d, DATERANGE候选=%d, "
             "DISCONTINUITY边界=%d",
             task.task_id,
             task.title,
             summary["cue_segments"],
             summary["cue_seconds"],
+            summary.get("splice_segments", 0),
+            summary.get("splice_seconds", 0.0),
             summary["regex_segments"],
             summary["total_segments"],
             summary["unclosed_cue"],

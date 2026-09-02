@@ -940,6 +940,225 @@ ads/spot.ts
     ]
 
 
+def test_prepare_hls_input_marks_foreign_discontinuity_block_as_ad(
+    monkeypatch, tmp_path: Path
+):
+    playlist = b"""#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/20260902/slot/1000kb/hls/insert-a.ts
+#EXTINF:5,
+https://cdn.example/20260902/slot/1000kb/hls/insert-b.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-b.ts
+#EXT-X-ENDLIST
+"""
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlist, url),
+    )
+    normal_urls = []
+    ad_urls = []
+    scans = []
+
+    local = DownloadQueue._prepare_hls_input(
+        "https://media.example/index.m3u8",
+        tmp_path,
+        lambda url: normal_urls.append(url) or f"normal:{len(normal_urls)}",
+        (),
+        lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
+        lambda _url: False,
+        scans.append,
+    )
+
+    content = Path(local).read_text(encoding="utf-8")
+    assert normal_urls == [
+        "https://cdn.example/20260901/show/2000kb/hls/main-a.ts",
+        "https://cdn.example/20260901/show/2000kb/hls/main-b.ts",
+    ]
+    assert ad_urls == [
+        "https://cdn.example/20260902/slot/1000kb/hls/insert-a.ts",
+        "https://cdn.example/20260902/slot/1000kb/hls/insert-b.ts",
+    ]
+    assert content.count("lunatv-cue-ad:") == 2
+    assert scans == [
+        {
+            "cue_segments": 0,
+            "cue_seconds": 0.0,
+            "regex_segments": 0,
+            "total_segments": 2,
+            "unclosed_cue": 0,
+            "daterange_candidates": 0,
+            "discontinuity": 2,
+            "splice_segments": 2,
+            "splice_seconds": 10.0,
+        }
+    ]
+
+
+def test_prepare_hls_input_keeps_same_asset_discontinuity_blocks(
+    monkeypatch, tmp_path: Path
+):
+    playlist = b"""#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/20260901/show/2000kb/hls/main-b.ts
+#EXTINF:5,
+https://cdn.example/20260901/show/2000kb/hls/main-c.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-d.ts
+#EXT-X-ENDLIST
+"""
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlist, url),
+    )
+    normal_urls = []
+    ad_urls = []
+    scans = []
+
+    local = DownloadQueue._prepare_hls_input(
+        "https://media.example/index.m3u8",
+        tmp_path,
+        lambda url: normal_urls.append(url) or f"normal:{len(normal_urls)}",
+        (),
+        lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
+        lambda _url: False,
+        scans.append,
+    )
+
+    assert len(normal_urls) == 4
+    assert ad_urls == []
+    assert "lunatv-cue-ad:" not in Path(local).read_text(encoding="utf-8")
+    assert scans == [
+        {
+            "cue_segments": 0,
+            "cue_seconds": 0.0,
+            "regex_segments": 0,
+            "total_segments": 0,
+            "unclosed_cue": 0,
+            "daterange_candidates": 0,
+            "discontinuity": 2,
+        }
+    ]
+
+
+def test_discontinuity_ad_detection_marks_repeated_foreign_asset_blocks():
+    lines = """#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://ads.example/20260902/slot-one/1000kb/hls/ad-a.ts
+#EXTINF:5.5,
+https://ads.example/20260902/slot-one/1000kb/hls/ad-b.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-middle.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:6,
+https://cdn.example/20260902/slot-two/1000kb/hls/ad-c.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-b.ts
+#EXT-X-ENDLIST
+""".splitlines()
+
+    marked, segment_count, seconds = (
+        DownloadQueue._closed_discontinuity_ad_segments(lines, lambda url: url)
+    )
+
+    assert marked == {
+        lines.index("https://ads.example/20260902/slot-one/1000kb/hls/ad-a.ts"),
+        lines.index("https://ads.example/20260902/slot-one/1000kb/hls/ad-b.ts"),
+        lines.index("https://cdn.example/20260902/slot-two/1000kb/hls/ad-c.ts"),
+    }
+    assert segment_count == 3
+    assert seconds == pytest.approx(16.5)
+
+
+def test_discontinuity_ad_detection_keeps_consecutive_foreign_assets():
+    lines = """#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://ads.example/20260902/slot-one/1000kb/hls/ad-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/20260902/slot-two/1000kb/hls/ad-b.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/main-b.ts
+#EXT-X-ENDLIST
+""".splitlines()
+
+    assert DownloadQueue._closed_discontinuity_ad_segments(
+        lines, lambda url: url
+    ) == (set(), 0, 0.0)
+
+
+def test_discontinuity_ad_detection_keeps_unclosed_foreign_tail():
+    lines = """#EXTM3U
+#EXTINF:4,
+https://cdn.example/show/main-a.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://ads.example/slot/ad-a.ts
+#EXTINF:5,
+https://ads.example/slot/ad-b.ts
+#EXT-X-ENDLIST
+""".splitlines()
+
+    assert DownloadQueue._closed_discontinuity_ad_segments(
+        lines, lambda url: url
+    ) == (set(), 0, 0.0)
+
+
+def test_discontinuity_ad_detection_does_not_cross_long_foreign_block():
+    lines = [
+        "#EXTM3U",
+        "#EXTINF:4,",
+        "https://cdn.example/20260901/show-a/2000kb/hls/main-a.ts",
+        "#EXT-X-DISCONTINUITY",
+    ]
+    for index in range(4):
+        lines.extend(
+            [
+                "#EXTINF:5,",
+                f"https://ads.example/20260902/slot/1000kb/hls/ad-{index}.ts",
+            ]
+        )
+    lines.append("#EXT-X-DISCONTINUITY")
+    for index in range(31):
+        lines.extend(
+            [
+                "#EXTINF:2,",
+                f"https://cdn.example/20260901/show-b/2000kb/hls/main-{index}.ts",
+            ]
+        )
+    lines.extend(
+        [
+            "#EXT-X-DISCONTINUITY",
+            "#EXTINF:4,",
+            "https://cdn.example/20260901/show-a/2000kb/hls/main-b.ts",
+            "#EXT-X-ENDLIST",
+        ]
+    )
+
+    assert DownloadQueue._closed_discontinuity_ad_segments(
+        lines, lambda url: url
+    ) == (set(), 0, 0.0)
+
+
 def test_segment_proxy_forwards_byte_ranges_and_preserves_partial_response():
     payload = b"abcdef"
     seen_ranges = []

@@ -883,7 +883,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.63"
+    plugin_version = "0.4.64"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3059,6 +3059,14 @@ class LunaTVSource(_PluginBase):
                     scrape=scrape,
                 )
             if state:
+                if transfer_type.casefold() == "move":
+                    source_path = Path(output)
+                    for _ in range(20):
+                        if not source_path.exists():
+                            break
+                        time.sleep(0.05)
+                    if source_path.exists():
+                        return "fallback:move-source-still-exists"
                 return "moviepilot"
             self._logger.warning("MoviePilot 原生整理未完成，保留直写文件：%s", message)
             return f"fallback:{message}"

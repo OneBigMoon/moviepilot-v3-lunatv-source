@@ -4478,6 +4478,130 @@ def test_task_media_identity_prefers_host_fields():
     assert media_id == "98765"
 
 
+def _native_movie_transfer_test_setup(monkeypatch, tmp_path: Path, transfer_type: str):
+    class MediaSource(str, Enum):
+        TMDB = "themoviedb"
+
+    class MediaType(str, Enum):
+        MOVIE = "电影"
+        TV = "电视剧"
+
+    class MetaInfo:
+        def __init__(self, title=None, year=None):
+            self.title = title
+            self.year = year
+            self.type = MediaType.MOVIE
+            self.begin_season = None
+            self.end_season = None
+            self.total_season = None
+            self.begin_episode = None
+            self.end_episode = None
+            self.total_episode = None
+
+    class StorageChain:
+        def get_file_item(self, **kwargs):
+            return object()
+
+    class TransferChain:
+        def __init__(self):
+            self.do_transfer_calls = 0
+            self.manual_transfer_calls = 0
+
+        def do_transfer(self, **kwargs):
+            self.do_transfer_calls += 1
+            return True, ""
+
+        def manual_transfer(self, **kwargs):
+            self.manual_transfer_calls += 1
+            raise AssertionError("movie native transfer must not call manual_transfer")
+
+    transfer_chain = TransferChain()
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
+    monkeypatch.setattr(plugin_module, "_HostMediaType", MediaType)
+    monkeypatch.setattr(plugin_module, "_HostMetaInfo", MetaInfo)
+    monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
+    monkeypatch.setattr(plugin_module, "_HostTransferChain", lambda: transfer_chain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(
+        plugin,
+        "_system_directory_info",
+        lambda *_args, **_kwargs: {
+            "library_path": str(tmp_path / "library"),
+            "transfer_type": transfer_type,
+        },
+    )
+    task = SimpleNamespace(
+        mode="download",
+        media_type="movie",
+        title="测试电影",
+        year="2026",
+        root=str(tmp_path),
+        source_key="cms-demo",
+        media_id="cms-demo:42",
+        host_media_source="themoviedb",
+        host_media_id="1084242",
+        season=1,
+        episode=1,
+    )
+    return plugin, task, transfer_chain
+
+
+def test_native_movie_move_success_with_source_still_present_falls_back(
+    monkeypatch, tmp_path: Path
+):
+    plugin, task, transfer_chain = _native_movie_transfer_test_setup(
+        monkeypatch, tmp_path, "move"
+    )
+    monkeypatch.setattr(plugin_module.time, "sleep", lambda *_args, **_kwargs: None)
+    output = tmp_path / "movie.mp4"
+    output.write_bytes(b"movie")
+
+    assert plugin._native_transfer(task, str(output)) == "fallback:move-source-still-exists"
+    assert output.exists()
+    assert transfer_chain.do_transfer_calls == 1
+    assert transfer_chain.manual_transfer_calls == 0
+
+
+def test_native_movie_move_success_with_source_removed_returns_moviepilot(
+    monkeypatch, tmp_path: Path
+):
+    plugin, task, transfer_chain = _native_movie_transfer_test_setup(
+        monkeypatch, tmp_path, "move"
+    )
+    output = tmp_path / "movie.mp4"
+    output.write_bytes(b"movie")
+    sleep_calls = 0
+
+    def remove_after_last_wait(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 20:
+            output.unlink()
+
+    monkeypatch.setattr(plugin_module.time, "sleep", remove_after_last_wait)
+    assert plugin._native_transfer(task, str(output)) == "moviepilot"
+    assert not output.exists()
+    assert sleep_calls == 20
+    assert transfer_chain.manual_transfer_calls == 0
+
+
+def test_native_movie_copy_success_with_source_still_present_returns_moviepilot(
+    monkeypatch, tmp_path: Path
+):
+    plugin, task, transfer_chain = _native_movie_transfer_test_setup(
+        monkeypatch, tmp_path, "copy"
+    )
+    monkeypatch.setattr(plugin_module.time, "sleep", lambda *_args, **_kwargs: None)
+    output = tmp_path / "movie.mp4"
+    output.write_bytes(b"movie")
+
+    assert plugin._native_transfer(task, str(output)) == "moviepilot"
+    assert output.exists()
+    assert transfer_chain.do_transfer_calls == 1
+    assert transfer_chain.manual_transfer_calls == 0
+
+
 def test_record_native_history_uses_source_output_and_is_idempotent(monkeypatch, tmp_path: Path):
     histories: list[dict] = []
     files: list[dict] = []
