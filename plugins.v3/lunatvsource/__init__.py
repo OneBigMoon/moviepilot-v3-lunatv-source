@@ -17,7 +17,9 @@ import base64
 import hashlib
 import inspect
 import logging
+import sys
 import asyncio
+import weakref
 from collections import deque
 from contextvars import ContextVar
 import re
@@ -195,8 +197,17 @@ _RESOURCE_SEARCH_CACHE_MAX_ENTRIES = 128
 _RESOURCE_SEARCH_CACHE_TTL = 30.0
 _QUEUE_RELOAD_STOP_TIMEOUT_SECONDS = 2.0
 _QUEUE_LOCK_FILENAME = ".lunatv-download-queue.lock"
+_QUEUE_OWNER_REGISTRY = sys.__dict__.setdefault(
+    "_lunatvsource_queue_owners",
+    weakref.WeakValueDictionary(),
+)
+_QUEUE_OWNER_REGISTRY_LOCK = sys.__dict__.setdefault(
+    "_lunatvsource_queue_owner_lock",
+    threading.RLock(),
+)
 _MEDIA_SYNC_RETRY_LIMIT = 1
 _MEDIA_SYNC_RETRY_DELAY_SECONDS = 2.0
+_SUBSCRIPTION_PROGRESS_EVENT_SCENE = "lunatvsource_media_sync"
 _MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS = 60.0
 _MEDIA_SYNC_VISIBILITY_POLL_SECONDS = 1.0
 
@@ -918,6 +929,7 @@ class LunaTVSource(_PluginBase):
         self._logger = LOGGER
         self._queue_lock_file: Optional[Any] = None
         self._queue_lock_path: Optional[Path] = None
+        self._queue_lock_error = ""
         self._download_metrics_lock = threading.Lock()
         self._download_metrics: Dict[str, Deque[Tuple[float, int]]] = {}
         self._completed_download_sizes: Dict[str, int] = {}
@@ -938,7 +950,7 @@ class LunaTVSource(_PluginBase):
             "subscription_refresh": 0,
             "media_server_sync": 0,
         }
-        self._subscription_refresh_active = 0
+        self._subscription_refresh_active: set[int] = set()
         # ponytail: completion volume is low; one lock avoids stale subscription
         # snapshots overwriting each other. Split per subscription only if measured.
         self._subscription_progress_lock = threading.Lock()
@@ -971,16 +983,34 @@ class LunaTVSource(_PluginBase):
 
     def _acquire_queue_lock(self, data_path: Optional[Path]) -> bool:
         """Keep one download queue owner per persistent plugin data path."""
+        self._queue_lock_error = ""
         if data_path is None or fcntl is None:
             return True
         try:
             data_path.mkdir(parents=True, exist_ok=True)
             lock_path = data_path.resolve() / _QUEUE_LOCK_FILENAME
         except OSError as exc:
+            self._queue_lock_error = f"无法准备下载队列锁：{exc}"
             self._logger.warning("无法准备 LunaTV 下载队列锁：%s", exc)
             return False
+        lock_key = str(lock_path)
+        with _QUEUE_OWNER_REGISTRY_LOCK:
+            owner = _QUEUE_OWNER_REGISTRY.get(lock_key)
+        if owner is not None and owner is not self:
+            try:
+                owner.stop_service()
+            except Exception as exc:
+                self._queue_lock_error = f"停止同进程旧实例失败：{exc}"
+                self._logger.warning("停止旧 LunaTV 实例失败：%s", exc)
+                return False
+            if getattr(owner, "_queue_lock_file", None) is not None:
+                self._queue_lock_error = "同进程旧实例停止后仍未释放下载队列锁"
+                self._logger.warning("旧 LunaTV 实例未释放下载队列锁：%s", lock_path)
+                return False
         if self._queue_lock_file is not None:
             if self._queue_lock_path == lock_path:
+                with _QUEUE_OWNER_REGISTRY_LOCK:
+                    _QUEUE_OWNER_REGISTRY[lock_key] = self
                 return True
             self._release_queue_lock()
         lock_file: Any = None
@@ -990,6 +1020,9 @@ class LunaTVSource(_PluginBase):
         except OSError as exc:
             if lock_file is not None:
                 lock_file.close()
+            self._queue_lock_error = (
+                f"下载队列锁定失败（errno={getattr(exc, 'errno', None)}）：{exc}"
+            )
             self._logger.warning(
                 "LunaTV 下载队列数据目录已被其他实例占用或无法锁定：%s",
                 exc,
@@ -997,23 +1030,29 @@ class LunaTVSource(_PluginBase):
             return False
         self._queue_lock_file = lock_file
         self._queue_lock_path = lock_path
+        with _QUEUE_OWNER_REGISTRY_LOCK:
+            _QUEUE_OWNER_REGISTRY[lock_key] = self
         return True
 
     def _release_queue_lock(self) -> None:
         lock_file = self._queue_lock_file
+        lock_path = self._queue_lock_path
         self._queue_lock_file = None
         self._queue_lock_path = None
-        if lock_file is None:
-            return
-        try:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            lock_file.close()
-        except OSError:
-            pass
+        if lock_file is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                lock_file.close()
+            except OSError:
+                pass
+        if lock_path is not None:
+            with _QUEUE_OWNER_REGISTRY_LOCK:
+                if _QUEUE_OWNER_REGISTRY.get(str(lock_path)) is self:
+                    _QUEUE_OWNER_REGISTRY.pop(str(lock_path), None)
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         previous_queue = self._queue
@@ -1052,7 +1091,7 @@ class LunaTVSource(_PluginBase):
             } if isinstance(loaded_followup_status, dict) else {}
             for name in self._followup_generations:
                 self._followup_generations[name] += 1
-            self._subscription_refresh_active = 0
+            self._subscription_refresh_active.clear()
         max_concurrent_tasks, segment_thread_count = normalize_download_concurrency(
             self._config.get(
                 "max_concurrent_tasks",
@@ -1089,34 +1128,60 @@ class LunaTVSource(_PluginBase):
         # 保留旧版 ai_enabled 仅为兼容历史配置，不再让插件设置覆盖宿主设置。
         self._ai = AiTitleNormalizer(True, LOGGER)
         queue_data_path = self._queue_data_path()
-        if not self._acquire_queue_lock(queue_data_path):
+        if not self._enabled:
+            if self._acquire_queue_lock(queue_data_path):
+                try:
+                    DownloadQueue(
+                        load=lambda key, default=None: (
+                            default
+                            if (value := self.get_data(key)) is None
+                            else value
+                        ),
+                        save=lambda key, value: self.save_data(key, value),
+                        notify=self._notify,
+                        on_complete=self._record_completion,
+                        data_path=queue_data_path,
+                        max_concurrent_tasks=self._config[
+                            "max_concurrent_tasks"
+                        ],
+                        segment_thread_count=self._config[
+                            "segment_thread_count"
+                        ],
+                        allowed_private_ranges=self._probe_allowed_private_ranges(),
+                        ad_filter_regex=self._config["hls_ad_filter_regex"],
+                    )
+                finally:
+                    self._release_queue_lock()
+            self._queue = None
+        elif not self._acquire_queue_lock(queue_data_path):
             self._queue = None
             self._enabled = False
-            self._source_config_error = "下载队列数据目录已被其他实例占用"
+            self._source_config_error = self._queue_lock_error or "下载队列锁定失败"
             _restore_search_bridge(self)
             _restore_download_clients_bridge(self)
             _restore_download_chain_bridge(self)
             return
-        try:
-            self._queue = DownloadQueue(
-                load=lambda key, default=None: (
-                    default
-                    if (value := self.get_data(key)) is None
-                    else value
-                ),
-                save=lambda key, value: self.save_data(key, value),
-                notify=self._notify,
-                on_complete=self._record_completion,
-                data_path=queue_data_path,
-                max_concurrent_tasks=self._config["max_concurrent_tasks"],
-                segment_thread_count=self._config["segment_thread_count"],
-                allowed_private_ranges=self._probe_allowed_private_ranges(),
-                ad_filter_regex=self._config["hls_ad_filter_regex"],
-            )
-        except Exception:
-            self._queue = None
-            self._release_queue_lock()
-            raise
+        else:
+            try:
+                self._queue = DownloadQueue(
+                    load=lambda key, default=None: (
+                        default
+                        if (value := self.get_data(key)) is None
+                        else value
+                    ),
+                    save=lambda key, value: self.save_data(key, value),
+                    notify=self._notify,
+                    on_complete=self._record_completion,
+                    data_path=queue_data_path,
+                    max_concurrent_tasks=self._config["max_concurrent_tasks"],
+                    segment_thread_count=self._config["segment_thread_count"],
+                    allowed_private_ranges=self._probe_allowed_private_ranges(),
+                    ad_filter_regex=self._config["hls_ad_filter_regex"],
+                )
+            except Exception:
+                self._queue = None
+                self._release_queue_lock()
+                raise
         with self._tmdb_cache_lock:
             loaded_tmdb_cache = dict(self.get_data("tmdb_match_cache_v1") or {})
             self._tmdb_cache = dict(
@@ -3421,7 +3486,9 @@ class LunaTVSource(_PluginBase):
                     subscribe = get_subscription(subscribe_id)
                     if subscribe is None:
                         continue
-                    summary = backfill(subscribe, normalized) or {}
+                    summary = self._call_native_subscription_progress(
+                        backfill, subscribe, normalized
+                    ) or {}
                     accepted = {
                         int(episode)
                         for episode in (summary.get("accepted") or [])
@@ -3450,6 +3517,22 @@ class LunaTVSource(_PluginBase):
                     )
         return handled
 
+    @staticmethod
+    def _call_native_subscription_progress(func, *args):
+        """Tag plugin-owned progress mutations so their events are not re-consumed."""
+
+        try:
+            parameters = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        supports_scene = "scene" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if supports_scene:
+            return func(*args, scene=_SUBSCRIPTION_PROGRESS_EVENT_SCENE)
+        return func(*args)
+
     def _refresh_native_subscription_progress(
         self, subscription_ids: set[int]
     ) -> set[int]:
@@ -3475,7 +3558,7 @@ class LunaTVSource(_PluginBase):
                     subscribe = get_subscription(subscribe_id)
                     if subscribe is None:
                         continue
-                    refresh(subscribe)
+                    self._call_native_subscription_progress(refresh, subscribe)
                     refreshed.add(subscribe_id)
                 except Exception as exc:
                     self._logger.warning(
@@ -4096,7 +4179,11 @@ class LunaTVSource(_PluginBase):
         }
 
     def api_status(self) -> Dict[str, Any]:
-        queue = self._queue or DownloadQueue(lambda *_: None, lambda *_: None, self._notify)
+        queue = self._queue or DownloadQueue(
+            lambda _key, default=None: default,
+            lambda *_: None,
+            self._notify,
+        )
         directories = self._system_directory_infos()
         configured_root = str(self._config.get("download_root") or "").strip()
         source_health = self._source_health_summary()
@@ -4106,7 +4193,12 @@ class LunaTVSource(_PluginBase):
             followup_status = {
                 key: dict(value) for key, value in self._followup_status.items()
             }
-            subscription_refresh_running = self._subscription_refresh_active > 0
+            current_refresh_generation = self._followup_generations.get(
+                "subscription_refresh", 0
+            )
+            subscription_refresh_running = (
+                current_refresh_generation in self._subscription_refresh_active
+            )
         followup_status.setdefault("subscription_refresh", {})["running"] = (
             subscription_refresh_running
         )
@@ -4647,7 +4739,7 @@ class LunaTVSource(_PluginBase):
             followup_generation = self._followup_generations[
                 "subscription_refresh"
             ]
-            self._subscription_refresh_active += 1
+            self._subscription_refresh_active.add(followup_generation)
         try:
             result = self._refresh_subscriptions_once()
         except Exception as exc:
@@ -4682,9 +4774,7 @@ class LunaTVSource(_PluginBase):
             return result
         finally:
             with self._followup_status_lock:
-                self._subscription_refresh_active = max(
-                    0, self._subscription_refresh_active - 1
-                )
+                self._subscription_refresh_active.discard(followup_generation)
 
     def _refresh_subscriptions_once(self) -> Dict[str, Any]:
         """读取 MoviePilot 活跃订阅；宿主缺少订阅操作器时安全返回。"""
@@ -4780,7 +4870,11 @@ class LunaTVSource(_PluginBase):
                         str(getattr(subscribe, "type", "") or ""),
                     )
                     normalized_title = search_query or title
-                    results = client.search(search_query, expand_tv_episode_rows=True)
+                    results = client.search(
+                        search_query,
+                        expand_tv_episode_rows=True,
+                        max_workers=8,
+                    )
                 results = self._filter_currently_searchable_results(results, client)
                 prepared_results = []
                 for result in results:
@@ -6949,6 +7043,14 @@ class LunaTVSource(_PluginBase):
 
     @eventmanager.register(getattr(EventType, "SubscribeModified", "subscribe.modified"))
     def _on_subscribe_modified(self, event: Event) -> None:
+        event_data = getattr(event, "event_data", None) or {}
+        scene = (
+            event_data.get("scene")
+            if isinstance(event_data, dict)
+            else getattr(event_data, "scene", "")
+        )
+        if scene == _SUBSCRIPTION_PROGRESS_EVENT_SCENE:
+            return
         if self._enabled:
             self._start_background(self.refresh_subscriptions)
 

@@ -37,6 +37,108 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert plugin.get_sidebar_nav() == []
 
 
+def test_status_works_before_plugin_initialization():
+    plugin = LunaTVSource()
+
+    status = plugin.api_status()["data"]
+
+    assert status["enabled"] is False
+    assert status["queue"]["pending"] == 0
+
+
+def test_status_stops_when_latest_subscription_refresh_finishes(monkeypatch):
+    plugin = LunaTVSource()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+    release_second = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+
+    def refresh_once():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call_number = calls
+        if call_number == 1:
+            first_started.set()
+            release_first.wait(timeout=5)
+        else:
+            second_started.set()
+            release_second.wait(timeout=5)
+        return {"error": ""}
+
+    monkeypatch.setattr(plugin, "_refresh_subscriptions_once", refresh_once)
+    first = threading.Thread(target=plugin.refresh_subscriptions, daemon=True)
+    second = threading.Thread(target=plugin.refresh_subscriptions, daemon=True)
+
+    try:
+        first.start()
+        assert first_started.wait(timeout=2)
+        second.start()
+        assert second_started.wait(timeout=2)
+        assert plugin.api_status()["data"]["followup_status"][
+            "subscription_refresh"
+        ]["running"] is True
+
+        release_second.set()
+        second.join(timeout=2)
+        assert second.is_alive() is False
+        latest = plugin.api_status()["data"]["followup_status"][
+            "subscription_refresh"
+        ]
+        assert latest["success"] is True
+        assert latest["running"] is False
+        assert first.is_alive() is True
+    finally:
+        release_first.set()
+        release_second.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+
+def test_native_progress_events_do_not_restart_subscription_refresh(monkeypatch):
+    plugin = LunaTVSource()
+    plugin._enabled = True
+    refresh_starts = []
+    subscribe = SimpleNamespace(id=7)
+
+    class Repository:
+        @staticmethod
+        def get(subscribe_id):
+            assert subscribe_id == 7
+            return subscribe
+
+    class SubscribeChain:
+        subscription_repository = Repository()
+
+        @staticmethod
+        def refresh_subscribe_progress(_subscribe, *, scene="progress"):
+            plugin._on_subscribe_modified(
+                SimpleNamespace(event_data={"scene": scene})
+            )
+
+        @staticmethod
+        def backfill_existing_episodes(
+            _subscribe, episodes, *, scene="backfill"
+        ):
+            plugin._on_subscribe_modified(
+                SimpleNamespace(event_data={"scene": scene})
+            )
+            return {"accepted": episodes, "ignored": []}
+
+    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
+    monkeypatch.setattr(
+        plugin,
+        "_start_background",
+        lambda func: refresh_starts.append(func) or True,
+    )
+
+    assert plugin._refresh_native_subscription_progress({7}) == {7}
+    assert plugin._backfill_native_subscription_progress({7: {1, 2}}) == {7}
+    assert refresh_starts == []
+
+
 def test_service_registers_subscription_refresh_and_serial_queue():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "poll_minutes": 15, "queue_minutes": 2})
@@ -189,20 +291,52 @@ def test_queue_data_path_lock_is_held_until_queue_stops(monkeypatch, tmp_path: P
     second = LunaTVSource()
     monkeypatch.setattr(first, "get_data_path", lambda: tmp_path, raising=False)
     monkeypatch.setattr(second, "get_data_path", lambda: tmp_path, raising=False)
-    first.init_plugin({"enabled": False})
+    first.init_plugin({"enabled": True})
     original_stop = first._queue.stop_and_wait
     monkeypatch.setattr(first._queue, "stop_and_wait", lambda *, timeout: False)
 
     first.stop_service()
-    second.init_plugin({"enabled": False})
+    second.init_plugin({"enabled": True})
 
     assert second._queue is None
-    assert "其他实例占用" in second._source_config_error
+    assert second._source_config_error == "同进程旧实例停止后仍未释放下载队列锁"
 
     monkeypatch.setattr(first._queue, "stop_and_wait", original_stop)
     first.stop_service()
-    second.init_plugin({"enabled": False})
+    second.init_plugin({"enabled": True})
     assert second._queue is not None
+    second.stop_service()
+
+
+@pytest.mark.skipif(plugin_module.fcntl is None, reason="requires fcntl")
+def test_disabled_instance_does_not_block_enabled_queue(tmp_path: Path):
+    disabled = LunaTVSource()
+    enabled = LunaTVSource()
+    disabled.get_data_path = lambda: tmp_path
+    enabled.get_data_path = lambda: tmp_path
+
+    disabled.init_plugin({"enabled": False})
+    enabled.init_plugin({"enabled": True})
+
+    assert disabled._queue is None
+    assert enabled._queue is not None
+    enabled.stop_service()
+
+
+@pytest.mark.skipif(plugin_module.fcntl is None, reason="requires fcntl")
+def test_new_instance_takes_over_queue_lock_after_old_queue_stops(tmp_path: Path):
+    first = LunaTVSource()
+    second = LunaTVSource()
+    first.get_data_path = lambda: tmp_path
+    second.get_data_path = lambda: tmp_path
+
+    first.init_plugin({"enabled": True})
+    second.init_plugin({"enabled": True})
+
+    assert first._enabled is False
+    assert first._queue_lock_file is None
+    assert second._queue is not None
+    assert second._queue_lock_file is not None
     second.stop_service()
 
 
@@ -4960,13 +5094,15 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
     monkeypatch.setitem(sys.modules, "app.db.oper.subscribe", subscribe_module)
 
     searches = []
+    search_options = []
 
     class Client:
         def detail(self, *_args):
             raise AssertionError("season subscription must re-search, not detail one episode")
 
-        def search(self, query, **_kwargs):
+        def search(self, query, **kwargs):
             searches.append(query)
+            search_options.append(kwargs)
             return rows
 
     plugin = LunaTVSource()
@@ -4980,6 +5116,7 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
     tasks = sorted(plugin._queue.list_tasks(), key=lambda task: task["episode"])
 
     assert searches
+    assert all(options["max_workers"] == 8 for options in search_options)
     assert response["queued"] == 2
     assert [(task["season"], task["episode"]) for task in tasks] == [(1, 1), (1, 2)]
     assert wakeups == [True]
