@@ -892,7 +892,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.69"
+    plugin_version = "0.4.70"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3641,6 +3641,7 @@ class LunaTVSource(_PluginBase):
         subscription_ids: Optional[set[int]] = None,
         episode: Optional[int] = None,
         media_probe: Optional[Dict[str, Any]] = None,
+        episodes_by_subscription: Optional[Dict[int, set[int]]] = None,
     ) -> bool:
         """后台刷新媒体服务器并同步索引，再提交原生订阅进度。"""
 
@@ -3654,6 +3655,28 @@ class LunaTVSource(_PluginBase):
                 continue
             if subscribe_id > 0:
                 normalized_ids.add(subscribe_id)
+        normalized_backfill: Dict[int, set[int]] = {}
+        for raw_subscribe_id, raw_episodes in (
+            episodes_by_subscription or {}
+        ).items():
+            try:
+                subscribe_id = int(raw_subscribe_id)
+            except (TypeError, ValueError):
+                continue
+            if subscribe_id <= 0:
+                continue
+            episodes: set[int] = set()
+            for raw_episode in raw_episodes or set():
+                try:
+                    episode_value = int(raw_episode)
+                except (TypeError, ValueError):
+                    continue
+                if episode_value > 0:
+                    episodes.add(episode_value)
+            if not episodes:
+                continue
+            normalized_ids.add(subscribe_id)
+            normalized_backfill[subscribe_id] = episodes
         try:
             episode_number = int(episode) if episode is not None else None
         except (TypeError, ValueError):
@@ -3689,8 +3712,10 @@ class LunaTVSource(_PluginBase):
                 int(probe.get("episode") or 0),
             )
 
-        if _HostMediaServerChain is None and not (
-            normalized_ids and episode_number is not None
+        if (
+            _HostMediaServerChain is None
+            and not normalized_ids
+            and not normalized_backfill
         ):
             return False
 
@@ -3704,6 +3729,10 @@ class LunaTVSource(_PluginBase):
                 if normalized_probe is not None:
                     self._media_sync_probes[probe_key(normalized_probe)] = normalized_probe
             self._media_sync_refresh_ids.update(normalized_ids)
+            for subscribe_id, episodes in normalized_backfill.items():
+                self._media_sync_backfill.setdefault(subscribe_id, set()).update(
+                    episodes
+                )
             if episode_number is not None:
                 for subscribe_id in normalized_ids:
                     self._media_sync_backfill.setdefault(subscribe_id, set()).add(
@@ -3877,7 +3906,10 @@ class LunaTVSource(_PluginBase):
                 completed_backfill_ids.update(handled_ids)
                 remaining_refresh_ids = refresh_ids.difference(handled_ids)
                 refreshed_ids: set[int] = set()
-                if sync_succeeded and remaining_refresh_ids:
+                can_refresh_progress = (
+                    sync_succeeded or _HostMediaServerChain is None
+                )
+                if can_refresh_progress and remaining_refresh_ids:
                     refreshed_ids = self._refresh_native_subscription_progress(
                         remaining_refresh_ids
                     )
@@ -3896,7 +3928,7 @@ class LunaTVSource(_PluginBase):
                 failed_backfill_ids = set(pending_backfill).difference(handled_ids)
                 failed_refresh_ids = remaining_refresh_ids.difference(refreshed_ids)
                 retry_needed = (sync_requested and not sync_succeeded) or bool(
-                    sync_succeeded and failed_refresh_ids
+                    can_refresh_progress and failed_refresh_ids
                 ) or bool(failed_backfill_ids)
                 if retry_needed and retry_count < _MEDIA_SYNC_RETRY_LIMIT:
                     retry_count += 1
@@ -5036,26 +5068,15 @@ class LunaTVSource(_PluginBase):
                         queued += 1
         if queued:
             self._start_queue()
-        handled_progress_ids = self._backfill_native_subscription_progress(
-            native_progress_episodes
-        )
-        remaining_progress_ids = native_progress_ids.difference(
-            handled_progress_ids
-        )
-        unrefreshed_progress_ids: set[int] = set()
-        if remaining_progress_ids:
-            if _HostMediaServerChain is not None:
-                self._sync_media_server(remaining_progress_ids)
-            else:
-                refreshed_progress_ids = (
-                    self._refresh_native_subscription_progress(
-                        remaining_progress_ids
-                    )
-                    or set()
-                )
-                unrefreshed_progress_ids = remaining_progress_ids.difference(
-                    refreshed_progress_ids
-                )
+        if native_progress_ids:
+            # MoviePilot may perform media recognition and library queries while
+            # backfilling subscription progress. Keep that work on the existing
+            # coalescing media-sync worker so a slow host lookup cannot leave the
+            # subscription refresh UI stuck in "running" after search is done.
+            self._sync_media_server(
+                native_progress_ids,
+                episodes_by_subscription=native_progress_episodes,
+            )
         result = {
             "subscriptions": len(active_subscribes),
             "queued": queued,
@@ -5063,12 +5084,6 @@ class LunaTVSource(_PluginBase):
             "skipped_ambiguous": skipped_ambiguous,
             "skipped_no_directory": skipped_no_directory,
         }
-        if unrefreshed_progress_ids:
-            result["unrefreshed_subscriptions"] = len(unrefreshed_progress_ids)
-            result["error"] = (
-                f"MoviePilot 未能刷新 {len(unrefreshed_progress_ids)} 个订阅进度；"
-                "请升级 MoviePilot 后重试，或查看插件日志"
-            )
         return result
 
     def run_queue(self) -> Dict[str, Any]:

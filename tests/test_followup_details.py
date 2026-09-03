@@ -107,12 +107,8 @@ def test_subscription_drops_source_disabled_before_enqueue(
     assert plugin.api_sources()["data"][0]["manual_disabled"] is True
 
 
-@pytest.mark.parametrize(
-    ("refreshed_ids", "expect_error"),
-    [(set(), True), ({10}, False)],
-)
-def test_subscription_refresh_reports_native_progress_compatibility_gap(
-    monkeypatch, tmp_path: Path, refreshed_ids, expect_error
+def test_subscription_refresh_delegates_native_progress_without_blocking(
+    monkeypatch, tmp_path: Path
 ):
     subscribe = SimpleNamespace(
         id=10,
@@ -134,34 +130,29 @@ def test_subscription_refresh_reports_native_progress_compatibility_gap(
         def search(*_args, **_kwargs):
             return []
 
-    refresh_calls = []
+    sync_calls = []
 
-    def refresh(ids):
-        refresh_calls.append(set(ids))
-        return set(refreshed_ids)
+    def sync(ids, *, episodes_by_subscription=None):
+        sync_calls.append((set(ids), episodes_by_subscription))
+        return True
 
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     monkeypatch.setattr(plugin_module, "_HostMediaServerChain", None)
     monkeypatch.setattr(
-        plugin, "_backfill_native_subscription_progress", lambda _pending: set()
+        plugin,
+        "_backfill_native_subscription_progress",
+        lambda _pending: pytest.fail("progress backfill must run off the refresh thread"),
     )
-    monkeypatch.setattr(plugin, "_refresh_native_subscription_progress", refresh)
+    monkeypatch.setattr(plugin, "_sync_media_server", sync)
 
     response = plugin.refresh_subscriptions()
     status = plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)[
         "subscription_refresh"
     ]
 
-    assert refresh_calls == [{10}]
-    if expect_error:
-        assert response["unrefreshed_subscriptions"] == 1
-        assert "MoviePilot 未能刷新 1 个订阅进度" in response["error"]
-        assert status["success"] is False
-        assert status["unrefreshed_subscriptions"] == 1
-    else:
-        assert "error" not in response
-        assert "unrefreshed_subscriptions" not in response
-        assert status["success"] is True
+    assert sync_calls == [({10}, {})]
+    assert "error" not in response
+    assert status["success"] is True
 
 
 def test_subscription_skips_source_disabled_before_search(
@@ -285,25 +276,23 @@ def test_subscription_refresh_backfills_historical_downloads(monkeypatch, tmp_pa
         "_native_history_has_episode",
         lambda task: task.episode in {1, 2},
     )
-    backfills = []
-    monkeypatch.setattr(
-        plugin,
-        "_backfill_native_subscription_progress",
-        lambda pending: backfills.append(pending) or set(pending),
-    )
     syncs = []
+
+    def sync(ids, *, episodes_by_subscription=None):
+        syncs.append((set(ids), episodes_by_subscription))
+        return True
+
     monkeypatch.setattr(
         plugin,
         "_sync_media_server",
-        lambda ids: syncs.append(ids) or True,
+        sync,
     )
 
     response = plugin.refresh_subscriptions()
 
     assert response["queued"] == 0
     assert response["reconciled"] == 2
-    assert backfills == [{9: {1, 2}}]
-    assert syncs == []
+    assert syncs == [({9}, {9: {1, 2}})]
 
 
 def test_subscription_refresh_normalizes_active_state_and_season_text(

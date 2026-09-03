@@ -5490,7 +5490,7 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
-    progress_refreshes = []
+    progress_syncs = []
     monkeypatch.setattr(plugin_module, "_HostDirectoryHelper", DirectoryHelper)
     monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     monkeypatch.setattr(plugin, "_client", lambda: Client())
@@ -5498,8 +5498,8 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
     monkeypatch.setattr(plugin._ai, "normalize", lambda title, *_args: (title, False))
     monkeypatch.setattr(
         plugin,
-        "_refresh_native_subscription_progress",
-        lambda ids: progress_refreshes.append(ids),
+        "_sync_media_server",
+        lambda ids, **kwargs: progress_syncs.append((set(ids), kwargs)) or True,
     )
 
     first = plugin.refresh_subscriptions()
@@ -5511,7 +5511,10 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
         ("movie", "/media/incoming/movies"),
         ("tv", "/media/incoming/tv"),
     ]
-    assert progress_refreshes == [{2}, {2}]
+    assert progress_syncs == [
+        ({2}, {"episodes_by_subscription": {}}),
+        ({2}, {"episodes_by_subscription": {}}),
+    ]
 
 
 def test_local_episode_path_requires_completed_download_or_strm_artifact(tmp_path: Path):
