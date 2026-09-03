@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.72"
+    expected_version = "0.4.73"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -230,7 +230,7 @@ def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     )
 
 
-def test_frontend_supports_failed_task_retry_and_optional_download_directory():
+def test_frontend_uses_native_download_management_and_optional_download_directory():
     project_root = Path(__file__).resolve().parents[1]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
@@ -239,13 +239,10 @@ def test_frontend_supports_failed_task_retry_and_optional_download_directory():
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "Config.vue"
     ).read_text(encoding="utf-8")
 
-    assert "const tasks = ref([])" in app_page
-    assert "apiCall('get', '/tasks')" in app_page
-    assert "task?.state === 'failed'" in app_page
-    assert "`/tasks/${encodeURIComponent(task.task_id)}/retry`" in app_page
-    assert "{{ task.title || '未命名任务' }}" in app_page
-    assert "{{ task.error || '下载失败' }}" in app_page
-    assert '@click="retryTask(task)"' in app_page
+    assert "const tasks = ref([])" not in app_page
+    assert "apiCall('get', '/tasks')" not in app_page
+    assert "retryTask" not in app_page
+    assert "失败任务" not in app_page
 
     assert "download_root: ''" in config_page
     assert "probe_allowed_private_ranges: ''" in config_page

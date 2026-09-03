@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.72"
+    plugin_version = "0.4.73"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1841,7 +1841,6 @@ class LunaTVSource(_PluginBase):
         enabled = (
             configured_searchable
             and not manual_disabled
-            and not search_forbidden
         )
         network_successes = max(0, int(record.get("network_successes") or 0))
         network_failures = max(0, int(record.get("network_failures") or 0))
@@ -1860,7 +1859,7 @@ class LunaTVSource(_PluginBase):
                 "network_status": display_health_status,
                 "network_label": (
                     "配置禁用"
-                    if manual_disabled or not configured_searchable or search_forbidden
+                    if manual_disabled or not configured_searchable
                     else "网络正常"
                     if health_status == "healthy"
                     else "网络不通"
@@ -1875,7 +1874,7 @@ class LunaTVSource(_PluginBase):
             }
         )
 
-        if manual_disabled or not configured_searchable or search_forbidden:
+        if manual_disabled or not configured_searchable:
             health_label = "配置禁用"
             disabled_reason = "configured"
         elif display_health_status == "pending":
@@ -2325,7 +2324,7 @@ class LunaTVSource(_PluginBase):
                         "network_successes": network_successes
                         + (0 if error else 1),
                         "network_failures": network_failures
-                        + (1 if error and not search_forbidden else 0),
+                        + (1 if error else 0),
                     }
                     applied_updates.update(persist_progress({key: update}))
 

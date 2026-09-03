@@ -48,7 +48,7 @@ def test_search_protocol_health_accepts_a_valid_empty_result(monkeypatch):
         client.verify_search(source)
 
 
-def test_search_forbidden_source_is_configuration_disabled(monkeypatch):
+def test_search_forbidden_source_remains_enabled_until_manually_disabled(monkeypatch):
     source = make_source("search-forbidden")
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
@@ -69,12 +69,12 @@ def test_search_forbidden_source_is_configuration_disabled(monkeypatch):
 
     assert result["disabled"] == 1
     assert payload["auto_disabled"] is False
-    assert payload["enabled"] is False
-    assert payload["health_label"] == "配置禁用"
+    assert payload["enabled"] is True
+    assert payload["health_label"] == "网络不通"
     assert payload["network_successes"] == 0
-    assert payload["network_failures"] == 0
+    assert payload["network_failures"] == 1
     assert payload["last_error"] == "CMS 源站在线，但禁止关键词搜索（API 1002）"
-    assert plugin._client().sources == []
+    assert [item.key for item in plugin._client().sources] == [source.key]
 
 
 def test_unchecked_source_remains_searchable_before_health_check(monkeypatch):
@@ -99,7 +99,7 @@ def test_unchecked_source_remains_searchable_before_health_check(monkeypatch):
     assert [item.key for item in plugin._client().sources] == [source.key]
 
 
-def test_health_failure_disables_search_and_later_success_recovers(monkeypatch):
+def test_health_failure_keeps_search_enabled_and_later_success_recovers(monkeypatch):
     healthy = make_source("healthy")
     failing = make_source("failing")
     sources = [healthy, failing]
@@ -600,7 +600,7 @@ def test_inflight_health_result_is_dropped_after_endpoint_change(monkeypatch):
     assert plugin._source_health[old_source.key]["api"] == new_source.api
 
 
-def test_auto_disabled_state_survives_restart_until_success(monkeypatch):
+def test_network_failure_state_survives_restart_until_success(monkeypatch):
     store: Dict[str, object] = {}
     source = make_source("restart-failure")
 

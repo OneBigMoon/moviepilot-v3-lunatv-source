@@ -11,10 +11,8 @@ const loading = ref(true)
 const error = ref('')
 const sources = ref([])
 const status = ref({})
-const tasks = ref([])
 const healthCheckStarting = ref(false)
 const busySourceKeys = ref(new Set())
-const retryingTaskIds = ref(new Set())
 let healthPollTimer = null
 let healthPollDeadline = 0
 const HEALTH_POLL_INTERVAL_MS = 1000
@@ -38,14 +36,12 @@ async function load(options = {}) {
     error.value = ''
   }
   try {
-    const [statusResponse, sourceResponse, taskResponse] = await Promise.all([
+    const [statusResponse, sourceResponse] = await Promise.all([
       apiCall('get', '/status'),
       apiCall('get', '/sources'),
-      apiCall('get', '/tasks'),
     ])
     status.value = unwrap(statusResponse)
     sources.value = unwrap(sourceResponse) || []
-    tasks.value = unwrap(taskResponse) || []
   } catch (loadError) {
     error.value = loadError?.message || '加载 LunaTV 状态失败'
   } finally {
@@ -188,16 +184,11 @@ const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'co
 const followupStatus = computed(() => status.value.followup_status || {})
 const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {})
 const mediaSyncStatus = computed(() => followupStatus.value.media_server_sync || {})
-const failedTasks = computed(() => tasks.value.filter((task) => task?.state === 'failed'))
 
 function followupSummary(item) {
   if (item?.running) return '进行中'
   if (!item?.finished_at) return '暂无记录'
   return `${item.success === false ? '失败' : '成功'} · ${formattedTime(item.finished_at)}`
-}
-
-function taskIsRetrying(task) {
-  return retryingTaskIds.value.has(task.task_id)
 }
 
 function sourceVisualStatus(source) {
@@ -229,24 +220,6 @@ function sourceHealthVisualStatus(source) {
 
 function sourceCheckedLabel(source) {
   return source?.check_state === 'pending' ? '等待本轮检查' : formattedTime(source?.last_checked)
-}
-
-async function retryTask(task) {
-  if (!task?.task_id || taskIsRetrying(task)) return
-  const nextRetryingTaskIds = new Set(retryingTaskIds.value)
-  nextRetryingTaskIds.add(task.task_id)
-  retryingTaskIds.value = nextRetryingTaskIds
-  error.value = ''
-  try {
-    unwrap(await apiCall('post', `/tasks/${encodeURIComponent(task.task_id)}/retry`))
-    await load({ silent: true })
-  } catch (requestError) {
-    error.value = requestError?.message || `重试“${task.title || task.task_id}”失败`
-  } finally {
-    const remainingRetryingTaskIds = new Set(retryingTaskIds.value)
-    remainingRetryingTaskIds.delete(task.task_id)
-    retryingTaskIds.value = remainingRetryingTaskIds
-  }
 }
 
 function formattedTime(value) {
@@ -439,25 +412,6 @@ onBeforeUnmount(clearHealthPoll)
             </tr>
           </tbody>
         </table>
-      </div>
-    </section>
-
-    <section v-if="failedTasks.length" class="panel">
-      <div class="section-heading">
-        <div class="section-title">失败任务 <span class="muted">{{ failedTasks.length }}</span></div>
-        <span class="source-caption">重试会将任务重新排入下载队列</span>
-      </div>
-      <div v-for="task in failedTasks" :key="task.task_id" class="source-actions">
-        <div>
-          <div class="source-name">{{ task.title || '未命名任务' }}</div>
-          <div class="source-error">{{ task.error || '下载失败' }}</div>
-        </div>
-        <button
-          class="source-action"
-          :disabled="taskIsRetrying(task)"
-          :aria-label="`重试任务 ${task.title || task.task_id}`"
-          @click="retryTask(task)"
-        >{{ taskIsRetrying(task) ? '重试中…' : '重试' }}</button>
       </div>
     </section>
 

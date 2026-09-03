@@ -79,16 +79,6 @@ const _hoisted_35 = {
 const _hoisted_36 = { class: "source-actions" };
 const _hoisted_37 = ["value", "disabled", "aria-label", "onChange"];
 const _hoisted_38 = ["disabled", "aria-label", "onClick"];
-const _hoisted_39 = {
-  key: 5,
-  class: "panel"
-};
-const _hoisted_40 = { class: "section-heading" };
-const _hoisted_41 = { class: "section-title" };
-const _hoisted_42 = { class: "muted" };
-const _hoisted_43 = { class: "source-name" };
-const _hoisted_44 = { class: "source-error" };
-const _hoisted_45 = ["disabled", "aria-label", "onClick"];
 
 const {computed,onBeforeUnmount,onMounted,ref} = await importShared('vue');
 
@@ -112,10 +102,8 @@ const loading = ref(true);
 const error = ref('');
 const sources = ref([]);
 const status = ref({});
-const tasks = ref([]);
 const healthCheckStarting = ref(false);
 const busySourceKeys = ref(new Set());
-const retryingTaskIds = ref(new Set());
 let healthPollTimer = null;
 let healthPollDeadline = 0;
 const apiCall = (method, path, payload) => {
@@ -136,14 +124,12 @@ async function load(options = {}) {
     error.value = '';
   }
   try {
-    const [statusResponse, sourceResponse, taskResponse] = await Promise.all([
+    const [statusResponse, sourceResponse] = await Promise.all([
       apiCall('get', '/status'),
       apiCall('get', '/sources'),
-      apiCall('get', '/tasks'),
     ]);
     status.value = unwrap(statusResponse);
     sources.value = unwrap(sourceResponse) || [];
-    tasks.value = unwrap(taskResponse) || [];
   } catch (loadError) {
     error.value = loadError?.message || '加载 LunaTV 状态失败';
   } finally {
@@ -286,16 +272,11 @@ const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'co
 const followupStatus = computed(() => status.value.followup_status || {});
 const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {});
 const mediaSyncStatus = computed(() => followupStatus.value.media_server_sync || {});
-const failedTasks = computed(() => tasks.value.filter((task) => task?.state === 'failed'));
 
 function followupSummary(item) {
   if (item?.running) return '进行中'
   if (!item?.finished_at) return '暂无记录'
   return `${item.success === false ? '失败' : '成功'} · ${formattedTime(item.finished_at)}`
-}
-
-function taskIsRetrying(task) {
-  return retryingTaskIds.value.has(task.task_id)
 }
 
 function sourceVisualStatus(source) {
@@ -327,24 +308,6 @@ function sourceHealthVisualStatus(source) {
 
 function sourceCheckedLabel(source) {
   return source?.check_state === 'pending' ? '等待本轮检查' : formattedTime(source?.last_checked)
-}
-
-async function retryTask(task) {
-  if (!task?.task_id || taskIsRetrying(task)) return
-  const nextRetryingTaskIds = new Set(retryingTaskIds.value);
-  nextRetryingTaskIds.add(task.task_id);
-  retryingTaskIds.value = nextRetryingTaskIds;
-  error.value = '';
-  try {
-    unwrap(await apiCall('post', `/tasks/${encodeURIComponent(task.task_id)}/retry`));
-    await load({ silent: true });
-  } catch (requestError) {
-    error.value = requestError?.message || `重试“${task.title || task.task_id}”失败`;
-  } finally {
-    const remainingRetryingTaskIds = new Set(retryingTaskIds.value);
-    remainingRetryingTaskIds.delete(task.task_id);
-    retryingTaskIds.value = remainingRetryingTaskIds;
-  }
 }
 
 function formattedTime(value) {
@@ -598,40 +561,12 @@ return (_ctx, _cache) => {
               ])
             ]))
     ]),
-    (failedTasks.value.length)
-      ? (_openBlock(), _createElementBlock("section", _hoisted_39, [
-          _createElementVNode("div", _hoisted_40, [
-            _createElementVNode("div", _hoisted_41, [
-              _cache[8] || (_cache[8] = _createTextVNode("失败任务 ", -1)),
-              _createElementVNode("span", _hoisted_42, _toDisplayString(failedTasks.value.length), 1)
-            ]),
-            _cache[9] || (_cache[9] = _createElementVNode("span", { class: "source-caption" }, "重试会将任务重新排入下载队列", -1))
-          ]),
-          (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(failedTasks.value, (task) => {
-            return (_openBlock(), _createElementBlock("div", {
-              key: task.task_id,
-              class: "source-actions"
-            }, [
-              _createElementVNode("div", null, [
-                _createElementVNode("div", _hoisted_43, _toDisplayString(task.title || '未命名任务'), 1),
-                _createElementVNode("div", _hoisted_44, _toDisplayString(task.error || '下载失败'), 1)
-              ]),
-              _createElementVNode("button", {
-                class: "source-action",
-                disabled: taskIsRetrying(task),
-                "aria-label": `重试任务 ${task.title || task.task_id}`,
-                onClick: $event => (retryTask(task))
-              }, _toDisplayString(taskIsRetrying(task) ? '重试中…' : '重试'), 9, _hoisted_45)
-            ]))
-          }), 128))
-        ]))
-      : _createCommentVNode("", true),
-    _cache[10] || (_cache[10] = _createStaticVNode("<section class=\"panel help-panel\" data-v-ca0e8a2e><div class=\"section-title\" data-v-ca0e8a2e>使用说明</div><div class=\"help-grid\" data-v-ca0e8a2e><p data-v-ca0e8a2e><strong data-v-ca0e8a2e>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-ca0e8a2e><strong data-v-ca0e8a2e>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-ca0e8a2e><strong data-v-ca0e8a2e>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-ca0e8a2e><strong data-v-ca0e8a2e>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-ca0e8a2e><strong data-v-ca0e8a2e>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-c34ab428><div class=\"section-title\" data-v-c34ab428>使用说明</div><div class=\"help-grid\" data-v-c34ab428><p data-v-c34ab428><strong data-v-c34ab428>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-c34ab428><strong data-v-c34ab428>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-c34ab428><strong data-v-c34ab428>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-c34ab428><strong data-v-c34ab428>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-c34ab428><strong data-v-c34ab428>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ca0e8a2e"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c34ab428"]]);
 
 export { AppPage as default };
