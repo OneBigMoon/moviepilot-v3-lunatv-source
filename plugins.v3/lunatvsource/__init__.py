@@ -208,6 +208,19 @@ _QUEUE_OWNER_REGISTRY_LOCK = sys.__dict__.setdefault(
 _MEDIA_SYNC_RETRY_LIMIT = 1
 _MEDIA_SYNC_RETRY_DELAY_SECONDS = 2.0
 _SUBSCRIPTION_PROGRESS_EVENT_SCENE = "lunatvsource_media_sync"
+_SUBSCRIPTION_PASSIVE_EVENT_SCENES = frozenset(
+    {
+        _SUBSCRIPTION_PROGRESS_EVENT_SCENE,
+        "backfill",
+        "download",
+        "download_note",
+        "episode_refresh",
+        "movie_download",
+        "precheck",
+        "progress",
+        "search_reset",
+    }
+)
 _MEDIA_SYNC_VISIBILITY_TIMEOUT_SECONDS = 60.0
 _MEDIA_SYNC_VISIBILITY_POLL_SECONDS = 1.0
 
@@ -7049,7 +7062,7 @@ class LunaTVSource(_PluginBase):
             if isinstance(event_data, dict)
             else getattr(event_data, "scene", "")
         )
-        if scene == _SUBSCRIPTION_PROGRESS_EVENT_SCENE:
+        if scene in _SUBSCRIPTION_PASSIVE_EVENT_SCENES:
             return
         if self._enabled:
             self._start_background(self.refresh_subscriptions)

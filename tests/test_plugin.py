@@ -139,6 +139,49 @@ def test_native_progress_events_do_not_restart_subscription_refresh(monkeypatch)
     assert refresh_starts == []
 
 
+@pytest.mark.parametrize(
+    "scene",
+    [
+        "backfill",
+        "download",
+        "download_note",
+        "episode_refresh",
+        "movie_download",
+        "precheck",
+        "progress",
+        "search_reset",
+    ],
+)
+def test_passive_subscription_events_do_not_restart_refresh(monkeypatch, scene):
+    plugin = LunaTVSource()
+    plugin._enabled = True
+    refresh_starts = []
+    monkeypatch.setattr(
+        plugin,
+        "_start_background",
+        lambda func: refresh_starts.append(func) or True,
+    )
+
+    plugin._on_subscribe_modified(SimpleNamespace(event_data={"scene": scene}))
+
+    assert refresh_starts == []
+
+
+def test_user_subscription_update_starts_refresh(monkeypatch):
+    plugin = LunaTVSource()
+    plugin._enabled = True
+    refresh_starts = []
+    monkeypatch.setattr(
+        plugin,
+        "_start_background",
+        lambda func: refresh_starts.append(func) or True,
+    )
+
+    plugin._on_subscribe_modified(SimpleNamespace(event_data={"scene": "update"}))
+
+    assert refresh_starts == [plugin.refresh_subscriptions]
+
+
 def test_service_registers_subscription_refresh_and_serial_queue():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "poll_minutes": 15, "queue_minutes": 2})
