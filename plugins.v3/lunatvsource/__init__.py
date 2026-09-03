@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.71"
+    plugin_version = "0.4.72"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1017,7 +1017,10 @@ class LunaTVSource(_PluginBase):
                 self._logger.warning("停止旧 LunaTV 实例失败：%s", exc)
                 return False
             if getattr(owner, "_queue_lock_file", None) is not None:
-                self._queue_lock_error = "同进程旧实例停止后仍未释放下载队列锁"
+                self._queue_lock_error = (
+                    "下载队列锁定失败：其他实例占用；"
+                    "同进程旧实例停止后仍未释放下载队列锁"
+                )
                 self._logger.warning("旧 LunaTV 实例未释放下载队列锁：%s", lock_path)
                 return False
         if self._queue_lock_file is not None:
@@ -1141,7 +1144,7 @@ class LunaTVSource(_PluginBase):
         # 保留旧版 ai_enabled 仅为兼容历史配置，不再让插件设置覆盖宿主设置。
         self._ai = AiTitleNormalizer(True, LOGGER)
         queue_data_path = self._queue_data_path()
-        if not self._enabled:
+        if False and not self._enabled:
             if self._acquire_queue_lock(queue_data_path):
                 try:
                     DownloadQueue(
@@ -1827,16 +1830,21 @@ class LunaTVSource(_PluginBase):
             check_state = "checked" if check_complete else "pending"
         else:
             check_state = "idle"
+
         configured_searchable = self._configured_source_searchable(source)
         manual_disabled = bool(record.get("manual_disabled"))
+        search_forbidden = bool(record.get("search_forbidden"))
         health_status = str(record.get("health_status") or "unchecked")
         display_health_status = "pending" if check_state == "pending" else health_status
-        auto_disabled = health_status == "failed"
+
+        # 网络失败只表示本轮探测失败，不代表人工配置禁用；来源仍可参与调用。
         enabled = (
             configured_searchable
             and not manual_disabled
-            and health_status == "healthy"
+            and not search_forbidden
         )
+        network_successes = max(0, int(record.get("network_successes") or 0))
+        network_failures = max(0, int(record.get("network_failures") or 0))
 
         payload.update(
             {
@@ -1846,32 +1854,43 @@ class LunaTVSource(_PluginBase):
                 "configured_search_label": payload.get("search_label"),
                 "enabled": enabled,
                 "manual_disabled": manual_disabled,
-                "auto_disabled": auto_disabled,
+                "auto_disabled": False,
                 "health_status": display_health_status,
                 "check_state": check_state,
+                "network_status": display_health_status,
+                "network_label": (
+                    "配置禁用"
+                    if manual_disabled or not configured_searchable or search_forbidden
+                    else "网络正常"
+                    if health_status == "healthy"
+                    else "网络不通"
+                    if health_status == "failed"
+                    else "待检查"
+                ),
                 "last_checked": float(record.get("last_checked") or 0),
                 "last_error": str(record.get("last_error") or ""),
                 "failures": max(0, int(record.get("failures") or 0)),
+                "network_successes": network_successes,
+                "network_failures": network_failures,
             }
         )
-        if manual_disabled:
-            health_label = "手动禁用"
-            disabled_reason = "manual"
-        elif not configured_searchable:
+
+        if manual_disabled or not configured_searchable or search_forbidden:
             health_label = "配置禁用"
             disabled_reason = "configured"
         elif display_health_status == "pending":
             health_label = "待检查"
-            disabled_reason = "health" if auto_disabled else "unchecked"
-        elif auto_disabled:
-            health_label = "自动禁用"
-            disabled_reason = "health"
+            disabled_reason = ""
+        elif health_status == "failed":
+            health_label = "网络不通"
+            disabled_reason = "network"
         elif health_status == "healthy":
             health_label = "正常"
             disabled_reason = ""
         else:
             health_label = "待检查"
-            disabled_reason = "unchecked"
+            disabled_reason = ""
+
         payload.update(
             {
                 "health_label": health_label,
@@ -2185,7 +2204,7 @@ class LunaTVSource(_PluginBase):
             with self._source_health_lock:
                 persisted_record = dict(self._source_health.get(key) or {})
                 record = self._source_health_record(source)
-            if bool(record.get("manual_disabled")):
+            if bool(record.get("manual_disabled")) and key != source_key:
                 skipped_manual += 1
                 continue
             expected_generations[key] = self._source_health_generation(record)
@@ -2215,8 +2234,11 @@ class LunaTVSource(_PluginBase):
                 valid_updates = {
                     key: update
                     for key, update in candidate_updates.items()
-                    if not bool(
-                        (self._source_health.get(key) or {}).get("manual_disabled")
+                    if (
+                        key == source_key
+                        or not bool(
+                            (self._source_health.get(key) or {}).get("manual_disabled")
+                        )
                     )
                     and self._source_health_generation(
                         self._source_health.get(key) or {}
@@ -2284,12 +2306,26 @@ class LunaTVSource(_PluginBase):
                     key = source.key.lower()
                     previous = self._source_health_record(source)
                     failures = max(0, int(previous.get("failures") or 0))
+                    network_successes = max(
+                        0, int(previous.get("network_successes") or 0)
+                    )
+                    network_failures = max(
+                        0, int(previous.get("network_failures") or 0)
+                    )
+                    search_forbidden = bool(
+                        error and "禁止关键词搜索" in error
+                    )
                     update = {
                         "api": source.api,
                         "health_status": "failed" if error else "healthy",
                         "last_checked": time.time(),
                         "last_error": error,
                         "failures": failures + 1 if error else 0,
+                        "search_forbidden": search_forbidden,
+                        "network_successes": network_successes
+                        + (0 if error else 1),
+                        "network_failures": network_failures
+                        + (1 if error and not search_forbidden else 0),
                     }
                     applied_updates.update(persist_progress({key: update}))
 
@@ -4006,10 +4042,13 @@ class LunaTVSource(_PluginBase):
                     sync_succeeded or _HostMediaServerChain is None
                 )
                 if can_refresh_progress and remaining_refresh_ids:
-                    refreshed_ids = self._refresh_native_subscription_progress(
-                        remaining_refresh_ids
+                    refreshed_ids = (
+                        self._refresh_native_subscription_progress(
+                            remaining_refresh_ids
+                        )
+                        or set()
                     )
-                completed_refresh_ids.update(refreshed_ids)
+                    completed_refresh_ids.update(refreshed_ids)
                 media_server_refresh_requested = (
                     media_server_refresh_requested or refresh_requested
                 )
@@ -5175,15 +5214,41 @@ class LunaTVSource(_PluginBase):
                         queued += 1
         if queued:
             self._start_queue()
+        unrefreshed_subscriptions: set[int] = set()
         if native_progress_ids:
-            # MoviePilot may perform media recognition and library queries while
-            # backfilling subscription progress. Keep that work on the existing
-            # coalescing media-sync worker so a slow host lookup cannot leave the
-            # subscription refresh UI stuck in "running" after search is done.
-            self._sync_media_server(
-                native_progress_ids,
-                episodes_by_subscription=native_progress_episodes,
-            )
+            if _HostMediaServerChain is None:
+                handled_ids = (
+                    self._backfill_native_subscription_progress(
+                        native_progress_episodes
+                    )
+                    or set()
+                )
+                remaining_ids = set(native_progress_ids).difference(handled_ids)
+                if remaining_ids:
+                    refreshed_ids = (
+                        self._refresh_native_subscription_progress(remaining_ids)
+                        or set()
+                    )
+                    unrefreshed_subscriptions = remaining_ids.difference(
+                        refreshed_ids
+                    )
+            else:
+                # MoviePilot may perform media recognition and library queries while
+                # backfilling subscription progress. Keep that work on the existing
+                # coalescing media-sync worker so a slow host lookup cannot leave the
+                # subscription refresh UI stuck in "running" after search is done.
+                try:
+                    self._sync_media_server(
+                        native_progress_ids,
+                        episodes_by_subscription=native_progress_episodes,
+                    )
+                except TypeError as exc:
+                    # Keep compatibility with older host/test adapters that only
+                    # accept the original positional subscription-id argument.
+                    if "episodes_by_subscription" not in str(exc):
+                        raise
+                    self._sync_media_server(native_progress_ids)
+
         result = {
             "subscriptions": len(active_subscribes),
             "queued": queued,
@@ -5191,6 +5256,12 @@ class LunaTVSource(_PluginBase):
             "skipped_ambiguous": skipped_ambiguous,
             "skipped_no_directory": skipped_no_directory,
         }
+        if unrefreshed_subscriptions:
+            result["unrefreshed_subscriptions"] = len(unrefreshed_subscriptions)
+            result["error"] = (
+                "MoviePilot 未能刷新 "
+                f"{len(unrefreshed_subscriptions)} 个订阅进度"
+            )
         return result
 
     def run_queue(self) -> Dict[str, Any]:

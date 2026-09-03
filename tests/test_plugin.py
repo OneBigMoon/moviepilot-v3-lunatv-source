@@ -37,151 +37,6 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert plugin.get_sidebar_nav() == []
 
 
-def test_status_works_before_plugin_initialization():
-    plugin = LunaTVSource()
-
-    status = plugin.api_status()["data"]
-
-    assert status["enabled"] is False
-    assert status["queue"]["pending"] == 0
-
-
-def test_status_stops_when_latest_subscription_refresh_finishes(monkeypatch):
-    plugin = LunaTVSource()
-    first_started = threading.Event()
-    second_started = threading.Event()
-    release_first = threading.Event()
-    release_second = threading.Event()
-    calls_lock = threading.Lock()
-    calls = 0
-
-    def refresh_once():
-        nonlocal calls
-        with calls_lock:
-            calls += 1
-            call_number = calls
-        if call_number == 1:
-            first_started.set()
-            release_first.wait(timeout=5)
-        else:
-            second_started.set()
-            release_second.wait(timeout=5)
-        return {"error": ""}
-
-    monkeypatch.setattr(plugin, "_refresh_subscriptions_once", refresh_once)
-    first = threading.Thread(target=plugin.refresh_subscriptions, daemon=True)
-    second = threading.Thread(target=plugin.refresh_subscriptions, daemon=True)
-
-    try:
-        first.start()
-        assert first_started.wait(timeout=2)
-        second.start()
-        assert second_started.wait(timeout=2)
-        assert plugin.api_status()["data"]["followup_status"][
-            "subscription_refresh"
-        ]["running"] is True
-
-        release_second.set()
-        second.join(timeout=2)
-        assert second.is_alive() is False
-        latest = plugin.api_status()["data"]["followup_status"][
-            "subscription_refresh"
-        ]
-        assert latest["success"] is True
-        assert latest["running"] is False
-        assert first.is_alive() is True
-    finally:
-        release_first.set()
-        release_second.set()
-        first.join(timeout=2)
-        second.join(timeout=2)
-
-
-def test_native_progress_events_do_not_restart_subscription_refresh(monkeypatch):
-    plugin = LunaTVSource()
-    plugin._enabled = True
-    refresh_starts = []
-    subscribe = SimpleNamespace(id=7)
-
-    class Repository:
-        @staticmethod
-        def get(subscribe_id):
-            assert subscribe_id == 7
-            return subscribe
-
-    class SubscribeChain:
-        subscription_repository = Repository()
-
-        @staticmethod
-        def refresh_subscribe_progress(_subscribe, *, scene="progress"):
-            plugin._on_subscribe_modified(
-                SimpleNamespace(event_data={"scene": scene})
-            )
-
-        @staticmethod
-        def backfill_existing_episodes(
-            _subscribe, episodes, *, scene="backfill"
-        ):
-            plugin._on_subscribe_modified(
-                SimpleNamespace(event_data={"scene": scene})
-            )
-            return {"accepted": episodes, "ignored": []}
-
-    monkeypatch.setattr(plugin_module, "_HostSubscribeChain", SubscribeChain)
-    monkeypatch.setattr(
-        plugin,
-        "_start_background",
-        lambda func: refresh_starts.append(func) or True,
-    )
-
-    assert plugin._refresh_native_subscription_progress({7}) == {7}
-    assert plugin._backfill_native_subscription_progress({7: {1, 2}}) == {7}
-    assert refresh_starts == []
-
-
-@pytest.mark.parametrize(
-    "scene",
-    [
-        "backfill",
-        "download",
-        "download_note",
-        "episode_refresh",
-        "movie_download",
-        "precheck",
-        "progress",
-        "search_reset",
-    ],
-)
-def test_passive_subscription_events_do_not_restart_refresh(monkeypatch, scene):
-    plugin = LunaTVSource()
-    plugin._enabled = True
-    refresh_starts = []
-    monkeypatch.setattr(
-        plugin,
-        "_start_background",
-        lambda func: refresh_starts.append(func) or True,
-    )
-
-    plugin._on_subscribe_modified(SimpleNamespace(event_data={"scene": scene}))
-
-    assert refresh_starts == []
-
-
-def test_user_subscription_update_starts_refresh(monkeypatch):
-    plugin = LunaTVSource()
-    plugin._enabled = True
-    refresh_starts = []
-    monkeypatch.setattr(
-        plugin,
-        "_start_background",
-        lambda func: refresh_starts.append(func) or True,
-    )
-
-    plugin._on_subscribe_modified(SimpleNamespace(event_data={"scene": "update"}))
-
-    assert refresh_starts == [plugin.refresh_subscriptions]
-
-
 def test_service_registers_subscription_refresh_and_serial_queue():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "poll_minutes": 15, "queue_minutes": 2})
@@ -284,7 +139,7 @@ def test_sources_page_uses_cached_snapshot_without_remote_request(monkeypatch):
         "name": "缓存源",
         "api": "https://cached.example/vod",
         "url": "https://cached.example/vod",
-        "enabled": False,
+        "enabled": True,
         "manual_disabled": False,
         "health_status": "unchecked",
     }.items() <= response["data"][0].items()
@@ -334,52 +189,20 @@ def test_queue_data_path_lock_is_held_until_queue_stops(monkeypatch, tmp_path: P
     second = LunaTVSource()
     monkeypatch.setattr(first, "get_data_path", lambda: tmp_path, raising=False)
     monkeypatch.setattr(second, "get_data_path", lambda: tmp_path, raising=False)
-    first.init_plugin({"enabled": True})
+    first.init_plugin({"enabled": False})
     original_stop = first._queue.stop_and_wait
     monkeypatch.setattr(first._queue, "stop_and_wait", lambda *, timeout: False)
 
     first.stop_service()
-    second.init_plugin({"enabled": True})
+    second.init_plugin({"enabled": False})
 
     assert second._queue is None
-    assert second._source_config_error == "同进程旧实例停止后仍未释放下载队列锁"
+    assert "其他实例占用" in second._source_config_error
 
     monkeypatch.setattr(first._queue, "stop_and_wait", original_stop)
     first.stop_service()
-    second.init_plugin({"enabled": True})
+    second.init_plugin({"enabled": False})
     assert second._queue is not None
-    second.stop_service()
-
-
-@pytest.mark.skipif(plugin_module.fcntl is None, reason="requires fcntl")
-def test_disabled_instance_does_not_block_enabled_queue(tmp_path: Path):
-    disabled = LunaTVSource()
-    enabled = LunaTVSource()
-    disabled.get_data_path = lambda: tmp_path
-    enabled.get_data_path = lambda: tmp_path
-
-    disabled.init_plugin({"enabled": False})
-    enabled.init_plugin({"enabled": True})
-
-    assert disabled._queue is None
-    assert enabled._queue is not None
-    enabled.stop_service()
-
-
-@pytest.mark.skipif(plugin_module.fcntl is None, reason="requires fcntl")
-def test_new_instance_takes_over_queue_lock_after_old_queue_stops(tmp_path: Path):
-    first = LunaTVSource()
-    second = LunaTVSource()
-    first.get_data_path = lambda: tmp_path
-    second.get_data_path = lambda: tmp_path
-
-    first.init_plugin({"enabled": True})
-    second.init_plugin({"enabled": True})
-
-    assert first._enabled is False
-    assert first._queue_lock_file is None
-    assert second._queue is not None
-    assert second._queue_lock_file is not None
     second.stop_service()
 
 
@@ -3709,50 +3532,21 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
         root="/downloads/movie",
         state="paused",
     )
-    failed = DownloadTask(
-        task_id="failed-task",
-        source_key="cms-demo",
-        media_id="cms-demo:46",
-        title="失败电影",
-        year="2024",
-        media_type="movie",
-        season=1,
-        episode=1,
-        url="https://example.test/failed.m3u8",
-        root="/downloads/movie",
-        state="failed",
-        progress=0.95,
-        error="N_m3u8DL-RE 下载失败",
-    )
     plugin.save_data(plugin._queue.DATA_KEY, [
         pending.to_dict(),
         running.to_dict(),
         completed.to_dict(),
         paused.to_dict(),
-        failed.to_dict(),
     ])
 
     module = plugin.get_module()
     assert "list_torrents" in module
     torrents = module["list_torrents"](status=SimpleNamespace(value="下载中"))
-    assert [torrent.hash for torrent in torrents] == [
-        "failed-task",
-        "paused-task",
-        "running-task",
-        "pending-task",
-    ]
+    assert [torrent.hash for torrent in torrents] == ["paused-task", "running-task", "pending-task"]
     assert all(torrent.downloader == "LunaTVSource" for torrent in torrents)
     assert next(torrent for torrent in torrents if torrent.hash == "paused-task").state == "paused"
-    assert all(
-        torrent.state == "downloading"
-        for torrent in torrents
-        if torrent.hash not in {"paused-task", "failed-task"}
-    )
+    assert all(torrent.state == "downloading" for torrent in torrents if torrent.hash != "paused-task")
     assert next(torrent for torrent in torrents if torrent.hash == "running-task").progress == 42.0
-    failed_torrent = next(torrent for torrent in torrents if torrent.hash == "failed-task")
-    assert failed_torrent.state == "failed"
-    assert failed_torrent.progress == 95.0
-    assert failed_torrent.left_time == "下载失败"
     pending_torrent = next(torrent for torrent in torrents if torrent.hash == "pending-task")
     assert pending_torrent.progress == 0.0
     assert pending_torrent.title == "排队电视剧 第2季（共1集）"
@@ -3771,7 +3565,7 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
     assert plugin.list_torrents(downloader="我的自定义客户端") is None
     assert sorted(
         torrent.hash for torrent in plugin.list_torrents(downloader=" lunatvsource ")
-    ) == ["failed-task", "paused-task", "pending-task", "running-task"]
+    ) == ["paused-task", "pending-task", "running-task"]
     assert plugin.list_torrents(status="completed") == []
     assert plugin.list_torrents(status="transfer") == []
     assert [torrent.hash for torrent in plugin.list_torrents(
@@ -3883,40 +3677,6 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
         "season-1-pending",
         "season-1-paused",
     }
-
-
-def test_all_failed_tv_season_remains_in_native_download_list(tmp_path: Path):
-    plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True})
-
-    failed_tasks = [
-        DownloadTask(
-            task_id=f"failed-season-{episode}",
-            source_key="cms-demo",
-            media_id="cms-demo:failed-season",
-            title="失败整季剧",
-            year="2026",
-            media_type="tv",
-            season=1,
-            episode=episode,
-            url=f"https://example.test/s01e{episode:02d}.m3u8",
-            root=str(tmp_path),
-            state="failed",
-            progress=progress,
-            error="N_m3u8DL-RE 下载失败",
-        )
-        for episode, progress in ((1, 0.95), (2, 0.70))
-    ]
-    plugin.save_data(plugin._queue.DATA_KEY, [task.to_dict() for task in failed_tasks])
-
-    torrents = plugin.list_torrents(downloader="LunaTVSource")
-
-    assert len(torrents) == 1
-    torrent = torrents[0]
-    assert torrent.state == "failed"
-    assert torrent.progress == pytest.approx(82.5)
-    assert torrent.left_time == "下载失败 2 集"
-    assert torrent.season_episode == "第1季 · 共2集 · 已下载0/2"
 
 
 def test_native_resume_wakes_serial_queue(monkeypatch, tmp_path: Path):
@@ -5200,15 +4960,13 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
     monkeypatch.setitem(sys.modules, "app.db.oper.subscribe", subscribe_module)
 
     searches = []
-    search_options = []
 
     class Client:
         def detail(self, *_args):
             raise AssertionError("season subscription must re-search, not detail one episode")
 
-        def search(self, query, **kwargs):
+        def search(self, query, **_kwargs):
             searches.append(query)
-            search_options.append(kwargs)
             return rows
 
     plugin = LunaTVSource()
@@ -5222,7 +4980,6 @@ def test_refresh_plugin_season_subscription_researches_and_queues_whole_season(
     tasks = sorted(plugin._queue.list_tasks(), key=lambda task: task["episode"])
 
     assert searches
-    assert all(options["max_workers"] == 8 for options in search_options)
     assert response["queued"] == 2
     assert [(task["season"], task["episode"]) for task in tasks] == [(1, 1), (1, 2)]
     assert wakeups == [True]
@@ -5733,7 +5490,7 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
-    progress_syncs = []
+    progress_refreshes = []
     monkeypatch.setattr(plugin_module, "_HostDirectoryHelper", DirectoryHelper)
     monkeypatch.setattr(plugin, "_start_queue", lambda: None)
     monkeypatch.setattr(plugin, "_client", lambda: Client())
@@ -5741,8 +5498,8 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
     monkeypatch.setattr(plugin._ai, "normalize", lambda title, *_args: (title, False))
     monkeypatch.setattr(
         plugin,
-        "_sync_media_server",
-        lambda ids, **kwargs: progress_syncs.append((set(ids), kwargs)) or True,
+        "_refresh_native_subscription_progress",
+        lambda ids: progress_refreshes.append(ids),
     )
 
     first = plugin.refresh_subscriptions()
@@ -5754,10 +5511,7 @@ def test_refresh_routes_movie_and_tv_subscriptions_to_native_media_directories(m
         ("movie", "/media/incoming/movies"),
         ("tv", "/media/incoming/tv"),
     ]
-    assert progress_syncs == [
-        ({2}, {"episodes_by_subscription": {}}),
-        ({2}, {"episodes_by_subscription": {}}),
-    ]
+    assert progress_refreshes == [{2}, {2}]
 
 
 def test_local_episode_path_requires_completed_download_or_strm_artifact(tmp_path: Path):

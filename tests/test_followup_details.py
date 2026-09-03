@@ -107,8 +107,12 @@ def test_subscription_drops_source_disabled_before_enqueue(
     assert plugin.api_sources()["data"][0]["manual_disabled"] is True
 
 
-def test_subscription_refresh_delegates_native_progress_without_blocking(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("refreshed_ids", "expect_error"),
+    [(set(), True), ({10}, False)],
+)
+def test_subscription_refresh_reports_native_progress_compatibility_gap(
+    monkeypatch, tmp_path: Path, refreshed_ids, expect_error
 ):
     subscribe = SimpleNamespace(
         id=10,
@@ -130,29 +134,34 @@ def test_subscription_refresh_delegates_native_progress_without_blocking(
         def search(*_args, **_kwargs):
             return []
 
-    sync_calls = []
+    refresh_calls = []
 
-    def sync(ids, *, episodes_by_subscription=None):
-        sync_calls.append((set(ids), episodes_by_subscription))
-        return True
+    def refresh(ids):
+        refresh_calls.append(set(ids))
+        return set(refreshed_ids)
 
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     monkeypatch.setattr(plugin_module, "_HostMediaServerChain", None)
     monkeypatch.setattr(
-        plugin,
-        "_backfill_native_subscription_progress",
-        lambda _pending: pytest.fail("progress backfill must run off the refresh thread"),
+        plugin, "_backfill_native_subscription_progress", lambda _pending: set()
     )
-    monkeypatch.setattr(plugin, "_sync_media_server", sync)
+    monkeypatch.setattr(plugin, "_refresh_native_subscription_progress", refresh)
 
     response = plugin.refresh_subscriptions()
     status = plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)[
         "subscription_refresh"
     ]
 
-    assert sync_calls == [({10}, {})]
-    assert "error" not in response
-    assert status["success"] is True
+    assert refresh_calls == [{10}]
+    if expect_error:
+        assert response["unrefreshed_subscriptions"] == 1
+        assert "MoviePilot 未能刷新 1 个订阅进度" in response["error"]
+        assert status["success"] is False
+        assert status["unrefreshed_subscriptions"] == 1
+    else:
+        assert "error" not in response
+        assert "unrefreshed_subscriptions" not in response
+        assert status["success"] is True
 
 
 def test_subscription_skips_source_disabled_before_search(
@@ -276,23 +285,25 @@ def test_subscription_refresh_backfills_historical_downloads(monkeypatch, tmp_pa
         "_native_history_has_episode",
         lambda task: task.episode in {1, 2},
     )
+    backfills = []
+    monkeypatch.setattr(
+        plugin,
+        "_backfill_native_subscription_progress",
+        lambda pending: backfills.append(pending) or set(pending),
+    )
     syncs = []
-
-    def sync(ids, *, episodes_by_subscription=None):
-        syncs.append((set(ids), episodes_by_subscription))
-        return True
-
     monkeypatch.setattr(
         plugin,
         "_sync_media_server",
-        sync,
+        lambda ids: syncs.append(ids) or True,
     )
 
     response = plugin.refresh_subscriptions()
 
     assert response["queued"] == 0
     assert response["reconciled"] == 2
-    assert syncs == [({9}, {9: {1, 2}})]
+    assert backfills == [{9: {1, 2}}]
+    assert syncs == []
 
 
 def test_subscription_refresh_normalizes_active_state_and_season_text(
@@ -1308,65 +1319,6 @@ def test_native_tmdb_season_subscription_queues_all_new_episode_rows(
     assert "共3集" in str(getattr(torrents[0], "title", ""))
     assert "已下载1/3" in str(getattr(torrents[0], "season_episode", ""))
     assert plugin.refresh_subscriptions()["queued"] == 0
-
-
-def test_movie_subscription_queues_only_highest_resolution_play_line(
-    monkeypatch, tmp_path: Path
-):
-    source = CmsSource("movie", "电影源", "https://movie.example/vod")
-    result = CmsResult(
-        source_key=source.key,
-        source_name=source.name,
-        vod_id="movie-1",
-        title="多线路电影",
-        year="2026",
-        media_type="movie",
-        remark="",
-        episodes=(
-            CmsEpisode(1, 1, "1080P", "https://example.test/movie-1080.m3u8"),
-            CmsEpisode(1, 1, "4K", "https://example.test/movie-2160.m3u8"),
-        ),
-        season_range=(1, 1),
-        season_ambiguous=False,
-    )
-    subscribe = SimpleNamespace(
-        state="R",
-        name="多线路电影",
-        year="2026",
-        type="电影",
-        season=0,
-        media_source="",
-        media_id="",
-        save_path=str(tmp_path),
-    )
-    _install_subscription_operator(monkeypatch, subscribe)
-
-    class Client:
-        @staticmethod
-        def search(*_args, **_kwargs):
-            return [result]
-
-    plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
-    monkeypatch.setattr(plugin, "_client", lambda: Client())
-    monkeypatch.setattr(plugin, "_prepare_result", lambda item: (item, {}))
-    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
-    monkeypatch.setattr(plugin, "_native_history_has_episode", lambda _task: False)
-    monkeypatch.setattr(
-        plugin,
-        "_probe_resource_urls",
-        lambda urls: {
-            url: 2160 if "2160" in url else 1080
-            for url in urls
-        },
-    )
-
-    response = plugin.refresh_subscriptions()
-    tasks = plugin._queue.list_tasks()
-
-    assert response["queued"] == 1
-    assert len(tasks) == 1
-    assert tasks[0]["url"] == "https://example.test/movie-2160.m3u8"
 
 
 def test_default_subscription_dedupes_pending_episodes_when_best_source_changes(

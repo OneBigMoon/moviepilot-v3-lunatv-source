@@ -139,8 +139,13 @@ async function setSourceEnabled(source, enabled) {
   }
 }
 
+function setSourceConfig(source, event) {
+  const value = event?.target?.value
+  setSourceEnabled(source, value === 'enabled')
+}
+
 async function recheckSource(source) {
-  if (!source?.key || sourceIsBusy(source) || sourceHealth.value.running) return
+  if (!source?.key || sourceIsBusy(source)) return
   const nextBusyKeys = new Set(busySourceKeys.value)
   nextBusyKeys.add(source.key)
   busySourceKeys.value = nextBusyKeys
@@ -331,7 +336,7 @@ onBeforeUnmount(clearHealthPoll)
     <section class="panel">
       <div class="section-heading">
         <div class="section-title">资源站数量 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
-        <span class="source-caption">打开页面仅读取缓存；搜索仅使用健康且已启用的来源</span>
+        <span class="source-caption">打开页面仅读取缓存；搜索会跳过“配置禁用”的来源，网络不通的来源仍会尝试调用</span>
       </div>
       <div v-if="!loading && sources.length" :class="['health-overview', { 'is-running': sourceHealth.running }]">
         <div class="health-progress-block">
@@ -381,7 +386,12 @@ onBeforeUnmount(clearHealthPoll)
                   <span :class="['health-state', `is-${sourceHealthVisualStatus(source)}`]">
                     {{ source.health_label || '未检查' }}
                   </span>
-                  <span v-if="source.last_error && source.check_state !== 'pending'" class="source-error" :title="source.last_error">{{ source.last_error }}</span>
+                                    <div class="network-metrics">
+                    <span>{{ source.network_label || '待检查' }}</span>
+                    <span>成功 {{ source.network_successes || 0 }} 次</span>
+                    <span>失败 {{ source.network_failures || 0 }} 次</span>
+                  </div>
+<span v-if="source.last_error && source.check_state !== 'pending'" class="source-error" :title="source.last_error">{{ source.last_error }}</span>
                 </div>
               </td>
               <td>
@@ -408,20 +418,23 @@ onBeforeUnmount(clearHealthPoll)
               <td><span :class="{ 'pending-time': source.check_state === 'pending' }">{{ sourceCheckedLabel(source) }}</span></td>
               <td>
                 <div class="source-actions">
-                  <button
-                    class="source-action"
-                    :disabled="sourceIsBusy(source) || sourceHealth.running"
-                    :aria-label="`${source.manual_disabled ? '重新启用' : '永久停用'}来源 ${source.name || source.key}`"
-                    @click="setSourceEnabled(source, source.manual_disabled)"
-                  >{{ sourceIsBusy(source) ? '处理中…' : (source.manual_disabled ? '重新启用' : '永久停用') }}</button>
-                  <button
-                    v-if="!source.manual_disabled && !source.enabled && source.disabled_reason !== 'configured'"
-                    class="source-action"
-                    :disabled="sourceIsBusy(source) || sourceHealth.running"
-                    :aria-label="`立即复检来源 ${source.name || source.key}`"
-                    @click="recheckSource(source)"
-                  >立即复检</button>
-                </div>
+  <select
+    class="source-config-select"
+    :value="source.manual_disabled ? 'disabled' : 'enabled'"
+    :disabled="sourceIsBusy(source)"
+    :aria-label="'配置' + (source.name || source.key) + '来源'"
+    @change="setSourceConfig(source, $event)"
+  >
+    <option value="enabled">配置启用</option>
+    <option value="disabled">配置禁用</option>
+  </select>
+  <button
+    class="source-action"
+    :disabled="sourceIsBusy(source)"
+    :aria-label="'测试来源 ' + (source.name || source.key)"
+    @click="recheckSource(source)"
+  >{{ sourceIsBusy(source) ? '测试中…' : '测试' }}</button>
+</div>
               </td>
             </tr>
           </tbody>
@@ -519,6 +532,25 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .health-state.is-healthy, .health-state.is-ready { color: rgb(var(--v-theme-success, 76, 175, 80)); }
 .health-state.is-unhealthy, .health-state.is-error, .health-state.is-failed { color: rgb(var(--v-theme-error, 244, 67, 54)); }
 .health-state.is-warning, .health-state.is-degraded { color: rgb(var(--v-theme-warning, 251, 140, 0)); }
+.network-metrics {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 11px;
+}
+.source-config-select {
+  min-width: 92px;
+  border: 1px solid rgba(var(--v-theme-primary, 139, 92, 246), .6);
+  border-radius: 8px;
+  padding: 6px 8px;
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  background: rgba(var(--v-theme-surface, 23, 23, 34), 1);
+  font: inherit;
+}
+.source-config-select:disabled {
+  opacity: .55;
+}
 .source-error { color: rgb(var(--v-theme-error, 244, 67, 54)); font-size: 12px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-state { padding: 3px 8px; color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-primary, 139, 92, 246), .14); }
 .search-state.is-unavailable { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-error, 244, 67, 54), .16); }

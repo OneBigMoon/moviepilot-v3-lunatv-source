@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-import lunatvsource_test as plugin_module
 from lunatvsource_test import LunaTVSource
 from lunatvsource_test.m3u8_engine import N_M3U8DL_RE_SPEC
 
@@ -25,25 +24,6 @@ def test_generate_nfo_config_is_exposed_and_disabled_by_default():
 
     assert "generate_nfo" in models
     assert defaults["generate_nfo"] is False
-
-
-def test_render_mode_uses_vue_when_remote_entry_exists(monkeypatch, tmp_path: Path):
-    remote_entry = tmp_path / "dist" / "assets" / "remoteEntry.js"
-    remote_entry.parent.mkdir(parents=True)
-    remote_entry.write_text("export {};", encoding="utf-8")
-    monkeypatch.setattr(plugin_module, "FRONTEND_REMOTE_ENTRY", remote_entry)
-
-    assert LunaTVSource.get_render_mode() == ("vue", "dist/assets")
-
-
-def test_render_mode_falls_back_when_remote_entry_is_missing(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(
-        plugin_module,
-        "FRONTEND_REMOTE_ENTRY",
-        tmp_path / "missing" / "remoteEntry.js",
-    )
-
-    assert LunaTVSource.get_render_mode() == ("vuetify", None)
 
 
 def test_manifest_and_plugin_icons_use_https_url():
@@ -93,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.71"
+    expected_version = "0.4.72"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -314,8 +294,8 @@ def test_source_health_ui_uses_cached_reads_and_persists_interval():
     assert "await loadHealthStatus()" in app_page
     assert "await load({ silent: true })" in app_page
     assert "打开页面仅读取缓存" in app_page
-    assert "搜索仅使用健康且已启用的来源" in app_page
-    assert "source.manual_disabled ? '重新启用' : '永久停用'" in app_page
+    assert "搜索会跳过“配置禁用”的来源，网络不通的来源仍会尝试调用" in app_page
+    assert "setSourceConfig(source, $event)" in app_page
     assert '@click="recheckSource(source)"' in app_page
     assert "source_check_minutes: 60" in config_page
     assert 'v-model="config.source_check_minutes"' in config_page

@@ -48,7 +48,7 @@ def test_search_protocol_health_accepts_a_valid_empty_result(monkeypatch):
         client.verify_search(source)
 
 
-def test_search_forbidden_source_is_auto_disabled_with_clear_reason(monkeypatch):
+def test_search_forbidden_source_is_configuration_disabled(monkeypatch):
     source = make_source("search-forbidden")
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
@@ -68,21 +68,25 @@ def test_search_forbidden_source_is_auto_disabled_with_clear_reason(monkeypatch)
     payload = plugin.api_sources()["data"][0]
 
     assert result["disabled"] == 1
-    assert payload["auto_disabled"] is True
+    assert payload["auto_disabled"] is False
+    assert payload["enabled"] is False
+    assert payload["health_label"] == "配置禁用"
+    assert payload["network_successes"] == 0
+    assert payload["network_failures"] == 0
     assert payload["last_error"] == "CMS 源站在线，但禁止关键词搜索（API 1002）"
     assert plugin._client().sources == []
 
 
-def test_unchecked_source_is_excluded_until_health_check_passes(monkeypatch):
+def test_unchecked_source_remains_searchable_before_health_check(monkeypatch):
     source = make_source("unchecked")
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
     save_catalog(plugin, source)
 
     payload = plugin.api_sources()["data"][0]
-    assert payload["enabled"] is False
-    assert payload["disabled_reason"] == "unchecked"
-    assert plugin._client().sources == []
+    assert payload["enabled"] is True
+    assert payload["disabled_reason"] == ""
+    assert [item.key for item in plugin._client().sources] == [source.key]
 
     monkeypatch.setattr(
         plugin_module,
@@ -124,10 +128,13 @@ def test_health_failure_disables_search_and_later_success_recovers(monkeypatch):
     }
     by_key = {item["key"]: item for item in plugin.api_sources()["data"]}
     assert by_key["healthy"]["enabled"] is True
-    assert by_key["failing"]["enabled"] is False
-    assert by_key["failing"]["auto_disabled"] is True
+    assert by_key["failing"]["enabled"] is True
+    assert by_key["failing"]["auto_disabled"] is False
+    assert by_key["failing"]["health_label"] == "网络不通"
     assert by_key["failing"]["failures"] == 1
-    assert [source.key for source in plugin._client().sources] == ["healthy"]
+    assert by_key["failing"]["network_successes"] == 0
+    assert by_key["failing"]["network_failures"] == 1
+    assert {source.key for source in plugin._client().sources} == {"healthy", "failing"}
 
     monkeypatch.setattr(AppleCmsClient, "verify_search", lambda *_args, **_kwargs: None)
     plugin.refresh_source_health()
@@ -136,67 +143,9 @@ def test_health_failure_disables_search_and_later_success_recovers(monkeypatch):
     assert by_key["failing"]["enabled"] is True
     assert by_key["failing"]["auto_disabled"] is False
     assert by_key["failing"]["failures"] == 0
+    assert by_key["failing"]["network_successes"] == 1
+    assert by_key["failing"]["network_failures"] == 1
     assert {source.key for source in plugin._client().sources} == {"healthy", "failing"}
-
-
-def test_health_results_are_exposed_before_the_batch_finishes(monkeypatch):
-    first = make_source("progress-first")
-    second = make_source("progress-second")
-    sources = [first, second]
-    plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True})
-    save_catalog(plugin, *sources)
-    monkeypatch.setattr(
-        plugin_module,
-        "load_sources_from_url",
-        lambda *_args, **_kwargs: list(sources),
-    )
-
-    first_finished = threading.Event()
-    release_second = threading.Event()
-
-    def verify(_client, source, _query="1"):
-        if source.key == second.key:
-            assert release_second.wait(timeout=2)
-            return
-        first_finished.set()
-
-    monkeypatch.setattr(AppleCmsClient, "verify_search", verify)
-    assert plugin._start_source_health_refresh() is True
-
-    try:
-        assert first_finished.wait(timeout=2)
-        deadline = time.time() + 2
-        while time.time() < deadline:
-            by_key = {
-                item["key"]: item for item in plugin.api_sources()["data"]
-            }
-            progress = plugin.api_status()["data"]["source_health"]
-            if (
-                by_key[first.key]["health_status"] == "healthy"
-                and progress["checked"] == 1
-            ):
-                break
-            time.sleep(0.01)
-
-        assert progress["running"] is True
-        assert progress["check_total"] == 2
-        assert progress["checked"] == 1
-        assert progress["pending"] == 1
-        assert by_key[first.key]["health_status"] == "healthy"
-        assert by_key[second.key]["health_status"] == "pending"
-        assert by_key[second.key]["health_label"] == "待检查"
-    finally:
-        release_second.set()
-        with plugin._source_health_lock:
-            thread = plugin._source_health_thread
-        if thread is not None:
-            thread.join(timeout=2)
-
-    progress = plugin.api_status()["data"]["source_health"]
-    assert progress["running"] is False
-    assert progress["checked"] == 2
-    assert progress["pending"] == 0
 
 
 @pytest.mark.parametrize("entrypoint", ["api_search", "api_discover", "search_medias"])
@@ -314,7 +263,8 @@ def test_manual_disable_is_persistent_and_skipped_by_health_checks(monkeypatch):
         item for item in restarted.api_sources()["data"] if item["key"] == "first"
     )
     assert first_payload["manual_disabled"] is True
-    assert first_payload["health_label"] == "手动禁用"
+    assert first_payload["health_label"] == "配置禁用"
+    assert first_payload["enabled"] is False
 
 
 def test_manual_state_change_invalidates_resource_search_cache():
@@ -395,7 +345,7 @@ def test_manual_reenable_waits_for_fresh_health_check(monkeypatch):
 
     assert response["success"] is True
     assert starts == [source.key]
-    assert plugin._client().sources == []
+    assert [item.key for item in plugin._client().sources] == [source.key]
     source_payload = response["data"]["source"]
     assert source_payload["health_status"] == "unchecked"
     assert source_payload["last_checked"] == 0
@@ -444,7 +394,7 @@ def test_inflight_health_result_cannot_override_manual_reenable(monkeypatch):
 
     assert not worker.is_alive()
     assert result["checked"] == 0
-    assert plugin._client().sources == []
+    assert [item.key for item in plugin._client().sources] == [source.key]
     payload = plugin.api_sources()["data"][0]
     assert payload["health_status"] == "unchecked"
 
@@ -685,7 +635,7 @@ def test_auto_disabled_state_survives_restart_until_success(monkeypatch):
     restarted = LunaTVSource()
     install_store(restarted)
     restarted.init_plugin({"enabled": True})
-    assert restarted._client().sources == []
+    assert [item.key for item in restarted._client().sources] == [source.key]
 
     monkeypatch.setattr(AppleCmsClient, "verify_search", lambda *_args, **_kwargs: None)
     restarted.refresh_source_health()

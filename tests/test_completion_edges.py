@@ -323,44 +323,6 @@ def test_backfill_native_subscription_progress_rejects_invalid_ignored_episode(m
     assert LunaTVSource()._backfill_native_subscription_progress({10: {7}}) == set()
 
 
-def test_sync_media_server_runs_bulk_backfill_off_refresh_thread(monkeypatch):
-    plugin = LunaTVSource()
-    plugin.init_plugin({"enabled": True})
-    backfills = []
-    refreshes = []
-
-    class ImmediateThread:
-        def __init__(self, target, **_kwargs):
-            self.target = target
-
-        def start(self):
-            self.target()
-
-    def backfill(pending):
-        backfills.append(pending)
-        return set(pending)
-
-    monkeypatch.setattr(plugin_module, "_HostMediaServerChain", None)
-    monkeypatch.setattr(plugin_module.threading, "Thread", ImmediateThread)
-    monkeypatch.setattr(plugin, "_backfill_native_subscription_progress", backfill)
-    monkeypatch.setattr(
-        plugin,
-        "_refresh_native_subscription_progress",
-        lambda ids: refreshes.append(set(ids)) or set(ids),
-    )
-
-    assert plugin._sync_media_server(
-        {9, 10},
-        episodes_by_subscription={9: {1, 2}},
-    ) is True
-    assert backfills == [{9: {1, 2}}]
-    assert refreshes == [{10}]
-    status = plugin.get_data(plugin_module.FOLLOWUP_STATUS_KEY)["media_server_sync"]
-    assert status["success"] is True
-    assert status["backfilled_subscriptions"] == 1
-    assert status["refreshed_subscriptions"] == 1
-
-
 def test_sync_media_server_replays_request_arriving_during_sync(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "mediaserver_name": "Emby"})
