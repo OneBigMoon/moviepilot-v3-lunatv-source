@@ -3709,21 +3709,50 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
         root="/downloads/movie",
         state="paused",
     )
+    failed = DownloadTask(
+        task_id="failed-task",
+        source_key="cms-demo",
+        media_id="cms-demo:46",
+        title="失败电影",
+        year="2024",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://example.test/failed.m3u8",
+        root="/downloads/movie",
+        state="failed",
+        progress=0.95,
+        error="N_m3u8DL-RE 下载失败",
+    )
     plugin.save_data(plugin._queue.DATA_KEY, [
         pending.to_dict(),
         running.to_dict(),
         completed.to_dict(),
         paused.to_dict(),
+        failed.to_dict(),
     ])
 
     module = plugin.get_module()
     assert "list_torrents" in module
     torrents = module["list_torrents"](status=SimpleNamespace(value="下载中"))
-    assert [torrent.hash for torrent in torrents] == ["paused-task", "running-task", "pending-task"]
+    assert [torrent.hash for torrent in torrents] == [
+        "failed-task",
+        "paused-task",
+        "running-task",
+        "pending-task",
+    ]
     assert all(torrent.downloader == "LunaTVSource" for torrent in torrents)
     assert next(torrent for torrent in torrents if torrent.hash == "paused-task").state == "paused"
-    assert all(torrent.state == "downloading" for torrent in torrents if torrent.hash != "paused-task")
+    assert all(
+        torrent.state == "downloading"
+        for torrent in torrents
+        if torrent.hash not in {"paused-task", "failed-task"}
+    )
     assert next(torrent for torrent in torrents if torrent.hash == "running-task").progress == 42.0
+    failed_torrent = next(torrent for torrent in torrents if torrent.hash == "failed-task")
+    assert failed_torrent.state == "failed"
+    assert failed_torrent.progress == 95.0
+    assert failed_torrent.left_time == "下载失败"
     pending_torrent = next(torrent for torrent in torrents if torrent.hash == "pending-task")
     assert pending_torrent.progress == 0.0
     assert pending_torrent.title == "排队电视剧 第2季（共1集）"
@@ -3742,7 +3771,7 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
     assert plugin.list_torrents(downloader="我的自定义客户端") is None
     assert sorted(
         torrent.hash for torrent in plugin.list_torrents(downloader=" lunatvsource ")
-    ) == ["paused-task", "pending-task", "running-task"]
+    ) == ["failed-task", "paused-task", "pending-task", "running-task"]
     assert plugin.list_torrents(status="completed") == []
     assert plugin.list_torrents(status="transfer") == []
     assert [torrent.hash for torrent in plugin.list_torrents(
@@ -3854,6 +3883,40 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
         "season-1-pending",
         "season-1-paused",
     }
+
+
+def test_all_failed_tv_season_remains_in_native_download_list(tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    failed_tasks = [
+        DownloadTask(
+            task_id=f"failed-season-{episode}",
+            source_key="cms-demo",
+            media_id="cms-demo:failed-season",
+            title="失败整季剧",
+            year="2026",
+            media_type="tv",
+            season=1,
+            episode=episode,
+            url=f"https://example.test/s01e{episode:02d}.m3u8",
+            root=str(tmp_path),
+            state="failed",
+            progress=progress,
+            error="N_m3u8DL-RE 下载失败",
+        )
+        for episode, progress in ((1, 0.95), (2, 0.70))
+    ]
+    plugin.save_data(plugin._queue.DATA_KEY, [task.to_dict() for task in failed_tasks])
+
+    torrents = plugin.list_torrents(downloader="LunaTVSource")
+
+    assert len(torrents) == 1
+    torrent = torrents[0]
+    assert torrent.state == "failed"
+    assert torrent.progress == pytest.approx(82.5)
+    assert torrent.left_time == "下载失败 2 集"
+    assert torrent.season_episode == "第1季 · 共2集 · 已下载0/2"
 
 
 def test_native_resume_wakes_serial_queue(monkeypatch, tmp_path: Path):

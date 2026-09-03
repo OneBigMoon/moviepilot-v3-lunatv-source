@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.70"
+    plugin_version = "0.4.71"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -5215,6 +5215,11 @@ class LunaTVSource(_PluginBase):
         """将队列中的活跃任务归一为 MoviePilot 下载器任务。"""
         media_source, media_id = self._task_media_identity(task)
         size, dlspeed = self._active_download_metrics(task)
+        task_state = str(task.state or "").strip().lower()
+        display_state = {
+            "paused": "paused",
+            "failed": "failed",
+        }.get(task_state, "downloading")
         download_engine = str(getattr(task, "download_engine", "") or "").strip()
         site_name = task.source_name or task.source_key or PLUGIN_MEDIA_SOURCE
         if download_engine:
@@ -5233,7 +5238,7 @@ class LunaTVSource(_PluginBase):
             "site_name": site_name,
             "year": task.year or None,
             "season_episode": season_episode,
-            "state": "paused" if task.state == "paused" else "downloading",
+            "state": display_state,
             # Queue persistence uses a 0..1 fraction; MoviePilot's
             # DownloaderTorrent contract expects a 0..100 percentage.
             "progress": (
@@ -5251,7 +5256,11 @@ class LunaTVSource(_PluginBase):
             "dlspeed": dlspeed,
             "upspeed": None,
             "save_path": task.root or None,
-            "left_time": "下载完成，正在整理" if finalizing else None,
+            "left_time": (
+                "下载失败"
+                if task_state == "failed"
+                else "下载完成，正在整理" if finalizing else None
+            ),
             "media": {
                 "type": "电视剧" if task.media_type == "tv" else "电影",
                 "title": task.title,
@@ -5331,7 +5340,7 @@ class LunaTVSource(_PluginBase):
     ) -> Any:
         """把同一电视剧、同一季的逐集执行单元投影成一个原生下载任务。"""
         finalizing_task_ids = finalizing_task_ids or set()
-        active_states = {"pending", "running", "paused"}
+        active_states = {"pending", "running", "paused", "failed"}
         active_tasks = [
             task
             for task in tasks
@@ -5405,11 +5414,16 @@ class LunaTVSource(_PluginBase):
         )
         if download_engine:
             site_name = f"{site_name} · {download_engine}"
+        failed_count = sum(
+            1
+            for task in active_tasks
+            if str(task.state or "").lower() == "failed"
+        )
         group_state = (
             "downloading"
             if finalizing_task_ids
             or any(str(task.state or "").lower() in {"pending", "running"} for task in active_tasks)
-            else "paused"
+            else "failed" if failed_count == len(active_tasks) else "paused"
         )
         projected_progress = max(
             0.0,
@@ -5417,7 +5431,11 @@ class LunaTVSource(_PluginBase):
         )
         if completed_count < total_count:
             projected_progress = min(99.0, projected_progress)
-        left_time = f"已下载 {completed_count}/{total_count} 集"
+        left_time = (
+            f"下载失败 {failed_count} 集"
+            if group_state == "failed"
+            else f"已下载 {completed_count}/{total_count} 集"
+        )
         if finalizing_count == 1:
             left_time += (
                 f" · 正在整理第 {min(total_count, completed_count + 1)}/{total_count} 集"
@@ -5695,7 +5713,8 @@ class LunaTVSource(_PluginBase):
                 active_tasks = [
                     item
                     for item in group_tasks
-                    if str(item.state or "").lower() in {"pending", "running", "paused"}
+                    if str(item.state or "").lower()
+                    in {"pending", "running", "paused", "failed"}
                     or str(item.task_id or "") in finalizing_task_ids
                 ]
                 if not active_tasks:
@@ -5717,7 +5736,7 @@ class LunaTVSource(_PluginBase):
                 continue
 
             is_finalizing = task_hash in finalizing_task_ids
-            if task_state not in {"pending", "running", "paused"} and not is_finalizing:
+            if task_state not in {"pending", "running", "paused", "failed"} and not is_finalizing:
                 continue
             if requested_hashes and task_hash not in requested_hashes:
                 continue
