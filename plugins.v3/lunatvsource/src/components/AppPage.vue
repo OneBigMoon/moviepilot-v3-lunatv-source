@@ -179,7 +179,7 @@ const healthProgressLabel = computed(() => {
   return `${sourceHealth.value.running ? '本轮进度' : '最近一轮'} ${healthChecked.value} / ${healthCheckTotal.value}`
 })
 const queueStatus = computed(() => status.value.queue || {})
-const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
+const queueTotal = computed(() => ['pending', 'running', 'paused']
   .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0))
 const followupStatus = computed(() => status.value.followup_status || {})
 const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {})
@@ -297,7 +297,7 @@ onBeforeUnmount(clearHealthPoll)
     <section class="setup-strip">
       <span>目录：{{ directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置' }}</span>
       <span>来源：{{ directoryStatus.source || '未配置' }}</span>
-      <span>当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 失败 {{ queueStatus.failed || 0 }} · 共 {{ queueTotal }} 任务</span>
+      <span>当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 共 {{ queueTotal }} 个活动任务</span>
       <span>追更：每 {{ subscriptionStatus.refresh_minutes || 30 }} 分钟检查新集</span>
       <span>最近追更：{{ followupSummary(subscriptionRefreshStatus) }}</span>
       <span>最近同步：{{ followupSummary(mediaSyncStatus) }}</span>

@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.73"
+    expected_version = "0.4.74"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -180,7 +180,7 @@ def test_app_page_shows_loading_state_before_empty_sources():
     assert app_page.index(loading_state) < app_page.index(empty_state)
 
 
-def test_app_page_queue_summary_is_independent_from_source_count():
+def test_app_page_queue_summary_excludes_terminal_tasks_and_is_independent_from_source_count():
     project_root = Path(__file__).resolve().parents[1]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
@@ -191,8 +191,9 @@ def test_app_page_queue_summary_is_independent_from_source_count():
     assert sum(queue.values()) == 222
     assert len(sources) == 19
     assert "const queueStatus = computed(() => status.value.queue || {})" in app_page
-    assert "const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']" in app_page
-    assert "当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 失败 {{ queueStatus.failed || 0 }} · 共 {{ queueTotal }} 任务" in app_page
+    assert "const queueTotal = computed(() => ['pending', 'running', 'paused']" in app_page
+    assert "失败 {{ queueStatus.failed || 0 }}" not in app_page
+    assert "当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 共 {{ queueTotal }} 个活动任务" in app_page
     assert "并发上限：{{ downloadSettings.max_concurrent_tasks || 2 }} 任务 × {{ downloadSettings.segment_thread_count || 16 }} 分片" in app_page
     assert "{{ loading ? '…' : sources.length }}" in app_page
 

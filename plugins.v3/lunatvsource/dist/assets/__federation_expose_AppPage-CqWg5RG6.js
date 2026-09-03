@@ -267,7 +267,7 @@ const healthProgressLabel = computed(() => {
   return `${sourceHealth.value.running ? '本轮进度' : '最近一轮'} ${healthChecked.value} / ${healthCheckTotal.value}`
 });
 const queueStatus = computed(() => status.value.queue || {});
-const queueTotal = computed(() => ['pending', 'running', 'paused', 'failed', 'completed']
+const queueTotal = computed(() => ['pending', 'running', 'paused']
   .reduce((total, state) => total + Number(queueStatus.value[state] || 0), 0));
 const followupStatus = computed(() => status.value.followup_status || {});
 const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {});
@@ -391,7 +391,7 @@ return (_ctx, _cache) => {
     _createElementVNode("section", _hoisted_14, [
       _createElementVNode("span", null, "目录：" + _toDisplayString(directoryStatus.value.configured_root || directoryStatus.value.auto_roots?.[0]?.download_path || '未配置'), 1),
       _createElementVNode("span", null, "来源：" + _toDisplayString(directoryStatus.value.source || '未配置'), 1),
-      _createElementVNode("span", null, "当前队列：运行 " + _toDisplayString(queueStatus.value.running || 0) + " · 等待 " + _toDisplayString(queueStatus.value.pending || 0) + " · 暂停 " + _toDisplayString(queueStatus.value.paused || 0) + " · 失败 " + _toDisplayString(queueStatus.value.failed || 0) + " · 共 " + _toDisplayString(queueTotal.value) + " 任务", 1),
+      _createElementVNode("span", null, "当前队列：运行 " + _toDisplayString(queueStatus.value.running || 0) + " · 等待 " + _toDisplayString(queueStatus.value.pending || 0) + " · 暂停 " + _toDisplayString(queueStatus.value.paused || 0) + " · 共 " + _toDisplayString(queueTotal.value) + " 个活动任务", 1),
       _createElementVNode("span", null, "追更：每 " + _toDisplayString(subscriptionStatus.value.refresh_minutes || 30) + " 分钟检查新集", 1),
       _createElementVNode("span", null, "最近追更：" + _toDisplayString(followupSummary(subscriptionRefreshStatus.value)), 1),
       _createElementVNode("span", null, "最近同步：" + _toDisplayString(followupSummary(mediaSyncStatus.value)), 1),
@@ -561,12 +561,12 @@ return (_ctx, _cache) => {
               ])
             ]))
     ]),
-    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-c34ab428><div class=\"section-title\" data-v-c34ab428>使用说明</div><div class=\"help-grid\" data-v-c34ab428><p data-v-c34ab428><strong data-v-c34ab428>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-c34ab428><strong data-v-c34ab428>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-c34ab428><strong data-v-c34ab428>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-c34ab428><strong data-v-c34ab428>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-c34ab428><strong data-v-c34ab428>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-4699be10><div class=\"section-title\" data-v-4699be10>使用说明</div><div class=\"help-grid\" data-v-4699be10><p data-v-4699be10><strong data-v-4699be10>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-4699be10><strong data-v-4699be10>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-4699be10><strong data-v-4699be10>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-4699be10><strong data-v-4699be10>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-4699be10><strong data-v-4699be10>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c34ab428"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4699be10"]]);
 
 export { AppPage as default };
