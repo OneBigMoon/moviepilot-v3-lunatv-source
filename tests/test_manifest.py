@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.76"
+    expected_version = "0.4.77"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.77"] == (
+        "修复同一媒体资产内嵌广告未被过滤：结合分片序号跳变与前后分辨率探测，"
+        "仅过滤确认的广告分片；探测不确定时保持原始内容，避免误删。"
+    )
     assert history["0.4.58"] == (
         "识别 CMS API 1002 关键词搜索禁用响应，明确显示源站在线但禁止搜索并自动排除，"
         "避免误报为缺少 list/data。"

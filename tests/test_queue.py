@@ -1051,6 +1051,117 @@ https://cdn.example/20260901/show/2000kb/hls/main-d.ts
     ]
 
 
+def test_prepare_hls_input_marks_same_asset_discontinuity_block_on_resolution_change(
+    monkeypatch, tmp_path: Path
+):
+    playlist = b"""#EXTM3U
+#EXTINF:4,
+https://cdn.example/a326662f8c5000073.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/a326662f8c50621221.ts
+#EXTINF:5,
+https://cdn.example/a326662f8c50621222.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/a326662f8c5000074.ts
+#EXT-X-ENDLIST
+"""
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlist, url),
+    )
+    heights = {
+        "a326662f8c5000073.ts": 576,
+        "a326662f8c50621221.ts": 1080,
+        "a326662f8c50621222.ts": 1080,
+        "a326662f8c5000074.ts": 576,
+    }
+    probed_urls = []
+    normal_urls = []
+    ad_urls = []
+    scans = []
+
+    def probe(url: str) -> int:
+        probed_urls.append(url)
+        return heights[url.rsplit("/", 1)[-1]]
+
+    local = DownloadQueue._prepare_hls_input(
+        "https://media.example/index.m3u8",
+        tmp_path,
+        lambda url: normal_urls.append(url) or f"normal:{len(normal_urls)}",
+        (),
+        lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
+        lambda _url: False,
+        scans.append,
+        segment_height_probe=probe,
+    )
+
+    content = Path(local).read_text(encoding="utf-8")
+    assert len(probed_urls) == 3
+    assert len(normal_urls) == 2
+    assert len(ad_urls) == 2
+    assert "a326662f8c50621221.ts" not in content
+    assert "a326662f8c50621222.ts" not in content
+    assert content.count("lunatv-cue-ad:") == 2
+    assert scans[0]["splice_segments"] == 2
+    assert scans[0]["splice_seconds"] == 10.0
+    assert scans[0]["same_asset_splice_segments"] == 2
+    assert scans[0]["same_asset_splice_seconds"] == 10.0
+
+
+def test_same_asset_discontinuity_probe_fails_open_without_resolution_evidence():
+    lines = """#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/segment-0073.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/20260901/show/2000kb/hls/segment-621221.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/segment-0074.ts
+#EXT-X-ENDLIST
+""".splitlines()
+    stats = {}
+
+    def unavailable(_url: str) -> int:
+        return 0
+
+    assert DownloadQueue._closed_discontinuity_ad_segments(
+        lines,
+        lambda url: url,
+        unavailable,
+        stats,
+    ) == (set(), 0, 0.0)
+    assert stats == {}
+
+
+def test_same_asset_discontinuity_with_contiguous_numbers_is_not_probed():
+    lines = """#EXTM3U
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/segment-0073.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:5,
+https://cdn.example/20260901/show/2000kb/hls/segment-0074.ts
+#EXTINF:5,
+https://cdn.example/20260901/show/2000kb/hls/segment-0075.ts
+#EXT-X-DISCONTINUITY
+#EXTINF:4,
+https://cdn.example/20260901/show/2000kb/hls/segment-0076.ts
+#EXT-X-ENDLIST
+""".splitlines()
+
+    def unexpected_probe(_url: str) -> int:
+        raise AssertionError("contiguous media segments must not be probed")
+
+    assert DownloadQueue._closed_discontinuity_ad_segments(
+        lines,
+        lambda url: url,
+        unexpected_probe,
+    ) == (set(), 0, 0.0)
+
+
 def test_discontinuity_ad_detection_marks_repeated_foreign_asset_blocks():
     lines = """#EXTM3U
 #EXTINF:4,

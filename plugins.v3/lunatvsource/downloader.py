@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .cms import _fetch_public_url, _request_public_url
+from .cms import _fetch_public_url, _request_public_url, probe_stream_height
 
 from .m3u8_engine import (
     M3U8EngineCancelled,
@@ -1916,12 +1916,63 @@ class _SerialDownloadQueue:
         return (parsed.hostname or "").casefold(), "/".join(directories)
 
     @staticmethod
+    def _segment_sequence_number(url: str) -> Optional[int]:
+        """Return a numeric suffix when a segment filename exposes one."""
+        filename = urllib.parse.unquote(
+            urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+        )
+        match = re.search(r"(?P<number>\d+)(?:\.[^.]+)?$", filename)
+        if match is None:
+            return None
+        try:
+            return int(match.group("number"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _has_segment_sequence_jump(
+        previous_url: str,
+        candidate_urls: Iterable[str],
+        next_url: str,
+    ) -> bool:
+        """Find a short candidate whose numeric segment run breaks its neighbors."""
+        candidate_urls = list(candidate_urls)
+        previous_number = DownloadQueue._segment_sequence_number(previous_url)
+        next_number = DownloadQueue._segment_sequence_number(next_url)
+        candidate_numbers = [
+            number
+            for url in candidate_urls
+            if (number := DownloadQueue._segment_sequence_number(url)) is not None
+        ]
+        if (
+            previous_number is None
+            or next_number is None
+            or not candidate_numbers
+        ):
+            return False
+        if len(candidate_numbers) != len(candidate_urls):
+            return False
+        if any(
+            current + 1 != following
+            for current, following in zip(
+                candidate_numbers, candidate_numbers[1:]
+            )
+        ):
+            return False
+        return (
+            candidate_numbers[0] != previous_number + 1
+            or next_number != candidate_numbers[-1] + 1
+        )
+
+    @staticmethod
     def _closed_discontinuity_ad_segments(
         lines: List[str],
         resolve_url: Callable[[str], str],
+        same_asset_probe: Optional[Callable[[str], int]] = None,
+        same_asset_stats: Optional[Dict[str, Any]] = None,
     ) -> tuple[set[int], int, float]:
         """Find short foreign-asset blocks bracketed by HLS discontinuities."""
-        segments: List[tuple[int, float, tuple[str, str]]] = []
+        segments: List[tuple[int, float, tuple[str, str], str]] = []
         boundaries: List[int] = []
         pending_duration: Optional[float] = None
         for index, line in enumerate(lines):
@@ -1946,10 +1997,11 @@ class _SerialDownloadQueue:
             if pending_duration is None or not stripped or stripped.startswith("#"):
                 continue
             try:
-                asset_key = DownloadQueue._segment_asset_key(resolve_url(stripped))
+                resolved_url = resolve_url(stripped)
+                asset_key = DownloadQueue._segment_asset_key(resolved_url)
             except (RuntimeError, ValueError):
                 return set(), 0, 0.0
-            segments.append((index, pending_duration, asset_key))
+            segments.append((index, pending_duration, asset_key, resolved_url))
             pending_duration = None
 
         if pending_duration is not None or len(boundaries) < 2:
@@ -1961,7 +2013,7 @@ class _SerialDownloadQueue:
             if start <= 0 or end <= start or end >= len(segments):
                 continue
             outer_key = segments[start - 1][2]
-            if not all(outer_key) or segments[end][2] != outer_key:
+            if not outer_key[0] or segments[end][2] != outer_key:
                 continue
             candidate = segments[start:end]
             candidate_keys = {segment[2] for segment in candidate}
@@ -1970,9 +2022,44 @@ class _SerialDownloadQueue:
                 len(candidate) > 60
                 or candidate_seconds > 120.0
                 or len(candidate_keys) != 1
-                or outer_key in candidate_keys
             ):
                 continue
+            if outer_key in candidate_keys:
+                if (
+                    same_asset_probe is None
+                    or not DownloadQueue._has_segment_sequence_jump(
+                        segments[start - 1][3],
+                        [segment[3] for segment in candidate],
+                        segments[end][3],
+                    )
+                ):
+                    continue
+                try:
+                    previous_height = int(
+                        same_asset_probe(segments[start - 1][3]) or 0
+                    )
+                    candidate_height = int(same_asset_probe(candidate[0][3]) or 0)
+                    next_height = int(same_asset_probe(segments[end][3]) or 0)
+                except Exception:
+                    # Probe failures must never turn an uncertain discontinuity
+                    # into a destructive filter decision.
+                    continue
+                if (
+                    previous_height <= 0
+                    or candidate_height <= 0
+                    or next_height <= 0
+                    or previous_height != next_height
+                    or candidate_height == previous_height
+                ):
+                    continue
+                if same_asset_stats is not None:
+                    same_asset_stats["segments"] = (
+                        int(same_asset_stats.get("segments", 0)) + len(candidate)
+                    )
+                    same_asset_stats["seconds"] = (
+                        float(same_asset_stats.get("seconds", 0.0))
+                        + candidate_seconds
+                    )
             marked_segment_indexes.update(range(start, end))
 
         if not marked_segment_indexes:
@@ -2005,6 +2092,7 @@ class _SerialDownloadQueue:
         ad_segment_url_mapper: Optional[Callable[[str], str]] = None,
         ad_url_matcher: Optional[Callable[[str], bool]] = None,
         ad_scan_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        segment_height_probe: Optional[Callable[[str], int]] = None,
     ) -> str:
         """Materialize playlists locally so ffmpeg can read zstd HTTP responses.
 
@@ -2020,6 +2108,7 @@ class _SerialDownloadQueue:
         removed_cue_seconds = 0.0
         removed_splice_segments = 0
         removed_splice_seconds = 0.0
+        same_asset_splice_stats: Dict[str, Any] = {}
         regex_ad_segments = 0
         playlist_count = 0
         total_playlist_bytes = 0
@@ -2179,6 +2268,8 @@ class _SerialDownloadQueue:
                     lambda value: DownloadQueue._validate_hls_remote_uri(
                         urllib.parse.urljoin(playlist_url, expand_uri(value))
                     ),
+                    same_asset_probe=segment_height_probe,
+                    same_asset_stats=same_asset_splice_stats,
                 )
             else:
                 splice_uri_indexes, splice_segments, splice_seconds = set(), 0, 0.0
@@ -2352,6 +2443,17 @@ class _SerialDownloadQueue:
                         "splice_seconds": removed_splice_seconds,
                     }
                 )
+            if same_asset_splice_stats.get("segments", 0):
+                summary.update(
+                    {
+                        "same_asset_splice_segments": same_asset_splice_stats[
+                            "segments"
+                        ],
+                        "same_asset_splice_seconds": same_asset_splice_stats[
+                            "seconds"
+                        ],
+                    }
+                )
             ad_scan_callback(summary)
         return local_input
 
@@ -2466,6 +2568,7 @@ class DownloadQueue(_SerialDownloadQueue):
         LOGGER.info(
             "LunaTV HLS 去广告任务: task_id=%s, title=%s, "
             "CUE待过滤=%d分片/%.1f秒, 结构待过滤=%d分片/%.1f秒, "
+            "同资产广告=%d分片/%.1f秒, "
             "正则待过滤=%d分片, "
             "总计待过滤=%d分片, 未闭合CUE=%d, DATERANGE候选=%d, "
             "DISCONTINUITY边界=%d",
@@ -2475,6 +2578,8 @@ class DownloadQueue(_SerialDownloadQueue):
             summary["cue_seconds"],
             summary.get("splice_segments", 0),
             summary.get("splice_seconds", 0.0),
+            summary.get("same_asset_splice_segments", 0),
+            summary.get("same_asset_splice_seconds", 0.0),
             summary["regex_segments"],
             summary["total_segments"],
             summary["unclosed_cue"],
@@ -3523,6 +3628,12 @@ class DownloadQueue(_SerialDownloadQueue):
                     self._is_ad_segment_url
                 ),
                 lambda summary: self._log_ad_scan(task, summary),
+                lambda segment_url: probe_stream_height(
+                    segment_url,
+                    ffmpeg_path=task.ffmpeg_path,
+                    timeout=3.0,
+                    allowed_private_ranges=self._allowed_private_ranges,
+                ),
             )
             segments = self._playlist_segment_count(Path(input_url))
             engine = self._m3u8_engines[0]
