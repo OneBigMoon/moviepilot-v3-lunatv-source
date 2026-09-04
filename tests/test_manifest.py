@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.77"
+    expected_version = "0.4.78"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,9 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.78"] == (
+        "明确区分本地下载与 STRM：只有本地 MP4 下载执行 HLS 去广告，配置页显示并保留实际处理方式。"
+    )
     assert history["0.4.77"] == (
         "修复同一媒体资产内嵌广告未被过滤：结合分片序号跳变与前后分辨率探测，"
         "仅过滤确认的广告分片；探测不确定时保持原始内容，避免误删。"
@@ -260,6 +263,15 @@ def test_frontend_uses_native_download_management_and_optional_download_director
     assert "source_allowlist: String(config.source_allowlist || '').trim()" in config_page
     assert "probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim()" in config_page
     assert "hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim()" in config_page
+    assert 'v-model="config.mode"' in config_page
+    assert '下载到本地并整理（去广告）' in config_page
+    assert '生成 STRM（原始直链，不去广告）' in config_page
+    assert "const mode = config.mode === 'strm' ? 'strm' : 'download'" in config_page
+    assert "只有本地下载模式会执行 HLS 广告分片过滤" in config_page
+    legacy_form, _ = LunaTVSource().get_form()
+    legacy_text = str(legacy_form)
+    assert "下载到本地并整理（去广告）" in legacy_text
+    assert "生成 STRM（原始直链，不去广告）" in legacy_text
     assert "请填写下载目录" not in config_page
     assert "下载目录（可留空）" in config_page
     assert "MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录" in config_page

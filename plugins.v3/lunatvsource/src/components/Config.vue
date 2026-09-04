@@ -32,6 +32,10 @@ const defaults = {
   segment_thread_count: 16,
   source_check_minutes: 60,
 }
+const modeItems = [
+  { title: '下载到本地并整理（去广告）', value: 'download' },
+  { title: '生成 STRM（原始直链，不去广告）', value: 'strm' },
+]
 const config = reactive({ ...defaults })
 
 function validateIntegerRange(value, label, min, max) {
@@ -63,6 +67,7 @@ async function saveConfig() {
   }
   saving.value = true
   try {
+    const mode = config.mode === 'strm' ? 'strm' : 'download'
     const payload = {
       ...config,
       source_allowlist: String(config.source_allowlist || '').trim(),
@@ -74,7 +79,7 @@ async function saveConfig() {
       use_moviepilot_dirs: true,
       moviepilot_organize: true,
       native_recognize: true,
-      mode: 'download',
+      mode,
       max_concurrent_tasks: Number(config.max_concurrent_tasks),
       segment_thread_count: Number(config.segment_thread_count),
       source_check_minutes: Number(config.source_check_minutes),
@@ -93,6 +98,7 @@ async function saveConfig() {
 
 onMounted(() => {
   Object.assign(config, defaults, props.initialConfig || {})
+  config.mode = config.mode === 'strm' ? 'strm' : 'download'
 })
 </script>
 
@@ -107,8 +113,8 @@ onMounted(() => {
     </VToolbar>
     <VDivider class="mb-4" />
     <VAlert v-if="message.text" :type="message.type" variant="tonal" density="compact" class="mb-4">{{ message.text }}</VAlert>
-    <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      保存后，LunaTV/苹果 CMS 将接入 MoviePilot 的原生搜索、订阅与下载入口。请直接使用 MoviePilot 的原生搜索、订阅和下载流程。
+  <VAlert type="info" variant="tonal" density="compact" class="mb-4">
+      保存后，LunaTV/苹果 CMS 将接入 MoviePilot 的原生搜索、订阅与下载入口。要去广告请选择“下载到本地并整理”；STRM 是原始直链，不经过 HLS 分片过滤。
     </VAlert>
     <VRow dense>
       <VCol cols="12"><VSwitch v-model="config.enabled" label="启用原生桥接" color="success" hide-details /></VCol>
@@ -119,6 +125,16 @@ onMounted(() => {
           hint="开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
           persistent-hint
           color="success"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VSelect
+          v-model="config.mode"
+          :items="modeItems"
+          label="处理方式"
+          hint="只有本地下载模式会执行 HLS 广告分片过滤并生成 MP4。"
+          persistent-hint
+          variant="outlined"
         />
       </VCol>
       <VCol cols="12"><VTextField v-model="config.config_url" label="LunaTV 配置地址" variant="outlined" /></VCol>

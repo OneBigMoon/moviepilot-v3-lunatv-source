@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.77"
+    plugin_version = "0.4.78"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1377,14 +1377,16 @@ class LunaTVSource(_PluginBase):
                         "persistentHint": True,
                     },
                 },
-                {
-                    "component": "VSelect",
+                    {
+                        "component": "VSelect",
                         "props": {
                             "model": "mode",
                             "label": "处理方式",
+                            "hint": "只有“下载到本地并整理”会执行 HLS 广告分片过滤；STRM 是原始直链，不去广告。",
+                            "persistentHint": True,
                             "items": [
-                                {"title": "下载到本地并整理", "value": "download"},
-                                {"title": "生成 STRM", "value": "strm"},
+                                {"title": "下载到本地并整理（去广告）", "value": "download"},
+                                {"title": "生成 STRM（原始直链，不去广告）", "value": "strm"},
                             ],
                         },
                     },
@@ -1614,6 +1616,19 @@ class LunaTVSource(_PluginBase):
                         "placeholder": DEFAULT_HLS_AD_FILTER_REGEX,
                         "hint": "匹配到的分片由 N_m3u8DL-RE 跳过；留空仅按闭合 CUE-OUT/CUE-IN 去除。",
                         "persistentHint": True,
+                    },
+                },
+                {
+                    "component": "VSelect",
+                    "props": {
+                        "model": "mode",
+                        "label": "处理方式",
+                        "hint": "只有“下载到本地并整理”会执行 HLS 广告分片过滤；STRM 是原始直链，不去广告。",
+                        "persistentHint": True,
+                        "items": [
+                            {"title": "下载到本地并整理（去广告）", "value": "download"},
+                            {"title": "生成 STRM（原始直链，不去广告）", "value": "strm"},
+                        ],
                     },
                 },
                 {
