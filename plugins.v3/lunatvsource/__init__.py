@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.74"
+    plugin_version = "0.4.75"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -4602,6 +4602,7 @@ class LunaTVSource(_PluginBase):
             root=root,
             mode=str(payload.get("mode") or self._config.get("mode") or "download"),
             ffmpeg_path=str(self._config.get("ffmpeg_path") or "ffmpeg"),
+            source_sensitive=True,
             media_source="lunatv",
             media_id=media_id,
         )
@@ -5140,6 +5141,7 @@ class LunaTVSource(_PluginBase):
                         mode=str(self._config.get("mode") or "download"),
                         ffmpeg_path=str(self._config.get("ffmpeg_path") or "ffmpeg"),
                         source_name=result.source_name or None,
+                        source_sensitive=False,
                         media_source=(
                             result.source_key or PLUGIN_MEDIA_SOURCE
                             if str(self._config.get("source_strategy") or "first")
@@ -7041,6 +7043,7 @@ class LunaTVSource(_PluginBase):
                 mode=str(self._config.get("mode") or "download"),
                 ffmpeg_path=str(self._config.get("ffmpeg_path") or "ffmpeg"),
                 source_name=str(entry.get("source_name") or payload.get("source_name") or "") or None,
+                source_sensitive=True,
                 media_source=source_key,
                 media_id=resource_identity or "native",
             )

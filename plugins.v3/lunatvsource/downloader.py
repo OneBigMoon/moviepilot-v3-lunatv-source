@@ -278,6 +278,7 @@ class DownloadTask:
     host_media_source: Optional[str] = None
     host_media_id: Optional[str] = None
     source_name: Optional[str] = None
+    source_sensitive: bool = False
     mode: str = "download"
     ffmpeg_path: str = "ffmpeg"
     state: str = "pending"
@@ -309,6 +310,7 @@ class DownloadTask:
         mode: str,
         ffmpeg_path: str,
         source_name: Optional[str] = None,
+        source_sensitive: bool = False,
         media_source: str,
         media_id: str,
     ) -> "DownloadTask":
@@ -325,6 +327,7 @@ class DownloadTask:
             url=str(getattr(episode, "url", "")),
             root=root,
             source_name=source_name,
+            source_sensitive=source_sensitive,
             mode=mode,
             ffmpeg_path=ffmpeg_path,
         )
@@ -338,8 +341,14 @@ class DownloadTask:
             if host_source and host_id
             else str(self.media_id or "").strip()
         )
+        source_name = str(self.source_name or "").strip().casefold()
+        source_identity = (
+            f"{source_name}:{self.source_key}"
+            if self.source_sensitive and source_name
+            else str(self.source_key or "").strip()
+        )
         return (
-            f"{self.source_key}|{media_identity}|"
+            f"{source_identity}|{media_identity}|"
             f"{self.season}|{self.episode}|{self.mode}"
         )
 
@@ -406,6 +415,8 @@ def _download_task_from_payload(value: object) -> DownloadTask:
         raise ValueError("task record contains an invalid number")
     if type(task.delete_file) is not bool:
         raise ValueError("task record contains an invalid delete flag")
+    if type(task.source_sensitive) is not bool:
+        raise ValueError("task record contains an invalid source sensitivity flag")
     if task.control_action not in {"", "pause", "remove"}:
         raise ValueError("task record contains an unknown control action")
     return task
@@ -756,6 +767,7 @@ class _SerialDownloadQueue:
             target.host_media_source = task.host_media_source
             target.host_media_id = task.host_media_id
             target.source_name = task.source_name
+            target.source_sensitive = task.source_sensitive
             target.mode = task.mode
             target.ffmpeg_path = task.ffmpeg_path
             target.state = "completed"

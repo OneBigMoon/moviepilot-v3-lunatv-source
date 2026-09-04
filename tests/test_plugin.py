@@ -3440,6 +3440,48 @@ def test_native_download_reports_duplicate_instead_of_fake_success(monkeypatch, 
     assert len(plugin._queue.list_tasks()) == 1
 
 
+def test_native_download_allows_same_media_from_different_sources(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    common = {
+        "title": "切源电影",
+        "year": "2026",
+        "media_type": "movie",
+        "season": 1,
+        "episode": 1,
+        "media_id": "themoviedb:5698",
+        "source_key": "1",
+    }
+    first_token = plugin._resource_token(
+        {
+            **common,
+            "source_name": "🎬360 资源",
+            "url": "https://360.example/movie.m3u8",
+        }
+    )
+    second_token = plugin._resource_token(
+        {
+            **common,
+            "source_name": "🎬暴风资源",
+            "url": "https://bf.example/movie.m3u8",
+        }
+    )
+
+    first = plugin.download(first_token, tmp_path)
+    second = plugin.download(second_token, tmp_path)
+
+    assert first[1]
+    assert second[1]
+    assert second[1] != first[1]
+    tasks = plugin._queue.list_tasks()
+    assert len(tasks) == 2
+    assert {task["source_name"] for task in tasks} == {"🎬360 资源", "🎬暴风资源"}
+
+
 def test_native_download_requeues_failed_task_in_place(monkeypatch, tmp_path: Path):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
