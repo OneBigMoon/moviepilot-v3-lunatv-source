@@ -5364,6 +5364,79 @@ def test_native_history_reader_supports_legacy_file_lookup(monkeypatch, tmp_path
     ]
 
 
+@pytest.mark.parametrize(
+    ("task_mode", "path_key", "path", "expected"),
+    [
+        ("download", "fullpath", "/library/示例剧/Season 01/S01E01.strm", False),
+        ("download", "file_path", "/library/示例剧/Season 01/S01E01.mp4", True),
+        ("download", "filepath", "/library/示例剧/Season 01/S01E01.mkv", True),
+        ("strm", "path", "/library/示例剧/Season 01/S01E01.strm", True),
+    ],
+)
+def test_native_history_reader_respects_processing_mode(
+    monkeypatch,
+    tmp_path: Path,
+    task_mode: str,
+    path_key: str,
+    path: str,
+    expected: bool,
+):
+    class FakeDownloadHistoryOper:
+        def get_by_media_identity(self, **_kwargs):
+            return [
+                SimpleNamespace(
+                    download_hash="mode-history",
+                    seasons="S01",
+                    episodes="E01",
+                )
+            ]
+
+        def get_files_by_hash(self, _download_hash, state=1):
+            return [
+                SimpleNamespace(
+                    state=state,
+                    **{path_key: path},
+                )
+            ]
+
+    download_module = ModuleType("app.db.oper.downloadhistory")
+    download_module.DownloadHistoryOper = FakeDownloadHistoryOper
+    app_module = ModuleType("app")
+    app_module.__path__ = []
+    app_db_module = ModuleType("app.db")
+    app_db_module.__path__ = []
+    app_db_oper_module = ModuleType("app.db.oper")
+    app_db_oper_module.__path__ = []
+    app_module.db = app_db_module
+    app_db_module.oper = app_db_oper_module
+    app_db_oper_module.downloadhistory = download_module
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.db", app_db_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper", app_db_oper_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "app.db.oper.downloadhistory",
+        download_module,
+    )
+
+    plugin = LunaTVSource()
+    task = DownloadTask(
+        task_id=f"mode-history-{task_mode}-{path_key}",
+        source_key="cms-demo",
+        media_id="cms-demo:42",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://example.test/episode.m3u8",
+        root=str(tmp_path),
+        mode=task_mode,
+    )
+
+    assert plugin._native_history_has_episode(task) is expected
+
+
 def test_refresh_does_not_requeue_episode_kept_in_native_tmdb_history(monkeypatch, tmp_path: Path):
     result = _result_from_item(
         CmsSource("cms-demo", "演示源", "https://cms.example/vod"),

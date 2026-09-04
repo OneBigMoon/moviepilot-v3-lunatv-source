@@ -149,7 +149,12 @@ from .downloader import (
     DownloadTask,
     normalize_download_concurrency,
 )
-from .naming import media_path, normalize_media_title, normalize_search_title
+from .naming import (
+    extension_for_url,
+    media_path,
+    normalize_media_title,
+    normalize_search_title,
+)
 
 try:  # Optional host services used for directory and TMDB association hints.
     from app.application.directory import DirectoryHelper as _HostDirectoryHelper
@@ -916,7 +921,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.78"
+    plugin_version = "0.4.79"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3138,8 +3143,29 @@ class LunaTVSource(_PluginBase):
                 media_id=media_id,
             ) or []
             get_files = getattr(oper, "get_files_by_hash", None)
+            desired_mode = (
+                "strm"
+                if str(getattr(task, "mode", "download") or "download").casefold()
+                == "strm"
+                else "download"
+            )
+
+            def _artifact_mode(item: Any) -> Optional[str]:
+                for key in ("fullpath", "file_path", "filepath", "path"):
+                    raw_path = str(_field(item, key, "") or "").strip()
+                    if not raw_path:
+                        continue
+                    path_without_query = raw_path.split("?", 1)[0].lower()
+                    if path_without_query.endswith(".strm"):
+                        return "strm"
+                    if extension_for_url(path_without_query, default=""):
+                        return "download"
+                return None
+
             for history in histories:
-                download_hash = str(getattr(history, "download_hash", "") or "").strip()
+                download_hash = str(
+                    _field(history, "download_hash", "") or ""
+                ).strip()
                 if callable(get_files):
                     if not download_hash:
                         continue
@@ -3158,10 +3184,24 @@ class LunaTVSource(_PluginBase):
                         ]
                     if not completed_files:
                         continue
+                    known_modes = {
+                        artifact_mode
+                        for artifact_mode in (
+                            _artifact_mode(item) for item in completed_files
+                        )
+                        if artifact_mode
+                    }
+                    if known_modes and desired_mode not in known_modes:
+                        self._logger.debug(
+                            "跳过不同处理方式的 MoviePilot 下载历史：mode=%s, files=%s",
+                            desired_mode,
+                            sorted(known_modes),
+                        )
+                        continue
                 if task.media_type != "tv":
                     return True
-                seasons = self._history_numbers(getattr(history, "seasons", ""))
-                episodes = self._history_numbers(getattr(history, "episodes", ""))
+                seasons = self._history_numbers(_field(history, "seasons", ""))
+                episodes = self._history_numbers(_field(history, "episodes", ""))
                 if task.season in seasons and task.episode in episodes:
                     return True
         except Exception as exc:
