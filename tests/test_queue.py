@@ -1111,7 +1111,61 @@ https://cdn.example/a326662f8c5000074.ts
     assert scans[0]["same_asset_splice_seconds"] == 10.0
 
 
-def test_same_asset_discontinuity_probe_fails_open_without_resolution_evidence():
+def test_prepare_hls_input_uses_sequence_fallback_when_probe_unavailable(
+    monkeypatch, tmp_path: Path
+):
+    candidate_urls = [
+        f"https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c{number}.ts"
+        for number in range(50621221, 50621228)
+    ]
+    playlist_lines = [
+        "#EXTM3U",
+        "#EXTINF:4,",
+        "https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c5000073.ts",
+        "#EXT-X-DISCONTINUITY",
+    ]
+    for index, url in enumerate(candidate_urls):
+        playlist_lines.extend([f"#EXTINF:{4 if index < 5 else 3},", url])
+    playlist_lines.extend(
+        [
+            "#EXT-X-DISCONTINUITY",
+            "#EXTINF:4,",
+            "https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c5000074.ts",
+            "#EXT-X-ENDLIST",
+        ]
+    )
+    playlist = ("\n".join(playlist_lines) + "\n").encode()
+    monkeypatch.setattr(
+        downloader_module,
+        "_fetch_public_url",
+        lambda url, *_args, **_kwargs: (playlist, url),
+    )
+    normal_urls = []
+    ad_urls = []
+    scans = []
+
+    local = DownloadQueue._prepare_hls_input(
+        "https://media.example/index.m3u8",
+        tmp_path,
+        lambda url: normal_urls.append(url) or f"normal:{len(normal_urls)}",
+        (),
+        lambda url: ad_urls.append(url) or f"lunatv-cue-ad:{len(ad_urls)}",
+        lambda _url: False,
+        scans.append,
+        segment_height_probe=lambda _url: 0,
+    )
+
+    content = Path(local).read_text(encoding="utf-8")
+    assert len(normal_urls) == 2
+    assert len(ad_urls) == 7
+    assert all(url not in content for url in candidate_urls)
+    assert scans[0]["splice_segments"] == 7
+    assert scans[0]["splice_seconds"] == 26.0
+    assert scans[0]["same_asset_splice_segments"] == 7
+    assert scans[0]["same_asset_splice_seconds"] == 26.0
+
+
+def test_same_asset_discontinuity_uses_strong_sequence_fallback_when_probe_unavailable():
     lines = """#EXTM3U
 #EXTINF:4,
 https://cdn.example/20260901/show/2000kb/hls/segment-0073.ts
@@ -1133,8 +1187,47 @@ https://cdn.example/20260901/show/2000kb/hls/segment-0074.ts
         lambda url: url,
         unavailable,
         stats,
-    ) == (set(), 0, 0.0)
-    assert stats == {}
+    ) == (
+        {lines.index("https://cdn.example/20260901/show/2000kb/hls/segment-621221.ts")},
+        1,
+        5.0,
+    )
+    assert stats == {"segments": 1, "seconds": 5.0}
+
+
+def test_same_asset_discontinuity_fallback_matches_lunatv_inserted_run():
+    candidate_urls = [
+        f"https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c{number}.ts"
+        for number in range(50621221, 50621228)
+    ]
+    lines = [
+        "#EXTM3U",
+        "#EXTINF:4,",
+        "https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c5000073.ts",
+        "#EXT-X-DISCONTINUITY",
+    ]
+    for index, url in enumerate(candidate_urls):
+        lines.extend([f"#EXTINF:{4 if index < 5 else 3},", url])
+    lines.extend(
+        [
+            "#EXT-X-DISCONTINUITY",
+            "#EXTINF:4,",
+            "https://v.cdnlz19.com/20240509/33191_c7cd13b5/a326662f8c5000074.ts",
+            "#EXT-X-ENDLIST",
+        ]
+    )
+    stats = {}
+
+    marked, segment_count, seconds = (
+        DownloadQueue._closed_discontinuity_ad_segments(
+            lines, lambda url: url, lambda _url: 0, stats
+        )
+    )
+
+    assert marked == {lines.index(url) for url in candidate_urls}
+    assert segment_count == 7
+    assert seconds == pytest.approx(26.0)
+    assert stats == {"segments": 7, "seconds": 26.0}
 
 
 def test_same_asset_discontinuity_with_contiguous_numbers_is_not_probed():

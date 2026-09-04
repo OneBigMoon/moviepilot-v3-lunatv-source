@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.79"
+    expected_version = "0.4.80"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,8 +88,9 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
-    assert history["0.4.79"] == (
-        "修复下载模式被旧 STRM 历史记录阻止重新入队；按历史文件类型区分本地下载与 STRM 处理方式。"
+    assert history["0.4.80"] == (
+        "修复同一媒体资产内嵌广告在分辨率探测不可用时仍进入成品：识别高置信度分片序号插入并在 "
+        "N_m3u8DL-RE 前跳过广告分片；保留普通连续分片和不确定场景的安全策略。"
     )
     assert history["0.4.77"] == (
         "修复同一媒体资产内嵌广告未被过滤：结合分片序号跳变与前后分辨率探测，"

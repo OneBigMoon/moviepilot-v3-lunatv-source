@@ -1965,6 +1965,40 @@ class _SerialDownloadQueue:
         )
 
     @staticmethod
+    def _has_strong_sequence_insertion(
+        previous_url: str,
+        candidate_urls: Iterable[str],
+        next_url: str,
+    ) -> bool:
+        """Recognize a bounded inserted run when media probing is unavailable."""
+        candidates = list(candidate_urls)
+        previous_number = DownloadQueue._segment_sequence_number(previous_url)
+        next_number = DownloadQueue._segment_sequence_number(next_url)
+        candidate_numbers = [
+            DownloadQueue._segment_sequence_number(url) for url in candidates
+        ]
+        if (
+            previous_number is None
+            or next_number is None
+            or not candidate_numbers
+            or any(number is None for number in candidate_numbers)
+        ):
+            return False
+        if any(
+            current + 1 != following
+            for current, following in zip(candidate_numbers, candidate_numbers[1:])
+        ):
+            return False
+        # A large outlier that returns to the immediately following main-content
+        # number is stronger evidence than a normal encoder discontinuity/reset.
+        return (
+            next_number == previous_number + 1
+            and candidate_numbers[0] - previous_number >= 1000
+            and candidate_numbers[-1] - candidate_numbers[0]
+            == len(candidate_numbers) - 1
+        )
+
+    @staticmethod
     def _closed_discontinuity_ad_segments(
         lines: List[str],
         resolve_url: Callable[[str], str],
@@ -2025,32 +2059,45 @@ class _SerialDownloadQueue:
             ):
                 continue
             if outer_key in candidate_keys:
+                candidate_urls = [segment[3] for segment in candidate]
                 if (
-                    same_asset_probe is None
-                    or not DownloadQueue._has_segment_sequence_jump(
-                        segments[start - 1][3],
-                        [segment[3] for segment in candidate],
-                        segments[end][3],
+                    not DownloadQueue._has_segment_sequence_jump(
+                        segments[start - 1][3], candidate_urls, segments[end][3]
                     )
                 ):
                     continue
-                try:
-                    previous_height = int(
-                        same_asset_probe(segments[start - 1][3]) or 0
+                strong_sequence_insertion = (
+                    DownloadQueue._has_strong_sequence_insertion(
+                        segments[start - 1][3], candidate_urls, segments[end][3]
                     )
-                    candidate_height = int(same_asset_probe(candidate[0][3]) or 0)
-                    next_height = int(same_asset_probe(segments[end][3]) or 0)
-                except Exception:
-                    # Probe failures must never turn an uncertain discontinuity
-                    # into a destructive filter decision.
-                    continue
-                if (
-                    previous_height <= 0
-                    or candidate_height <= 0
-                    or next_height <= 0
-                    or previous_height != next_height
-                    or candidate_height == previous_height
+                )
+                probe_decision: Optional[bool] = None
+                if same_asset_probe is not None:
+                    try:
+                        previous_height = int(
+                            same_asset_probe(segments[start - 1][3]) or 0
+                        )
+                        candidate_height = int(
+                            same_asset_probe(candidate[0][3]) or 0
+                        )
+                        next_height = int(same_asset_probe(segments[end][3]) or 0)
+                    except Exception:
+                        pass
+                    else:
+                        if (
+                            previous_height > 0
+                            and candidate_height > 0
+                            and next_height > 0
+                        ):
+                            probe_decision = (
+                                previous_height == next_height
+                                and candidate_height != previous_height
+                            )
+                if probe_decision is False or (
+                    probe_decision is None and not strong_sequence_insertion
                 ):
+                    # Keep fail-open behavior unless the sequence itself is a
+                    # bounded, high-confidence inserted run.
                     continue
                 if same_asset_stats is not None:
                     same_asset_stats["segments"] = (
