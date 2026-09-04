@@ -916,7 +916,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.75"
+    plugin_version = "0.4.76"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -6884,7 +6884,7 @@ class LunaTVSource(_PluginBase):
             payload["latency_ms"] = latency_ms
             payload["page_url"] = row["page_url"]
             payload["episode_count"] = 1
-            site_name = row["site_name"]
+            site_name = f"{row['site_name']} · {quality}"
             labels = ["LunaTV", "m3u8"]
             if latency_ms:
                 site_name = f"{site_name} · {latency_ms}ms"
