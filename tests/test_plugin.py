@@ -1411,7 +1411,7 @@ def test_resource_torrents_label_and_prefer_verified_resolution(monkeypatch):
 
     items = plugin.search_torrents(site={"id": 1}, keyword="示例电影", page=0, mtype="movie")
 
-    assert [item.site_name for item in items] == ["高清源 · 128ms", "标清源 · 320ms"]
+    assert [item.site_name for item in items] == ["高清源 · 1080P · 128ms", "标清源 · 480P · 320ms"]
     assert [item.pri_order for item in items] == [108, 48]
     assert items[0].title.endswith("· 1080P")
     assert items[0].description == "LunaTV · 1080P · m3u8"
