@@ -3322,9 +3322,11 @@ class DownloadQueue(_SerialDownloadQueue):
 
             if action == "resume":
                 resumed = [by_id[task_id] for task_id in normalized_ids]
-                if any(task.state != "paused" for task in resumed):
+                if any(task.state not in {"paused", "failed"} for task in resumed):
                     return False
                 for task in resumed:
+                    if task.state == "failed":
+                        task.downloaded_bytes = 0
                     task.state = "pending"
                     task.progress = 0.0
                     task.error = ""

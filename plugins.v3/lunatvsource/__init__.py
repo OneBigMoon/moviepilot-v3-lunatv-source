@@ -921,7 +921,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.80"
+    plugin_version = "0.4.81"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -5983,7 +5983,7 @@ class LunaTVSource(_PluginBase):
             )
             for member in members:
                 member_state = str(member.state or "").lower()
-                if operation == "resume" and member_state != "paused":
+                if operation == "resume" and member_state not in {"paused", "failed"}:
                     continue
                 if operation == "pause" and member_state not in {"pending", "running", "paused"}:
                     continue
