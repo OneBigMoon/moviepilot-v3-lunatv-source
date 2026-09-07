@@ -29,6 +29,7 @@ from .m3u8_engine import (
     N_M3U8DL_RE_VERSION,
     N_m3u8DLEngine,
 )
+from .proxy import ProxyResponseError, ProxySpec, parse_proxy_url
 from .naming import media_path
 
 
@@ -153,12 +154,13 @@ class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
 class _SegmentProxy:
     """Loopback-only streaming proxy that removes fake JPEG segment headers."""
 
-    def __init__(self, allowed_private_ranges: Iterable[str] = ()) -> None:
+    def __init__(self, allowed_private_ranges: Iterable[str] = (), proxy_url: object = None) -> None:
         self._urls: Dict[str, str] = {}
         self._reverse: Dict[str, str] = {}
         self._server: Optional[http.server.ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._allowed_private_ranges = tuple(allowed_private_ranges or ())
+        self._proxy_url = proxy_url
 
     def __enter__(self) -> "_SegmentProxy":
         return self
@@ -186,11 +188,14 @@ class _SegmentProxy:
                     range_header = self.headers.get("Range")
                     if range_header:
                         request_headers["Range"] = range_header
+                    request_kwargs: Dict[str, Any] = {"headers": request_headers}
+                    if proxy._proxy_url:
+                        request_kwargs["proxy_url"] = proxy._proxy_url
                     connection, response, _ = _request_public_url(
                         remote_url,
                         30,
                         proxy._allowed_private_ranges,
-                        headers=request_headers,
+                        **request_kwargs,
                     )
                     try:
                         partial = response.status == 206
@@ -460,6 +465,7 @@ class _SerialDownloadQueue:
         self._idle_event.set()
         self._delete_file_tasks: set[str] = set()
         self._allowed_private_ranges = tuple(allowed_private_ranges or ())
+        self._download_proxy: Optional[ProxySpec] = None
         # Standalone/legacy hosts retain the historical N-only behavior.
         # MoviePilot passes its plugin data directory and enables the managed
         # N_m3u8DL-RE is the sole VOD download engine.
@@ -1635,15 +1641,19 @@ class _SerialDownloadQueue:
             return False
         try:
             with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy(
-                self._allowed_private_ranges
+                self._allowed_private_ranges, self._download_proxy
             ) as proxy:
                 if self._control_event.is_set():
                     raise _QueueControl("controlled")
+                prepare_kwargs: Dict[str, Any] = {}
+                if self._download_proxy:
+                    prepare_kwargs["proxy_url"] = self._download_proxy
                 input_url = self._prepare_hls_input(
                     task.url,
                     Path(temp_dir),
                     proxy.url_for,
                     self._allowed_private_ranges,
+                    **prepare_kwargs,
                 )
                 if self._control_event.is_set():
                     raise _QueueControl("controlled")
@@ -2150,6 +2160,7 @@ class _SerialDownloadQueue:
         ad_url_matcher: Optional[Callable[[str], bool]] = None,
         ad_scan_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         segment_height_probe: Optional[Callable[[str], int]] = None,
+        proxy_url: object = None,
     ) -> str:
         """Materialize playlists locally so ffmpeg can read zstd HTTP responses.
 
@@ -2193,12 +2204,15 @@ class _SerialDownloadQueue:
             final_url = requested_url
             for attempt in range(2):
                 try:
+                    fetch_kwargs: Dict[str, Any] = {"deadline": deadline}
+                    if proxy_url:
+                        fetch_kwargs["proxy_url"] = proxy_url
                     payload, final_url = _fetch_public_url(
                         requested_url,
                         30,
                         _HLS_PLAYLIST_MAX_BYTES + 1,
                         allowed_private_ranges,
-                        deadline=deadline,
+                        **fetch_kwargs,
                     )
                     break
                 except OSError as exc:
@@ -2207,22 +2221,25 @@ class _SerialDownloadQueue:
                         r"probe(?: request returned)? HTTP (\d{3})",
                         message,
                     )
-                    retryable = (
-                        isinstance(exc, (TimeoutError, ConnectionError))
-                        or (
-                            http_status is not None
-                            and (
-                                int(http_status.group(1)) in {408, 425, 429}
-                                or int(http_status.group(1)) >= 500
+                    if isinstance(exc, ProxyResponseError):
+                        retryable = exc.status_code in {408, 425, 429} or exc.status_code >= 500
+                    else:
+                        retryable = (
+                            isinstance(exc, (TimeoutError, ConnectionError))
+                            or (
+                                http_status is not None
+                                and (
+                                    int(http_status.group(1)) in {408, 425, 429}
+                                    or int(http_status.group(1)) >= 500
+                                )
+                            )
+                            or (
+                                http_status is None
+                                and not message.startswith(
+                                    ("probe redirect", "too many probe redirects")
+                                )
                             )
                         )
-                        or (
-                            http_status is None
-                            and not message.startswith(
-                                ("probe redirect", "too many probe redirects")
-                            )
-                        )
-                    )
                     if time.monotonic() >= deadline:
                         raise _HLSPrepareLimitError(
                             "m3u8 播放列表准备超时"
@@ -2658,6 +2675,7 @@ class DownloadQueue(_SerialDownloadQueue):
         segment_thread_count: int = DEFAULT_SEGMENT_THREAD_COUNT,
         allowed_private_ranges: Iterable[str] = (),
         ad_filter_regex: str = "",
+        download_proxy: object = None,
     ) -> None:
         self._load = load
         self._save = save
@@ -2691,6 +2709,7 @@ class DownloadQueue(_SerialDownloadQueue):
         self._idle_event.set()
         self._delete_file_tasks: set[str] = set()
         self._allowed_private_ranges = tuple(allowed_private_ranges or ())
+        self._download_proxy = parse_proxy_url(download_proxy)
         self._ad_filter_regex = str(ad_filter_regex or "").strip()
         self._ad_filter_pattern: Optional[re.Pattern[str]] = None
         if self._ad_filter_regex:
@@ -2712,10 +2731,22 @@ class DownloadQueue(_SerialDownloadQueue):
         )
 
     def _new_n_engine(self, data_path: Path) -> N_m3u8DLEngine:
+        kwargs: Dict[str, Any] = {"thread_count": self.segment_thread_count}
+        if self._download_proxy is not None:
+            kwargs["proxy_url"] = self._download_proxy
         try:
-            return N_m3u8DLEngine(data_path, thread_count=self.segment_thread_count)
+            return N_m3u8DLEngine(data_path, **kwargs)
         except TypeError as exc:
-            if "thread_count" not in str(exc):
+            message = str(exc)
+            if "proxy_url" in message:
+                kwargs.pop("proxy_url", None)
+                try:
+                    return N_m3u8DLEngine(data_path, **kwargs)
+                except TypeError as fallback_exc:
+                    if "thread_count" not in str(fallback_exc):
+                        raise
+                    return N_m3u8DLEngine(data_path)
+            if "thread_count" not in message:
                 raise
             return N_m3u8DLEngine(data_path)
 
@@ -3680,8 +3711,9 @@ class DownloadQueue(_SerialDownloadQueue):
         if not self._m3u8_engines:
             return False
         with tempfile.TemporaryDirectory(prefix="lunatv-hls-") as temp_dir, _SegmentProxy(
-            self._allowed_private_ranges
+            self._allowed_private_ranges, self._download_proxy
         ) as proxy:
+            prepare_kwargs = {"proxy_url": self._download_proxy} if self._download_proxy else {}
             input_url = self._prepare_hls_input(
                 task.url,
                 Path(temp_dir),
@@ -3698,6 +3730,7 @@ class DownloadQueue(_SerialDownloadQueue):
                     timeout=3.0,
                     allowed_private_ranges=self._allowed_private_ranges,
                 ),
+                **prepare_kwargs,
             )
             segments = self._playlist_segment_count(Path(input_url))
             engine = self._m3u8_engines[0]

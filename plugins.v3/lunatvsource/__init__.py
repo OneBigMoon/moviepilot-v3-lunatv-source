@@ -154,6 +154,7 @@ from .downloader import (
     DownloadTask,
     normalize_download_concurrency,
 )
+from .proxy import parse_proxy_url
 from .naming import (
     extension_for_url,
     media_path,
@@ -926,7 +927,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.82"
+    plugin_version = "0.4.83"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1136,6 +1137,14 @@ class LunaTVSource(_PluginBase):
             self._config["hls_ad_filter_regex"] = str(
                 self._config.get("hls_ad_filter_regex") or ""
             ).strip()
+        download_proxy = str(self._config.get("download_proxy") or "").strip()
+        if download_proxy:
+            try:
+                parse_proxy_url(download_proxy)
+            except ValueError as exc:
+                self._logger.warning("LunaTV 下载代理配置无效，已停用：%s", exc)
+                download_proxy = ""
+        self._config["download_proxy"] = download_proxy
         try:
             source_check_minutes = int(
                 self._config.get("source_check_minutes")
@@ -1175,6 +1184,7 @@ class LunaTVSource(_PluginBase):
                         ],
                         allowed_private_ranges=self._probe_allowed_private_ranges(),
                         ad_filter_regex=self._config["hls_ad_filter_regex"],
+                        download_proxy=self._config["download_proxy"],
                     )
                 finally:
                     self._release_queue_lock()
@@ -1203,6 +1213,7 @@ class LunaTVSource(_PluginBase):
                     segment_thread_count=self._config["segment_thread_count"],
                     allowed_private_ranges=self._probe_allowed_private_ranges(),
                     ad_filter_regex=self._config["hls_ad_filter_regex"],
+                    download_proxy=self._config["download_proxy"],
                 )
             except Exception:
                 self._queue = None
@@ -1424,6 +1435,16 @@ class LunaTVSource(_PluginBase):
                     {
                         "component": "VTextField",
                         "props": {
+                            "model": "download_proxy",
+                            "label": "下载代理（可选）",
+                            "placeholder": "http://192.168.1.2:7890 或 socks5://192.168.1.2:7890",
+                            "hint": "仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。",
+                            "persistentHint": True,
+                        },
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
                             "model": "max_concurrent_tasks",
                             "label": "同时下载任务数",
                             "type": "number",
@@ -1545,6 +1566,7 @@ class LunaTVSource(_PluginBase):
             "mode": "download",
             "source_strategy": "first",
             "download_root": "",
+            "download_proxy": "",
             "use_moviepilot_dirs": True,
             "ffmpeg_path": "ffmpeg",
             "request_timeout": 15,
@@ -1590,6 +1612,16 @@ class LunaTVSource(_PluginBase):
                             "model": "config_url",
                             "label": "LunaTV 配置地址",
                             "placeholder": DEFAULT_CONFIG_URL,
+                        },
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {
+                            "model": "download_proxy",
+                            "label": "下载代理（可选）",
+                            "placeholder": "http://192.168.1.2:7890 或 socks5://192.168.1.2:7890",
+                            "hint": "仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。",
+                            "persistentHint": True,
                         },
                     },
                     {
@@ -1693,6 +1725,7 @@ class LunaTVSource(_PluginBase):
         "hls_ad_filter_regex": DEFAULT_HLS_AD_FILTER_REGEX,
             "source_strategy": "first",
             "download_root": "",
+            "download_proxy": "",
             "use_moviepilot_dirs": True,
             "mode": "download",
             "ffmpeg_path": "ffmpeg",
@@ -4418,6 +4451,7 @@ class LunaTVSource(_PluginBase):
             lambda _key, default=None: default,
             lambda *_: None,
             self._notify,
+            download_proxy=self._config.get("download_proxy", ""),
         )
         directories = self._system_directory_infos()
         configured_root = str(self._config.get("download_root") or "").strip()
@@ -4453,6 +4487,12 @@ class LunaTVSource(_PluginBase):
                     "segment_thread_count": self._config.get(
                         "segment_thread_count",
                         DEFAULT_SEGMENT_THREAD_COUNT,
+                    ),
+                    "proxy_enabled": bool(self._config.get("download_proxy")),
+                    "proxy_endpoint": (
+                        parse_proxy_url(self._config.get("download_proxy", "")).redacted
+                        if self._config.get("download_proxy")
+                        else ""
                     ),
                 },
                 "engine": queue.engine_status(),

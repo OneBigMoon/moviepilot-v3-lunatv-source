@@ -80,6 +80,7 @@ jobs:
             cms.py
             downloader.py
             m3u8_engine.py
+            proxy.py
             naming.py
             package.json
             fallback_sources.json
@@ -151,8 +152,8 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
-            "release-assets/lunatvsource_v${version}.zip" \
-            "release-assets/lunatvsource_v${version}.zip.sha256" \
+            "lunatvsource_v${version}.zip" \
+            "lunatvsource_v${version}.zip.sha256" \
             --draft \
             --verify-tag \
             --generate-notes \

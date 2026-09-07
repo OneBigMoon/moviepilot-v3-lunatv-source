@@ -20,6 +20,7 @@ const defaults = {
   mode: 'download',
   source_strategy: 'first',
   download_root: '',
+  download_proxy: '',
   use_moviepilot_dirs: true,
   ffmpeg_path: 'ffmpeg',
   queue_minutes: 1,
@@ -47,6 +48,25 @@ function validateIntegerRange(value, label, min, max) {
   return true
 }
 
+function validateProxy(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return true
+  try {
+    const parsed = new URL(raw)
+    if (!['http:', 'socks5:'].includes(parsed.protocol) || !parsed.hostname) {
+      throw new Error('unsupported proxy')
+    }
+    const port = parsed.port ? Number(parsed.port) : 7890
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error('invalid proxy port')
+    }
+    return true
+  } catch (_error) {
+    showMessage('下载代理需填写 http:// 或 socks5:// 地址', 'error')
+    return false
+  }
+}
+
 function showMessage(text, type = 'info') {
   message.text = text
   message.type = type
@@ -60,7 +80,8 @@ async function saveConfig() {
   }
   if (!validateIntegerRange(config.max_concurrent_tasks, '任务并发数', 1, 4)
     || !validateIntegerRange(config.segment_thread_count, '分片线程数', 4, 32)
-    || !validateIntegerRange(config.source_check_minutes, '来源健康检查间隔', 15, 1440)) return
+    || !validateIntegerRange(config.source_check_minutes, '来源健康检查间隔', 15, 1440)
+    || !validateProxy(config.download_proxy)) return
   if (Number(config.max_concurrent_tasks) * Number(config.segment_thread_count) > 64) {
     showMessage('任务并发数 × 分片线程数不能超过 64', 'error')
     return
@@ -74,6 +95,7 @@ async function saveConfig() {
       probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim(),
       hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim(),
       download_root: String(config.download_root || '').trim(),
+      download_proxy: String(config.download_proxy || '').trim(),
       ai_enabled: true,
       tmdb_association: true,
       use_moviepilot_dirs: true,
@@ -174,6 +196,16 @@ onMounted(() => {
           label="下载目录（可留空）"
           placeholder="留空自动选择"
           hint="填写后优先使用；留空时依次使用 MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VTextField
+          v-model="config.download_proxy"
+          label="下载代理（可选）"
+          placeholder="http://192.168.1.2:7890 或 socks5://192.168.1.2:7890"
+          hint="仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。"
           persistent-hint
           variant="outlined"
         />

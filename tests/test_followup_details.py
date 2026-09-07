@@ -1169,6 +1169,8 @@ def test_status_reports_real_concurrency_engine_and_followup_interval(monkeypatc
     assert status["download_settings"] == {
         "max_concurrent_tasks": 3,
         "segment_thread_count": 16,
+        "proxy_enabled": False,
+        "proxy_endpoint": "",
     }
     assert status["engine"] == engine
     assert status["subscription"]["refresh_minutes"] == 20

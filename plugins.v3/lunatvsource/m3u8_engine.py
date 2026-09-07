@@ -27,6 +27,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from .cms import _request_public_url
+from .proxy import ProxyError, ProxyResponseError
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -202,10 +204,12 @@ class ManagedBinaryInstaller:
         data_path: Path,
         spec: EngineSpec,
         bundled_asset_dir: Optional[Path] = None,
+        proxy_url: object = None,
     ) -> None:
         self.data_path = Path(data_path)
         self.spec = spec
         self.bundled_asset_dir = Path(bundled_asset_dir or BUNDLED_ASSET_DIR)
+        self.proxy_url = proxy_url
 
     @property
     def bin_dir(self) -> Path:
@@ -388,6 +392,7 @@ class ManagedBinaryInstaller:
         archive_path = Path(raw_path)
         digest = hashlib.sha256()
         response = None
+        response_connection = None
         complete = False
         try:
             request = urllib.request.Request(
@@ -400,12 +405,43 @@ class ManagedBinaryInstaller:
             for attempt in range(self.DOWNLOAD_CONNECT_ATTEMPTS):
                 _raise_if_cancelled(control_event)
                 try:
-                    response = urllib.request.urlopen(
-                        request, timeout=self._download_io_timeout(deadline)
-                    )
+                    if self.proxy_url:
+                        response_connection, response, _ = _request_public_url(
+                            asset.url,
+                            self._download_io_timeout(deadline),
+                            headers={
+                                "Accept": "application/octet-stream",
+                                "User-Agent": "MoviePilot-LunaTV/1.0",
+                            },
+                            deadline=deadline,
+                            proxy_url=self.proxy_url,
+                        )
+                    else:
+                        response = urllib.request.urlopen(
+                            request, timeout=self._download_io_timeout(deadline)
+                        )
                     break
                 except urllib.error.HTTPError:
                     raise
+                except ProxyResponseError as exc:
+                    raise M3U8EngineInstallError(
+                        f"{exc}，无法下载 N_m3u8DL-RE"
+                    ) from exc
+                except ProxyError as exc:
+                    if attempt + 1 >= self.DOWNLOAD_CONNECT_ATTEMPTS:
+                        raise M3U8EngineInstallError(
+                            f"{exc}，无法下载 N_m3u8DL-RE"
+                        ) from exc
+                    delay = min(
+                        self.DOWNLOAD_RETRY_DELAY_SECONDS,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                    if delay <= 0:
+                        raise M3U8EngineInstallError("代理连接超时，无法下载 N_m3u8DL-RE") from exc
+                    if control_event is None:
+                        time.sleep(delay)
+                    elif control_event.wait(delay):
+                        raise M3U8EngineCancelled("download cancelled")
                 except (urllib.error.URLError, TimeoutError, OSError):
                     if attempt + 1 >= self.DOWNLOAD_CONNECT_ATTEMPTS:
                         raise
@@ -453,7 +489,15 @@ class ManagedBinaryInstaller:
             if response is not None:
                 close = getattr(response, "close", None)
                 if callable(close):
-                    close()
+                    try:
+                        close()
+                    except OSError:
+                        pass
+            if response_connection is not None:
+                try:
+                    response_connection.close()
+                except OSError:
+                    pass
             if not complete:
                 try:
                     archive_path.unlink(missing_ok=True)
@@ -636,10 +680,19 @@ class _BaseM3U8Engine:
     PROCESS_NO_PROGRESS_TIMEOUT_SECONDS = 15 * 60
     PROCESS_POLL_INTERVAL_SECONDS = 0.25
 
-    def __init__(self, data_path: Path, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        data_path: Path,
+        logger: Optional[logging.Logger] = None,
+        proxy_url: object = None,
+    ) -> None:
         self.data_path = Path(data_path)
         self._logger = logger or LOGGER
-        self._installer = ManagedBinaryInstaller(self.data_path, self.spec)
+        self._installer = ManagedBinaryInstaller(
+            self.data_path,
+            self.spec,
+            proxy_url=proxy_url,
+        )
 
     @classmethod
     def asset_for_current_platform(
@@ -1110,8 +1163,9 @@ class N_m3u8DLEngine(_BaseM3U8Engine):
         data_path: Path,
         logger: Optional[logging.Logger] = None,
         thread_count: object = DEFAULT_THREAD_COUNT,
+        proxy_url: object = None,
     ) -> None:
-        super().__init__(data_path, logger)
+        super().__init__(data_path, logger, proxy_url=proxy_url)
         self.thread_count = self._normalized_thread_count(thread_count)
 
     @classmethod

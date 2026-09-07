@@ -17,6 +17,14 @@ import urllib.parse
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .classification import normalize_cms_class_names
+from .proxy import (
+    ProxyAuthenticationError,
+    ProxyResponseError,
+    classify_proxy_exception,
+    parse_proxy_url,
+    proxy_connection,
+    proxy_headers,
+)
 
 
 
@@ -193,6 +201,7 @@ def _master_playlist_height(playlist: str) -> int:
 def _resolve_public_probe_target(
     url: str,
     allowed_private_ranges: Iterable[str] = (),
+    allow_unresolved: bool = False,
 ) -> Tuple[urllib.parse.ParseResult, str, int]:
     parsed = urllib.parse.urlparse(str(url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -215,6 +224,8 @@ def _resolve_public_probe_target(
                 type=socket.SOCK_STREAM,
             )
         except OSError as exc:
+            if allow_unresolved:
+                return parsed, hostname, port
             raise ValueError("probe host cannot be resolved") from exc
         addresses = []
         for address_info in address_infos:
@@ -239,6 +250,8 @@ def _resolve_public_probe_target(
         and address not in allowed_addresses
     )
     if not allowed_addresses:
+        if allow_unresolved and not addresses:
+            return parsed, hostname, port
         raise ValueError("probe URL resolves to a non-public address")
     return parsed, str(allowed_addresses[0]), port
 
@@ -279,16 +292,36 @@ def _probe_host_header(parsed: urllib.parse.ParseResult, port: int) -> str:
     return hostname if port == default_port else f"{hostname}:{port}"
 
 
+def _request_target(parsed: urllib.parse.ParseResult, port: int, absolute: bool = False) -> str:
+    """Build an encoded origin-form or proxy absolute-form request target."""
+    path = urllib.parse.quote(
+        parsed.path or "/",
+        safe="/%:@!$&'()*+,;=-._~",
+    )
+    params = urllib.parse.quote(
+        getattr(parsed, "params", ""),
+        safe="%:@!$&'()*+,;=-._~",
+    )
+    query = urllib.parse.quote(parsed.query, safe="%=&/:?+;,@!$'()*-._~")
+    if absolute:
+        return urllib.parse.urlunparse(
+            (parsed.scheme, _probe_host_header(parsed, port), path, params, query, "")
+        )
+    return urllib.parse.urlunparse(("", "", path, params, query, ""))
+
+
 def _request_public_url(
     url: str,
     timeout: float,
     allowed_private_ranges: Iterable[str] = (),
     headers: Optional[Mapping[str, str]] = None,
     deadline: Optional[float] = None,
+    proxy_url: object = None,
 ) -> Tuple[http.client.HTTPConnection, http.client.HTTPResponse, str]:
     """Open an approved URL while pinning DNS and validating redirects."""
 
     current_url = str(url or "").strip()
+    proxy = parse_proxy_url(proxy_url)
     request_timeout = min(max(float(timeout or 8.0), 1.0), 15.0)
     for _ in range(_PROBE_MAX_REDIRECTS + 1):
         connection_timeout = request_timeout
@@ -297,12 +330,18 @@ def _request_public_url(
             if remaining <= 0:
                 raise TimeoutError("public URL request deadline exceeded")
             connection_timeout = min(connection_timeout, remaining)
+        resolve_kwargs = {}
+        if proxy is not None and str(proxy.scheme or "").lower() in {"socks5", "socks5h"}:
+            resolve_kwargs["allow_unresolved"] = True
         parsed, address, port = _resolve_public_probe_target(
             current_url,
             allowed_private_ranges,
+            **resolve_kwargs,
         )
         connection: http.client.HTTPConnection
-        if parsed.scheme == "https":
+        if proxy is not None:
+            connection, request_mode = proxy_connection(proxy, parsed, connection_timeout)
+        elif parsed.scheme == "https":
             connection = _PinnedHTTPSConnection(
                 parsed.hostname or "",
                 address,
@@ -315,28 +354,17 @@ def _request_public_url(
                 port,
                 timeout=connection_timeout,
             )
-        path = urllib.parse.urlunparse(
-            (
-                "",
-                "",
-                urllib.parse.quote(
-                    parsed.path or "/",
-                    safe="/%:@!$&'()*+,;=-._~",
-                ),
-                urllib.parse.quote(parsed.params, safe="%:@!$&'()*+,;=-._~"),
-                urllib.parse.quote(
-                    parsed.query,
-                    safe="%=&/:?+;,@!$'()*-._~",
-                ),
-                "",
-            )
-        )
+        path = _request_target(parsed, port)
         request_headers = {
             "Host": _probe_host_header(parsed, port),
             "User-Agent": "LunaTVSource/0.1 MoviePilot",
             "Accept": "application/vnd.apple.mpegurl, application/x-mpegURL, */*",
             "Connection": "close",
         }
+        if proxy is not None:
+            if request_mode == "absolute-form":
+                request_headers.update(proxy_headers(proxy))
+                path = _request_target(parsed, port, absolute=True)
         if headers:
             request_headers.update({str(key): str(value) for key, value in headers.items()})
             request_headers["Host"] = _probe_host_header(parsed, port)
@@ -348,8 +376,10 @@ def _request_public_url(
                 headers=request_headers,
             )
             response = connection.getresponse()
-        except Exception:
+        except Exception as exc:
             connection.close()
+            if proxy is not None:
+                raise classify_proxy_exception(exc) from exc
             raise
         if response.status in _PROBE_REDIRECT_CODES:
             location = response.getheader("Location")
@@ -360,6 +390,10 @@ def _request_public_url(
             continue
         if response.status < 200 or response.status >= 400:
             connection.close()
+            if proxy is not None:
+                if response.status == 407:
+                    raise ProxyAuthenticationError(response.status)
+                raise ProxyResponseError(response.status)
             raise OSError(f"probe request returned HTTP {response.status}")
         return connection, response, current_url
     raise OSError("too many probe redirects")
@@ -371,6 +405,7 @@ def _fetch_public_url(
     limit: int,
     allowed_private_ranges: Iterable[str] = (),
     deadline: Optional[float] = None,
+    proxy_url: object = None,
 ) -> Tuple[bytes, str]:
     """Fetch a bounded public URL while pinning DNS and validating redirects."""
 
@@ -379,6 +414,7 @@ def _fetch_public_url(
         timeout,
         allowed_private_ranges,
         deadline=deadline,
+        proxy_url=proxy_url,
     )
     try:
         return response.read(max(1, int(limit)) + 1)[:limit], final_url
