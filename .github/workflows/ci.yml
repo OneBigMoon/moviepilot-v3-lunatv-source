@@ -152,8 +152,8 @@ jobs:
             exit 1
           fi
           gh release create "$GITHUB_REF_NAME" \
-            "lunatvsource_v${version}.zip" \
-            "lunatvsource_v${version}.zip.sha256" \
+            "release-assets/lunatvsource_v${version}.zip" \
+            "release-assets/lunatvsource_v${version}.zip.sha256" \
             --draft \
             --verify-tag \
             --generate-notes \
