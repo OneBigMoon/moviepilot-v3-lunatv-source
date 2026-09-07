@@ -312,32 +312,39 @@ def test_https_proxy_407_is_authentication_error(monkeypatch):
 
 
 def test_socks5_uses_domain_address_at_proxy(monkeypatch):
-    client, server = socket.socketpair()
-    observed = {}
+    class FakeSocket:
+        def __init__(self):
+            self.sent = []
+            self.incoming = bytearray(
+                bytes([5, 0])
+                + bytes([5, 0, 0, 1])
+                + socket.inet_aton("127.0.0.1")
+                + (80).to_bytes(2, "big")
+            )
 
-    def fake_create_connection(_address, _timeout):
-        return client
+        def sendall(self, data):
+            self.sent.append(bytes(data))
 
-    def proxy_side():
-        try:
-            assert server.recv(3) == bytes([5, 1, 0])
-            server.sendall(bytes([5, 0]))
-            request = server.recv(256)
-            observed["request"] = request
-            server.sendall(bytes([5, 0, 0, 1]) + socket.inet_aton("127.0.0.1") + (80).to_bytes(2, "big"))
-        finally:
-            server.close()
+        def recv(self, size):
+            chunk = bytes(self.incoming[:size])
+            del self.incoming[:size]
+            return chunk
 
-    monkeypatch.setattr("lunatvsource_test.proxy.socket.create_connection", fake_create_connection)
-    worker = threading.Thread(target=proxy_side, daemon=True)
-    worker.start()
+        def close(self):
+            return None
+
+    fake_socket = FakeSocket()
+    monkeypatch.setattr(
+        "lunatvsource_test.proxy.socket.create_connection",
+        lambda _address, _timeout: fake_socket,
+    )
     spec = parse_proxy_url("socks5://127.0.0.1:7890")
     assert spec is not None
     connected = _socks5_socket(spec, "media.example", 80, 3)
     connected.close()
-    worker.join(timeout=1)
-    assert observed["request"][:4] == bytes([5, 1, 0, 3])
-    assert observed["request"][5:18] == b"media.example"
+    assert fake_socket.sent[0] == bytes([5, 1, 0])
+    assert fake_socket.sent[1][:4] == bytes([5, 1, 0, 3])
+    assert fake_socket.sent[1][5:18] == b"media.example"
 
 
 def test_socks5_allows_proxy_side_dns_when_local_resolution_is_unavailable(monkeypatch):
