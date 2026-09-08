@@ -19,6 +19,19 @@ from enum import Enum
 from types import ModuleType, SimpleNamespace
 
 
+def _patch_plugin_time(monkeypatch, **overrides):
+    """Override the plugin module's clock without mutating stdlib time globally."""
+    base_time = plugin_module.time
+
+    class TimeProxy:
+        def __getattr__(self, name):
+            if name in overrides:
+                return overrides[name]
+            return getattr(base_time, name)
+
+    monkeypatch.setattr(plugin_module, "time", TimeProxy())
+
+
 def _field(value, key, default=None):
     if isinstance(value, Mapping):
         return value.get(key, default)
@@ -1588,7 +1601,7 @@ def test_season_media_cards_are_not_order_dependent_when_precise_row_exists():
 def test_quality_cache_prunes_expired_entries_and_enforces_capacity(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
-    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: 1000.0)
+    _patch_plugin_time(monkeypatch, monotonic=lambda: 1000.0)
     monkeypatch.setattr(plugin_module, "probe_stream_height", lambda *_args, **_kwargs: 1080)
     plugin._quality_cache = {
         "expired": (0.0, 1080),
@@ -1611,7 +1624,7 @@ def test_quality_cache_prunes_expired_entries_and_enforces_capacity(monkeypatch)
 def test_quality_probe_caches_latency_with_height(monkeypatch):
     probe_calls = []
     monotonic_values = iter((100.0, 100.123, 101.0))
-    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(monotonic_values))
+    _patch_plugin_time(monkeypatch, monotonic=lambda: next(monotonic_values))
 
     def probe(url, **_kwargs):
         probe_calls.append(url)
@@ -3850,7 +3863,7 @@ def test_active_queue_projection_reports_partial_size_and_speed(monkeypatch, tmp
     partial.parent.mkdir(parents=True)
     partial.write_bytes(b"x" * 1024)
     timestamps = iter([100.0, 102.0])
-    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(timestamps))
+    _patch_plugin_time(monkeypatch, monotonic=lambda: next(timestamps))
 
     first = plugin._active_download_torrent(task)
     partial.write_bytes(b"x" * 3072)
@@ -3918,7 +3931,7 @@ def test_downloader_info_reports_active_lunatv_transfer(monkeypatch, tmp_path: P
     partial.write_bytes(b"x" * 1024)
     plugin.save_data(plugin._queue.DATA_KEY, [task.to_dict(), completed.to_dict()])
     timestamps = iter([100.0, 102.0])
-    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(timestamps))
+    _patch_plugin_time(monkeypatch, monotonic=lambda: next(timestamps))
 
     first = plugin.downloader_info("LunaTVSource")[0]
     partial.write_bytes(b"x" * 3072)
@@ -4086,7 +4099,7 @@ def test_active_metrics_use_rolling_window_and_reset_after_size_rollback(
     partial = tmp_path / relative_dir / f"{filename}.part"
     partial.parent.mkdir(parents=True)
     timestamps = iter([100.0, 110.0, 130.0, 140.0, 150.0])
-    monkeypatch.setattr(plugin_module.time, "monotonic", lambda: next(timestamps))
+    _patch_plugin_time(monkeypatch, monotonic=lambda: next(timestamps))
 
     partial.write_bytes(b"x" * 1024)
     assert plugin._active_download_torrent(task).dlspeed == "0.0B"
@@ -4632,7 +4645,7 @@ def test_native_movie_move_success_with_source_still_present_falls_back(
     plugin, task, transfer_chain = _native_movie_transfer_test_setup(
         monkeypatch, tmp_path, "move"
     )
-    monkeypatch.setattr(plugin_module.time, "sleep", lambda *_args, **_kwargs: None)
+    _patch_plugin_time(monkeypatch, sleep=lambda *_args, **_kwargs: None)
     output = tmp_path / "movie.mp4"
     output.write_bytes(b"movie")
 
@@ -4658,7 +4671,7 @@ def test_native_movie_move_success_with_source_removed_returns_moviepilot(
         if sleep_calls == 20:
             output.unlink()
 
-    monkeypatch.setattr(plugin_module.time, "sleep", remove_after_last_wait)
+    _patch_plugin_time(monkeypatch, sleep=remove_after_last_wait)
     assert plugin._native_transfer(task, str(output)) == "moviepilot"
     assert not output.exists()
     assert sleep_calls == 20
@@ -4671,7 +4684,7 @@ def test_native_movie_copy_success_with_source_still_present_returns_moviepilot(
     plugin, task, transfer_chain = _native_movie_transfer_test_setup(
         monkeypatch, tmp_path, "copy"
     )
-    monkeypatch.setattr(plugin_module.time, "sleep", lambda *_args, **_kwargs: None)
+    _patch_plugin_time(monkeypatch, sleep=lambda *_args, **_kwargs: None)
     output = tmp_path / "movie.mp4"
     output.write_bytes(b"movie")
 
