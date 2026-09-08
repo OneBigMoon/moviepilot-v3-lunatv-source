@@ -70,7 +70,9 @@ def test_search_forbidden_source_remains_enabled_until_manually_disabled(monkeyp
     assert result["disabled"] == 1
     assert payload["auto_disabled"] is False
     assert payload["enabled"] is True
-    assert payload["health_label"] == "网络不通"
+    assert payload["health_label"] == "搜索受限"
+    assert payload["network_label"] == "源站在线，搜索受限"
+    assert payload["search_label"] == "搜索受限"
     assert payload["network_successes"] == 0
     assert payload["network_failures"] == 1
     assert payload["last_error"] == "CMS 源站在线，但禁止关键词搜索（API 1002）"
@@ -98,6 +100,34 @@ def test_unchecked_source_remains_searchable_before_health_check(monkeypatch):
 
     assert [item.key for item in plugin._client().sources] == [source.key]
 
+
+def test_corrupt_health_cache_values_are_safely_normalized():
+    source = make_source("corrupt-cache")
+    plugin = LunaTVSource()
+    plugin.save_data(
+        plugin_module.SOURCE_HEALTH_KEY,
+        {
+            source.key: {
+                "api": source.api,
+                "manual_disabled": "false",
+                "health_status": "failed",
+                "last_checked": {"bad": True},
+                "failures": "many",
+                "network_successes": [],
+                "network_failures": float("inf"),
+            }
+        },
+    )
+    plugin.init_plugin({"enabled": True})
+    save_catalog(plugin, source)
+
+    payload = plugin.api_sources()["data"][0]
+
+    assert payload["manual_disabled"] is False
+    assert payload["last_checked"] == 0
+    assert payload["failures"] == 0
+    assert payload["network_successes"] == 0
+    assert payload["network_failures"] == 0
 
 def test_health_failure_keeps_search_enabled_and_later_success_recovers(monkeypatch):
     healthy = make_source("healthy")

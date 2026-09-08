@@ -285,6 +285,7 @@ function sourceVisualStatus(source) {
     || source?.disabled_reason === 'configured'
     || ['pending', 'unchecked'].includes(source?.health_status)
   ) return 'muted'
+  if (source?.search_status === 'restricted') return 'warning'
   return source?.status || 'ready'
 }
 
@@ -303,6 +304,7 @@ function sourceHealthVisualStatus(source) {
     || source?.disabled_reason === 'configured'
     || ['pending', 'unchecked'].includes(source?.health_status)
   ) return 'muted'
+  if (source?.search_status === 'restricted') return 'warning'
   return source?.health_status || 'unknown'
 }
 
@@ -561,12 +563,12 @@ return (_ctx, _cache) => {
               ])
             ]))
     ]),
-    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-4699be10><div class=\"section-title\" data-v-4699be10>使用说明</div><div class=\"help-grid\" data-v-4699be10><p data-v-4699be10><strong data-v-4699be10>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-4699be10><strong data-v-4699be10>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-4699be10><strong data-v-4699be10>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-4699be10><strong data-v-4699be10>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-4699be10><strong data-v-4699be10>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
+    _cache[8] || (_cache[8] = _createStaticVNode("<section class=\"panel help-panel\" data-v-59c9d924><div class=\"section-title\" data-v-59c9d924>使用说明</div><div class=\"help-grid\" data-v-59c9d924><p data-v-59c9d924><strong data-v-59c9d924>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-59c9d924><strong data-v-59c9d924>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-59c9d924><strong data-v-59c9d924>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-59c9d924><strong data-v-59c9d924>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-59c9d924><strong data-v-59c9d924>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div></section>", 1))
   ]))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4699be10"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-59c9d924"]]);
 
 export { AppPage as default };

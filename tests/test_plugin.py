@@ -53,6 +53,27 @@ def test_service_registers_subscription_refresh_and_serial_queue():
     }
 
 
+def test_long_service_intervals_are_normalized_without_invalid_cron_steps():
+    plugin = LunaTVSource()
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "poll_minutes": 1440,
+            "queue_minutes": 1440,
+            "request_timeout": "nan",
+            "moviepilot_organize": "false",
+            "generate_nfo": "false",
+        }
+    )
+
+    assert len(plugin.get_service()) == 3
+    assert plugin._config["poll_minutes"] == 1440
+    assert plugin._config["queue_minutes"] == 1440
+    assert plugin._config["request_timeout"] == plugin_module.DEFAULT_REQUEST_TIMEOUT
+    assert plugin._config["moviepilot_organize"] is False
+    assert plugin._config["generate_nfo"] is False
+
+
 def test_refresh_subscriptions_does_not_use_legacy_operator_when_v3_operator_is_missing(monkeypatch):
     legacy_calls = []
 
@@ -152,6 +173,22 @@ def test_manual_download_rejects_non_http_url():
     result = plugin.api_download({"url": "file:///tmp/movie.m3u8"})
     assert result["success"] is False
     assert "http/https" in result["message"]
+
+
+@pytest.mark.parametrize("value", [{"nested": 1}, True, "1.5", float("inf")])
+def test_manual_download_rejects_malformed_season_episode(value, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+
+    result = plugin.api_download(
+        {
+            "url": "https://example.test/manual.m3u8",
+            "season": value,
+            "episode": 1,
+        }
+    )
+
+    assert result == {"success": False, "message": "季集参数无效", "data": {}}
 
 
 def test_manual_download_wakes_queue_once_only_for_new_task(monkeypatch, tmp_path: Path):

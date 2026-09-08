@@ -23,7 +23,9 @@ const defaults = {
   download_proxy: '',
   use_moviepilot_dirs: true,
   ffmpeg_path: 'ffmpeg',
+  poll_minutes: 30,
   queue_minutes: 1,
+  request_timeout: 15,
   ai_enabled: true,
   tmdb_association: true,
   moviepilot_organize: true,
@@ -43,6 +45,15 @@ function validateIntegerRange(value, label, min, max) {
   const number = Number(value)
   if (!Number.isInteger(number) || number < min || number > max) {
     showMessage(`${label}需为 ${min} 到 ${max} 之间的整数`, 'error')
+    return false
+  }
+  return true
+}
+
+function validateNumberRange(value, label, min, max) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < min || number > max) {
+    showMessage(`${label}需为 ${min} 到 ${max} 之间的数字`, 'error')
     return false
   }
   return true
@@ -81,6 +92,9 @@ async function saveConfig() {
   if (!validateIntegerRange(config.max_concurrent_tasks, '任务并发数', 1, 4)
     || !validateIntegerRange(config.segment_thread_count, '分片线程数', 4, 32)
     || !validateIntegerRange(config.source_check_minutes, '来源健康检查间隔', 15, 1440)
+    || !validateIntegerRange(config.poll_minutes, '订阅刷新间隔', 5, 1440)
+    || !validateIntegerRange(config.queue_minutes, '队列间隔', 1, 1440)
+    || !validateNumberRange(config.request_timeout, '请求超时', 1, 60)
     || !validateProxy(config.download_proxy)) return
   if (Number(config.max_concurrent_tasks) * Number(config.segment_thread_count) > 64) {
     showMessage('任务并发数 × 分片线程数不能超过 64', 'error')
@@ -96,12 +110,10 @@ async function saveConfig() {
       hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim(),
       download_root: String(config.download_root || '').trim(),
       download_proxy: String(config.download_proxy || '').trim(),
-      ai_enabled: true,
-      tmdb_association: true,
-      use_moviepilot_dirs: true,
-      moviepilot_organize: true,
-      native_recognize: true,
       mode,
+      poll_minutes: Number(config.poll_minutes),
+      queue_minutes: Number(config.queue_minutes),
+      request_timeout: Number(config.request_timeout),
       max_concurrent_tasks: Number(config.max_concurrent_tasks),
       segment_thread_count: Number(config.segment_thread_count),
       source_check_minutes: Number(config.source_check_minutes),
@@ -219,6 +231,45 @@ onMounted(() => {
           max="4"
           step="1"
           hint="范围 1–4，默认 2。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12" md="6">
+        <VTextField
+          v-model="config.poll_minutes"
+          label="订阅刷新间隔（分钟）"
+          type="number"
+          min="5"
+          max="1440"
+          step="1"
+          hint="范围 5–1440；默认 30。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12" md="6">
+        <VTextField
+          v-model="config.queue_minutes"
+          label="队列间隔（分钟）"
+          type="number"
+          min="1"
+          max="1440"
+          step="1"
+          hint="范围 1–1440；默认 1。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12" md="6">
+        <VTextField
+          v-model="config.request_timeout"
+          label="请求超时（秒）"
+          type="number"
+          min="1"
+          max="60"
+          step="0.5"
+          hint="范围 1–60 秒；默认 15。"
           persistent-hint
           variant="outlined"
         />

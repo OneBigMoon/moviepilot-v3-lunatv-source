@@ -1218,21 +1218,20 @@ def test_refresh_subscriptions_persists_success_and_failure(monkeypatch):
     assert failure["error"] == "subscription database unavailable"
 
 
-def test_refresh_subscriptions_keeps_latest_concurrent_status(monkeypatch):
+def test_refresh_subscriptions_skips_overlapping_calls(monkeypatch):
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
-    entered = [threading.Event(), threading.Event()]
-    release = [threading.Event(), threading.Event()]
+    entered = threading.Event()
+    release = threading.Event()
     calls = []
 
     def refresh_once():
-        index = len(calls)
-        calls.append(index)
-        entered[index].set()
-        assert release[index].wait(timeout=2)
+        calls.append(0)
+        entered.set()
+        assert release.wait(timeout=2)
         return {
             "subscriptions": 1,
-            "queued": index + 1,
+            "queued": 1,
             "reconciled": 0,
         }
 
@@ -1240,27 +1239,20 @@ def test_refresh_subscriptions_keeps_latest_concurrent_status(monkeypatch):
     first = threading.Thread(target=plugin.refresh_subscriptions)
     second = threading.Thread(target=plugin.refresh_subscriptions)
     first.start()
-    assert entered[0].wait(timeout=2)
+    assert entered.wait(timeout=2)
     second.start()
-    assert entered[1].wait(timeout=2)
-
-    release[0].set()
-    first.join(timeout=2)
-    assert not first.is_alive()
-    in_progress = plugin.api_status()["data"]["followup_status"][
-        "subscription_refresh"
-    ]
-    assert in_progress["running"] is True
-    assert "queued" not in in_progress
-
-    release[1].set()
     second.join(timeout=2)
     assert not second.is_alive()
+    assert calls == [0]
+
+    release.set()
+    first.join(timeout=2)
+    assert not first.is_alive()
     latest = plugin.api_status()["data"]["followup_status"][
         "subscription_refresh"
     ]
     assert latest["running"] is False
-    assert latest["queued"] == 2
+    assert latest["queued"] == 1
 
 
 def test_native_tmdb_season_subscription_queues_all_new_episode_rows(

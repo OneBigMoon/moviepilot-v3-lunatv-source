@@ -197,6 +197,7 @@ function sourceVisualStatus(source) {
     || source?.disabled_reason === 'configured'
     || ['pending', 'unchecked'].includes(source?.health_status)
   ) return 'muted'
+  if (source?.search_status === 'restricted') return 'warning'
   return source?.status || 'ready'
 }
 
@@ -215,6 +216,7 @@ function sourceHealthVisualStatus(source) {
     || source?.disabled_reason === 'configured'
     || ['pending', 'unchecked'].includes(source?.health_status)
   ) return 'muted'
+  if (source?.search_status === 'restricted') return 'warning'
   return source?.health_status || 'unknown'
 }
 
@@ -511,6 +513,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .search-state.is-unsupported { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .08); }
 .search-state.is-disabled { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-error, 244, 67, 54), .16); }
 .search-state.is-empty, .search-state.is-degraded { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-warning, 251, 140, 0), .16); }
+.search-state.is-restricted { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-warning, 251, 140, 0), .16); }
 .source-action { border: 1px solid rgba(var(--v-theme-primary, 139, 92, 246), .45); border-radius: 8px; background: transparent; color: rgb(var(--v-theme-primary, 139, 92, 246)); padding: 5px 10px; cursor: pointer; font-weight: 650; }
 .source-action:disabled { cursor: default; opacity: .55; }
 .source-actions { display: flex; gap: 6px; }
