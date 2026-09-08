@@ -7,6 +7,7 @@ import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -412,10 +413,13 @@ def test_socks5_username_password_authentication(monkeypatch):
 
     worker = threading.Thread(target=proxy_side, daemon=True)
     worker.start()
+    # Replace only proxy.py's module reference.  Patching the shared stdlib
+    # socket module lets unrelated background health checks borrow this test
+    # socket and close it while the SOCKS handshake is still in progress.
     monkeypatch.setattr(
-        proxy_module.socket,
-        "create_connection",
-        lambda _address, _timeout: client,
+        proxy_module,
+        "socket",
+        SimpleNamespace(create_connection=lambda _address, _timeout: client),
     )
     spec = parse_proxy_url("socks5://user:secret@127.0.0.1:7890")
     assert spec is not None
