@@ -746,7 +746,19 @@ onBeforeUnmount(() => {
   margin: 0;
   padding: 32px;
   box-sizing: border-box;
-  background: rgb(var(--v-theme-background, 16, 16, 24));
+  /* The host repaints its wallpaper behind plugin pages, so every surface is
+     expressed as a token that the theme block at the end of this file can
+     swap for MoviePilot's own glass/transparency material. */
+  --ltv-page-bg: rgb(var(--v-theme-background, 16, 16, 24));
+  --ltv-surface: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-heavy, 1));
+  --ltv-surface-soft: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+  --ltv-surface-quiet: rgba(var(--v-theme-on-surface, 232, 231, 241), .018);
+  --ltv-border: rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12));
+  --ltv-border-soft: rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .1));
+  --ltv-shadow: 0 14px 34px rgba(0, 0, 0, .12);
+  --ltv-shadow-soft: 0 10px 26px rgba(0, 0, 0, .08);
+  --ltv-blur: none;
+  background: var(--ltv-page-bg);
   min-height: 100%;
 }
 .lunatv-header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
@@ -754,7 +766,7 @@ onBeforeUnmount(() => {
 h1 { margin: 8px 0; font-size: 32px; }
 p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); margin: 0; }
 .header-status { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
-.page-tabs { display: flex; gap: 4px; margin-bottom: 18px; padding: 4px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 12px; background: rgba(var(--v-theme-surface, 23, 23, 34), .72); }
+.page-tabs { display: flex; gap: 4px; margin-bottom: 18px; padding: 4px; border: 1px solid var(--ltv-border); border-radius: 12px; background: var(--ltv-surface); backdrop-filter: var(--ltv-blur); }
 .page-tab { flex: 0 0 auto; border: 0; border-radius: 9px; padding: 9px 16px; color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .68)); background: transparent; cursor: pointer; font: inherit; font-size: 13px; font-weight: 650; }
 .page-tab:hover { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .06); }
 .page-tab.is-active { color: rgb(var(--v-theme-on-primary, 255, 255, 255)); background: rgb(var(--v-theme-primary, 139, 92, 246)); box-shadow: 0 4px 12px rgba(var(--v-theme-primary, 139, 92, 246), .24); }
@@ -766,7 +778,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .button, .episode-button { border: 0; border-radius: 10px; background: rgb(var(--v-theme-primary, 139, 92, 246)); color: rgb(var(--v-theme-on-primary, 255, 255, 255)); padding: 10px 16px; cursor: pointer; font-weight: 650; }
 .button.secondary { background: rgba(var(--v-theme-primary, 139, 92, 246), .14); color: rgb(var(--v-theme-primary, 139, 92, 246)); }
 .button:disabled { opacity: .55; cursor: default; }
-.panel { background: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-heavy, 1)); border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 16px; padding: 18px; margin-bottom: 18px; }
+.panel { background: var(--ltv-surface); border: 1px solid var(--ltv-border); border-radius: 16px; padding: 18px; margin-bottom: 18px; backdrop-filter: var(--ltv-blur); }
 .section-title { font-size: 17px; font-weight: 700; margin-bottom: 14px; }
 .muted, small { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; }
 .alert { border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; }
@@ -774,7 +786,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .alert.success { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-success, 76, 175, 80), .16); }
 .alert.warning { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-warning, 251, 140, 0), .16); }
 .setup-strip { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; }
-.setup-strip span { border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 999px; padding: 6px 9px; background: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-heavy, 1)); }
+.setup-strip span { border: 1px solid var(--ltv-border); border-radius: 999px; padding: 6px 9px; background: var(--ltv-surface); }
 .section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 14px; }
 .section-heading .section-title { margin-bottom: 0; }
 .source-caption { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; white-space: nowrap; }
@@ -788,13 +800,13 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .debug-badge.is-on { color: rgb(var(--v-theme-success, 76, 175, 80)); background: rgba(var(--v-theme-success, 76, 175, 80), .16); }
 .debug-badge.is-off { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .08); }
 .ad-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
-.ad-metric { display: grid; gap: 4px; min-width: 0; padding: 13px 14px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 12px; background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035); }
+.ad-metric { display: grid; gap: 4px; min-width: 0; padding: 13px 14px; border: 1px solid var(--ltv-border); border-radius: 12px; background: var(--ltv-surface-soft); }
 .ad-metric.is-blocked { border-color: rgba(var(--v-theme-warning, 251, 140, 0), .34); background: rgba(var(--v-theme-warning, 251, 140, 0), .07); }
 .ad-metric-label { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; }
 .ad-metric strong { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ad-metric small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ad-event-list { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; }
-.ad-event { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .10)); border-radius: 11px; background: rgba(var(--v-theme-on-surface, 232, 231, 241), .018); }
+.ad-event { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid var(--ltv-border-soft); border-radius: 11px; background: var(--ltv-surface-quiet); }
 .ad-event-main { min-width: 0; display: grid; gap: 5px; }
 .ad-event-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .ad-event-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -838,7 +850,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
   border-radius: 8px;
   padding: 6px 8px;
   color: rgb(var(--v-theme-on-surface, 232, 231, 241));
-  background: rgba(var(--v-theme-surface, 23, 23, 34), 1);
+  background: var(--ltv-surface);
   font: inherit;
 }
 .source-config-select:disabled {
@@ -859,6 +871,31 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .help-grid p { margin: 0; }
 @media (max-width: 760px) { .lunatv-page { padding: 18px; } .lunatv-header { flex-direction: column; align-items: stretch; } .lunatv-actions { justify-content: flex-start; } .section-heading { align-items: flex-start; flex-direction: column; gap: 4px; } .page-tabs { margin-bottom: 14px; } .page-tab { flex: 1 1 0; } }
 @media (max-width: 760px) { .help-grid { grid-template-columns: 1fr; } }
+
+/* Follow MoviePilot's own themes: the glass and transparency modes paint a
+   wallpaper behind the page, so the plugin page drops its opaque background
+   and borrows the host's surface material instead of inventing its own. */
+html[data-theme='glass'] .lunatv-page {
+  --ltv-page-bg: transparent;
+  --ltv-surface: var(--glass-surface-raised, rgba(11, 19, 34, .32));
+  --ltv-surface-soft: var(--glass-control, rgba(255, 255, 255, .07));
+  --ltv-surface-quiet: var(--glass-surface, rgba(11, 19, 34, .24));
+  --ltv-border: var(--glass-border-raised, rgba(255, 255, 255, .14));
+  --ltv-border-soft: var(--glass-border, rgba(255, 255, 255, .1));
+  --ltv-shadow: var(--glass-shadow-raised, 0 16px 40px rgba(3, 7, 18, .32));
+  --ltv-shadow-soft: var(--glass-shadow, 0 10px 28px rgba(3, 7, 18, .24));
+  --ltv-blur: var(--glass-raised-backdrop-filter, none);
+}
+
+html[data-theme='transparent'] .lunatv-page {
+  --ltv-page-bg: transparent;
+  --ltv-surface: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
+  --ltv-surface-soft: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-light, .2));
+  --ltv-surface-quiet: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-light, .2));
+  --ltv-shadow: 0 16px 36px rgba(0, 0, 0, .18);
+  --ltv-shadow-soft: 0 10px 24px rgba(0, 0, 0, .12);
+  --ltv-blur: blur(var(--transparent-blur, 10px)) saturate(1.2);
+}
 .lunatv-page {
   padding: clamp(18px, 3vw, 32px);
 }
@@ -868,7 +905,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 }
 
 .panel {
-  box-shadow: 0 14px 34px rgba(0, 0, 0, .12);
+  box-shadow: var(--ltv-shadow);
 }
 
 .health-overview {
@@ -877,9 +914,9 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
   gap: 18px;
   padding: 14px 16px;
   margin-bottom: 14px;
-  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12));
+  border: 1px solid var(--ltv-border);
   border-radius: 12px;
-  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+  background: var(--ltv-surface-soft);
 }
 
 .health-overview.is-running {
@@ -953,9 +990,9 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .legend-dot.is-failed { background: rgb(var(--v-theme-error, 244, 67, 54)); }
 
 .source-table-wrap {
-  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .10));
+  border: 1px solid var(--ltv-border-soft);
   border-radius: 12px;
-  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .018);
+  background: var(--ltv-surface-quiet);
 }
 
 .source-table {
@@ -1095,10 +1132,11 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
   gap: 8px;
   min-width: 0;
   padding: 15px 16px;
-  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .11));
+  border: 1px solid var(--ltv-border);
   border-radius: 14px;
-  background: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-heavy, 1));
-  box-shadow: 0 10px 26px rgba(0, 0, 0, .08);
+  background: var(--ltv-surface);
+  box-shadow: var(--ltv-shadow-soft);
+  backdrop-filter: var(--ltv-blur);
 }
 
 .overview-card-heading {
@@ -1237,9 +1275,9 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .debug-switch {
   min-height: 30px;
   padding: 0 10px;
-  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12));
+  border: 1px solid var(--ltv-border);
   border-radius: 8px;
-  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+  background: var(--ltv-surface-soft);
 }
 
 .source-action.is-danger {
@@ -1255,9 +1293,9 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
   gap: 12px;
   margin-bottom: 12px;
   padding: 13px 14px;
-  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .11));
+  border: 1px solid var(--ltv-border);
   border-radius: 13px;
-  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .025);
+  background: var(--ltv-surface-soft);
 }
 
 .ad-monitor-state.is-active {

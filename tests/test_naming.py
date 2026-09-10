@@ -18,6 +18,22 @@ def test_normalize_titles_removes_bundle_metadata_but_keeps_year():
     assert normalize_search_title("示例剧 [1080P 中文字幕]") == "示例剧"
 
 
+def test_normalize_titles_drop_cms_separators_left_by_suffix_stripping():
+    assert normalize_media_title("凡人修仙传 · 第1季") == "凡人修仙传"
+    assert normalize_media_title("海底小纵队英语 · 第1季") == "海底小纵队英语"
+    assert media_path(
+        "/media/incoming", "海底小纵队第十一季英语 · ", "2026", "tv", 1, 1, "x.m3u8"
+    ) == (
+        "海底小纵队第十一季英语 (2026)/Season 01",
+        "海底小纵队第十一季英语 (2026) - S01E01.mp4",
+    )
+    assert normalize_media_title("漫长的季节 - 第二季") == "漫长的季节"
+    assert media_path("/media/incoming", "凡人修仙传 · 第1季", "2020", "tv", 1, 189, "x.m3u8") == (
+        "凡人修仙传 (2020)/Season 01",
+        "凡人修仙传 (2020) - S01E189.mp4",
+    )
+
+
 def test_movie_path_uses_year():
     directory, filename = media_path("/media/incoming", "示例电影", "2025", "movie", 1, 1, "x.m3u8")
     assert directory == "示例电影 (2025)"

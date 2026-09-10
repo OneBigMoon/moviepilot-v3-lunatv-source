@@ -23,6 +23,11 @@ _SEASON_SUFFIX = re.compile(
     r"(?:\s*[\(\[（【]?\s*)(?:第\s*)?(?:\d{1,3}|[一二两三四五六七八九十百千万]+)\s*季(?:\s*[\)\]）】])?\s*$",
     re.IGNORECASE,
 )
+# Apple CMS rows commonly append a season marker after a separator, e.g.
+# ``凡人修仙传 · 第1季``.  Stripping the marker leaves the separator dangling,
+# and MoviePilot's own recognizer then fails to match ``凡人修仙传 · (2020)``
+# against the TMDB title ``凡人修仙传 (2020)``.
+_DANGLING_SEPARATOR = re.compile(r"[\s·•・∙\-–—_:：;；|/\\]+$")
 _EPISODE_SUFFIX = re.compile(
     r"\s*(?:S\s*\d{1,3}\s*E\s*\d{1,4}|第\s*(?:\d{1,4}|[一二两三四五六七八九十百千万]+)\s*[集话])\s*$",
     re.IGNORECASE,
@@ -62,6 +67,7 @@ def normalize_media_title(value: str) -> str:
         result = _EPISODE_SUFFIX.sub("", result).strip()
         result = _SEASON_SUFFIX.sub("", result).strip()
         result = _VIDEO_METADATA_SUFFIX.sub("", result).strip()
+        result = _DANGLING_SEPARATOR.sub("", result).strip()
     return result or "未命名"
 
 
