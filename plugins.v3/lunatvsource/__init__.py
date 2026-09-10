@@ -80,6 +80,11 @@ try:  # Stable V3 SDK export for plugin resource results.
 except Exception:  # pragma: no cover - standalone tests
     _HostTorrentInfo = None
 
+try:  # Stable V3 SDK export for native recognition results.
+    from app.sdk.media import MediaInfo as _HostMediaInfo
+except Exception:  # pragma: no cover - standalone tests
+    _HostMediaInfo = None
+
 try:  # Optional V3 media identity enums.
     from app.schemas.types import MediaSource as _HostMediaSource
     from app.schemas.types import MediaType as _HostMediaType
@@ -185,6 +190,8 @@ SOURCE_CACHE_KEY = "luna_source_config_v1"
 SOURCE_HEALTH_KEY = "luna_source_health_v1"
 SOURCE_HEALTH_META_KEY = "luna_source_health_meta_v1"
 FOLLOWUP_STATUS_KEY = "luna_followup_status_v1"
+AD_SCAN_EVENTS_KEY = "luna_hls_ad_scan_events_v1"
+AD_SCAN_EVENTS_MAX = 100
 DEFAULT_SOURCE_CHECK_MINUTES = 60
 MIN_SOURCE_CHECK_MINUTES = 15
 MAX_SOURCE_CHECK_MINUTES = 1440
@@ -1006,7 +1013,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.84"
+    plugin_version = "0.4.88"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1034,6 +1041,9 @@ class LunaTVSource(_PluginBase):
         self._download_metrics_lock = threading.Lock()
         self._download_metrics: Dict[str, Deque[Tuple[float, int]]] = {}
         self._completed_download_sizes: Dict[str, int] = {}
+        self._ad_scan_lock = threading.RLock()
+        self._ad_scan_events: Deque[Dict[str, Any]] = deque(maxlen=AD_SCAN_EVENTS_MAX)
+        self._debug_mode = False
         self._media_sync_lock = threading.Lock()
         self._media_sync_running = False
         self._media_sync_requested = False
@@ -1092,6 +1102,144 @@ class LunaTVSource(_PluginBase):
             return Path(value).expanduser() if value else None
         except (OSError, TypeError, ValueError):
             return None
+
+    def _configure_debug_logging(self) -> None:
+        """Make plugin DEBUG records visible only when the user opts in."""
+        self._logger.setLevel(logging.DEBUG if self._debug_mode else logging.NOTSET)
+
+    @staticmethod
+    def _normalize_ad_scan_event(value: Any) -> Optional[Dict[str, Any]]:
+        """Keep persisted scan records small, safe and free of source URLs."""
+        if not isinstance(value, dict):
+            return None
+        text_fields = ("task_id", "title", "source_name", "source_key", "media_type")
+        event: Dict[str, Any] = {
+            field: str(value.get(field) or "")[:200] for field in text_fields
+        }
+        event.update(
+            {
+                "timestamp": _safe_float(value.get("timestamp")),
+                "season": _safe_int(value.get("season"), 0),
+                "episode": _safe_int(value.get("episode"), 0),
+                "cue_segments": _safe_int(value.get("cue_segments"), 0, 0),
+                "splice_segments": _safe_int(value.get("splice_segments"), 0, 0),
+                "same_asset_splice_segments": _safe_int(
+                    value.get("same_asset_splice_segments"), 0, 0
+                ),
+                "regex_segments": _safe_int(value.get("regex_segments"), 0, 0),
+                "filtered_segments": _safe_int(value.get("filtered_segments"), 0, 0),
+                "cue_seconds": _safe_float(value.get("cue_seconds"), 0.0, 0.0),
+                "splice_seconds": _safe_float(value.get("splice_seconds"), 0.0, 0.0),
+                "same_asset_splice_seconds": _safe_float(
+                    value.get("same_asset_splice_seconds"), 0.0, 0.0
+                ),
+                "filtered_seconds": _safe_float(
+                    value.get("filtered_seconds"), 0.0, 0.0
+                ),
+                "unclosed_cue": _safe_int(value.get("unclosed_cue"), 0, 0),
+                "daterange_candidates": _safe_int(
+                    value.get("daterange_candidates"), 0, 0
+                ),
+                "discontinuity": _safe_int(value.get("discontinuity"), 0, 0),
+            }
+        )
+        event["status"] = "blocked" if event["filtered_segments"] else "clean"
+        event["status_label"] = "已拦截广告片段" if event["filtered_segments"] else "未发现可拦截片段"
+        return event
+
+    def _load_ad_scan_events(self) -> None:
+        raw = self.get_data(AD_SCAN_EVENTS_KEY) or []
+        if isinstance(raw, dict):
+            raw = raw.get("items") or []
+        with self._ad_scan_lock:
+            self._ad_scan_events.clear()
+            if isinstance(raw, list):
+                for item in raw[-AD_SCAN_EVENTS_MAX:]:
+                    normalized = self._normalize_ad_scan_event(item)
+                    if normalized:
+                        self._ad_scan_events.append(normalized)
+
+    def _record_ad_scan(self, task: DownloadTask, summary: Dict[str, Any]) -> None:
+        """Persist one scan result for the workbench and debug log."""
+        filtered_segments = _safe_int(summary.get("total_segments"), 0, 0)
+        filtered_seconds = sum(
+            _safe_float(summary.get(key), 0.0, 0.0)
+            for key in (
+                "cue_seconds",
+                "splice_seconds",
+                "same_asset_splice_seconds",
+            )
+        )
+        event = self._normalize_ad_scan_event(
+            {
+                "timestamp": time.time(),
+                "task_id": getattr(task, "task_id", ""),
+                "title": getattr(task, "title", ""),
+                "source_name": getattr(task, "source_name", ""),
+                "source_key": getattr(task, "source_key", ""),
+                "media_type": getattr(task, "media_type", ""),
+                "season": getattr(task, "season", 0),
+                "episode": getattr(task, "episode", 0),
+                "cue_segments": summary.get("cue_segments", 0),
+                "splice_segments": summary.get("splice_segments", 0),
+                "same_asset_splice_segments": summary.get(
+                    "same_asset_splice_segments", 0
+                ),
+                "regex_segments": summary.get("regex_segments", 0),
+                "filtered_segments": filtered_segments,
+                "cue_seconds": summary.get("cue_seconds", 0.0),
+                "splice_seconds": summary.get("splice_seconds", 0.0),
+                "same_asset_splice_seconds": summary.get(
+                    "same_asset_splice_seconds", 0.0
+                ),
+                "filtered_seconds": filtered_seconds,
+                "unclosed_cue": summary.get("unclosed_cue", 0),
+                "daterange_candidates": summary.get("daterange_candidates", 0),
+                "discontinuity": summary.get("discontinuity", 0),
+            }
+        )
+        if event is None:
+            return
+        with self._ad_scan_lock:
+            self._ad_scan_events.appendleft(event)
+            try:
+                self.save_data(AD_SCAN_EVENTS_KEY, list(self._ad_scan_events))
+            except Exception as exc:
+                self._logger.warning("保存 LunaTV HLS 广告扫描记录失败：%s", exc)
+        if self._debug_mode:
+            self._logger.debug(
+                "LunaTV HLS 调试输出: title=%s, filtered=%d segments/%.1f seconds, "
+                "cue=%d, structure=%d, same_asset=%d, regex=%d",
+                event["title"],
+                event["filtered_segments"],
+                event["filtered_seconds"],
+                event["cue_segments"],
+                event["splice_segments"],
+                event["same_asset_splice_segments"],
+                event["regex_segments"],
+            )
+
+    def _ad_scan_payload(self) -> Dict[str, Any]:
+        with self._ad_scan_lock:
+            events = [dict(item) for item in self._ad_scan_events]
+        return {
+            "debug_mode": self._debug_mode,
+            "retained_events": AD_SCAN_EVENTS_MAX,
+            "summary": {
+                "scan_count": len(events),
+                "blocked_scan_count": sum(
+                    1 for item in events if item.get("filtered_segments", 0) > 0
+                ),
+                "filtered_segments": sum(
+                    int(item.get("filtered_segments", 0) or 0) for item in events
+                ),
+                "filtered_seconds": sum(
+                    float(item.get("filtered_seconds", 0.0) or 0.0) for item in events
+                ),
+                "last_scan_at": events[0].get("timestamp", 0) if events else 0,
+            },
+            "events": events,
+        }
 
     def _acquire_queue_lock(self, data_path: Optional[Path]) -> bool:
         """Keep one download queue owner per persistent plugin data path."""
@@ -1315,9 +1463,13 @@ class LunaTVSource(_PluginBase):
             ("tmdb_association", True),
             ("moviepilot_organize", True),
             ("native_recognize", True),
+            ("debug_mode", False),
         ):
             self._config[key] = _bool(self._config.get(key), default)
         self._enabled = _bool(self._config.get("enabled"), False)
+        self._debug_mode = self._config["debug_mode"]
+        self._configure_debug_logging()
+        self._load_ad_scan_events()
         self._source_config_origin = "未加载"
         self._source_config_error = ""
         # 智能助手始终读取 MoviePilot 全局配置；没有配置时由 AiTitleNormalizer 自动回退。
@@ -1346,6 +1498,7 @@ class LunaTVSource(_PluginBase):
                         allowed_private_ranges=self._probe_allowed_private_ranges(),
                         ad_filter_regex=self._config["hls_ad_filter_regex"],
                         download_proxy=self._config["download_proxy"],
+                        on_ad_scan=self._record_ad_scan,
                     )
                 finally:
                     self._release_queue_lock()
@@ -1375,6 +1528,7 @@ class LunaTVSource(_PluginBase):
                     allowed_private_ranges=self._probe_allowed_private_ranges(),
                     ad_filter_regex=self._config["hls_ad_filter_regex"],
                     download_proxy=self._config["download_proxy"],
+                    on_ad_scan=self._record_ad_scan,
                 )
             except Exception:
                 self._queue = None
@@ -1472,6 +1626,9 @@ class LunaTVSource(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         return [
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"], "auth": "bear"},
+            {"path": "/ad-filter", "endpoint": self.api_ad_filter, "methods": ["GET"], "auth": "bear"},
+            {"path": "/ad-filter/clear", "endpoint": self.api_ad_filter_clear, "methods": ["POST"], "auth": "bear"},
+            {"path": "/debug", "endpoint": self.api_debug, "methods": ["POST"], "auth": "bear"},
             {"path": "/sources", "endpoint": self.api_sources, "methods": ["GET"], "auth": "bear"},
             {"path": "/sources/refresh", "endpoint": self.api_source_refresh, "methods": ["POST"], "auth": "bear"},
             {"path": "/sources/state", "endpoint": self.api_source_state, "methods": ["POST"], "auth": "bear"},
@@ -1503,6 +1660,15 @@ class LunaTVSource(_PluginBase):
                     {
                         "component": "VSwitch",
                         "props": {"model": "enabled", "label": "启用插件"},
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "debug_mode",
+                            "label": "开启广告拦截调试模式",
+                            "hint": "在插件日志和工作台显示每次 HLS 扫描、拦截片段与时长；完成测试后可关闭。",
+                            "persistentHint": True,
+                        },
                     },
                     {
                         "component": "VTextField",
@@ -1744,6 +1910,7 @@ class LunaTVSource(_PluginBase):
             }
         ], {
             "enabled": False,
+            "debug_mode": False,
             "config_url": DEFAULT_CONFIG_URL,
             "source_allowlist": "",
             "probe_allowed_private_ranges": "",
@@ -1779,6 +1946,15 @@ class LunaTVSource(_PluginBase):
                             "model": "enabled",
                             "label": "启用原生桥接",
                             "hint": "启用后，LunaTV 将以 MoviePilot 原生搜索、订阅与下载入口出现。",
+                            "persistentHint": True,
+                        },
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {
+                            "model": "debug_mode",
+                            "label": "开启广告拦截调试模式",
+                            "hint": "在插件日志和工作台显示每次 HLS 扫描、拦截片段与时长；完成测试后可关闭。",
                             "persistentHint": True,
                         },
                     },
@@ -1935,6 +2111,7 @@ class LunaTVSource(_PluginBase):
             }
         ], {
             "enabled": False,
+            "debug_mode": False,
             "generate_nfo": False,
             "config_url": DEFAULT_CONFIG_URL,
         "source_allowlist": "",
@@ -3022,13 +3199,13 @@ class LunaTVSource(_PluginBase):
                 payload[name] = value
         return payload
 
-    def _media_info(
+    def _media_info_fields(
         self,
         result: CmsResult,
         association: Optional[Dict[str, Any]] = None,
         season_only: bool = False,
-    ) -> Any:
-        """将 CMS 结果转换成 V3 原生 MediaInfo，供探索/订阅/整理链复用。"""
+    ) -> Dict[str, Any]:
+        """构造探索、订阅与识别链共用的媒体信息字段。"""
         seasons: Dict[int, List[int]] = {}
         for episode in result.episodes:
             if episode.season_known:
@@ -3038,16 +3215,6 @@ class LunaTVSource(_PluginBase):
             season_start, season_end = result.season_range
             if season_start > 0 and season_start == season_end:
                 seasons[season_start] = []
-
-        if _schemas is None or not hasattr(_schemas, "MediaInfo"):
-            payload = result.to_dict()
-            if season_only:
-                payload["episodes"] = []
-            payload["seasons"] = {
-                season: [] if season_only else sorted(set(value))
-                for season, value in seasons.items()
-            }
-            return payload
 
         association = association or {}
         title = normalize_media_title(result.title)
@@ -3074,6 +3241,22 @@ class LunaTVSource(_PluginBase):
         classification_facts = extract_classification_facts(result)
         if classification_protocol_available() and classification_facts:
             fields["classification_facts"] = classification_facts
+        return fields
+
+    def _media_info(
+        self,
+        result: CmsResult,
+        association: Optional[Dict[str, Any]] = None,
+        season_only: bool = False,
+    ) -> Any:
+        """将 CMS 结果转换成 V3 原生 MediaInfo schema，供探索/订阅 API 复用。"""
+        fields = self._media_info_fields(result, association, season_only)
+        if _schemas is None or not hasattr(_schemas, "MediaInfo"):
+            payload = result.to_dict()
+            if season_only:
+                payload["episodes"] = []
+            payload.update(fields)
+            return payload
 
         try:
             return _schemas.MediaInfo(**fields)
@@ -3190,25 +3373,27 @@ class LunaTVSource(_PluginBase):
             )
         return cards
 
-    def _sdk_media_info(self, result: CmsResult) -> Any:
-        """构造识别链使用的旧式 SDK MediaInfo（与探索 API 的 schema 分开）。"""
-        try:
-            from app.sdk.media import MediaInfo as SdkMediaInfo
+    def _sdk_media_info(
+        self,
+        result: CmsResult,
+        association: Optional[Dict[str, Any]] = None,
+        season_only: bool = False,
+    ) -> Any:
+        """构造识别链使用的领域 MediaInfo（与探索 API 的 schema 分开）。
 
-            seasons: Dict[int, List[int]] = {}
-            for episode in result.episodes:
-                if episode.season_known:
-                    seasons.setdefault(episode.season, []).append(episode.episode)
-            return SdkMediaInfo(
-                type=self._host_media_type(result.media_type),
-                title=normalize_media_title(result.title),
-                year=result.year or None,
-                media_source=self._host_media_source(),
-                media_id=f"{result.source_key}:{result.vod_id}",
-                seasons={key: sorted(set(value)) for key, value in seasons.items()},
-            )
-        except Exception:
-            return self._media_info(result)
+        宿主识别链会直接调用领域对象方法（如 ``set_library_category``），
+        因此原生识别必须返回与 ``app.sdk.media.MediaInfo`` 同源的领域实例；
+        插件 ABI 同时提供 ``MediaInfo`` 与 ``TorrentInfo`` 等 SDK 导出。
+        """
+        fields = self._media_info_fields(result, association, season_only)
+        if _HostMediaInfo is not None:
+            try:
+                info = _HostMediaInfo()
+                info.from_dict(fields)
+                return info
+            except Exception as exc:
+                self._logger.debug("构造识别链 MediaInfo 失败：%s", exc)
+        return self._media_info(result, association, season_only)
 
     @staticmethod
     def _media_type_matches(configured: Any, media_type: str) -> bool:
@@ -4796,6 +4981,7 @@ class LunaTVSource(_PluginBase):
             "success": True,
             "data": {
                 "enabled": self._enabled,
+                "debug_mode": self._debug_mode,
                 "queue": queue.summary(),
                 "download_settings": {
                     "max_concurrent_tasks": self._config.get(
@@ -4837,8 +5023,42 @@ class LunaTVSource(_PluginBase):
                     "error": self._source_config_error,
                 },
                 "source_health": source_health,
+                "ad_filter": self._ad_scan_payload()["summary"],
             },
         }
+
+    def api_ad_filter(self) -> Dict[str, Any]:
+        return {"success": True, "data": self._ad_scan_payload()}
+
+    def api_ad_filter_clear(self) -> Dict[str, Any]:
+        with self._ad_scan_lock:
+            self._ad_scan_events.clear()
+            try:
+                self.save_data(AD_SCAN_EVENTS_KEY, [])
+            except Exception as exc:
+                self._logger.warning("清空 LunaTV HLS 广告扫描记录失败：%s", exc)
+                return {"success": False, "message": "清空广告扫描记录失败", "data": {}}
+        self._logger.info("LunaTV HLS 广告扫描记录已清空")
+        return {"success": True, "data": self._ad_scan_payload()}
+
+    def api_debug(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        enabled = _bool((payload or {}).get("enabled"), self._debug_mode)
+        self._config["debug_mode"] = enabled
+        self._debug_mode = enabled
+        self._configure_debug_logging()
+        try:
+            # Keep the quick switch persistent without requiring a full form
+            # round-trip. The current config includes all normalized values.
+            self.update_config(dict(self._config))
+        except Exception as exc:
+            self._logger.warning("保存 LunaTV 调试模式失败：%s", exc)
+            return {
+                "success": False,
+                "message": f"调试模式已切换，但保存失败：{exc}",
+                "data": {"debug_mode": enabled},
+            }
+        self._logger.info("LunaTV 调试模式已%s", "开启" if enabled else "关闭")
+        return {"success": True, "data": {"debug_mode": enabled}}
 
     def api_sources(self) -> Dict[str, Any]:
         try:
@@ -7940,9 +8160,10 @@ class LunaTVSource(_PluginBase):
             if not result:
                 return None
             result, association = self._prepare_result(result)
-            # 原生详情页需要统一 MediaInfo 的完整展示字段；仅返回 SDK 最小对象
-            # 会导致自定义来源详情页无法渲染。
-            return self._media_info(result, association)
+            # 原生详情页需要完整展示字段，识别链需要领域 MediaInfo：
+            # 只返回最小对象会让详情页无法渲染，返回 schema 会让宿主分类链缺少
+            # 领域方法（如 set_library_category）而中断整理。
+            return self._sdk_media_info(result, association)
         except Exception as exc:
             self._logger.debug("LunaTV 原生识别失败：%s", exc)
             return None

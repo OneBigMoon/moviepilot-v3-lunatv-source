@@ -27,6 +27,7 @@ const saving = ref(false);
 const message = reactive({ text: '', type: 'info' });
 const defaults = {
   enabled: false,
+  debug_mode: false,
   generate_nfo: false,
   config_url: 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json',
   source_allowlist: '',
@@ -175,7 +176,7 @@ return (_ctx, _cache) => {
           color: "primary",
           class: "me-2"
         }),
-        _cache[16] || (_cache[16] = _createElementVNode("div", { class: "text-h6" }, "LunaTV 原生桥接配置", -1)),
+        _cache[17] || (_cache[17] = _createElementVNode("div", { class: "text-h6" }, "LunaTV 原生桥接配置", -1)),
         _createVNode(_component_VSpacer),
         _createVNode(_component_VBtn, {
           icon: "mdi-content-save",
@@ -215,7 +216,7 @@ return (_ctx, _cache) => {
       density: "compact",
       class: "mb-4"
     }, {
-      default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
+      default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
         _createTextVNode(" 保存后，LunaTV/苹果 CMS 将接入 MoviePilot 的原生搜索、订阅与下载入口。要去广告请选择“下载到本地并整理”；STRM 是原始直链，不经过 HLS 分片过滤。 ", -1)
       ]))]),
       _: 1
@@ -237,8 +238,21 @@ return (_ctx, _cache) => {
         _createVNode(_component_VCol, { cols: "12" }, {
           default: _withCtx(() => [
             _createVNode(_component_VSwitch, {
+              modelValue: config.debug_mode,
+              "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((config.debug_mode) = $event)),
+              label: "开启广告拦截调试模式",
+              hint: "在插件日志和工作台显示每次 HLS 扫描、拦截片段与时长；测试完成后可关闭。",
+              "persistent-hint": "",
+              color: "warning"
+            }, null, 8, ["modelValue"])
+          ]),
+          _: 1
+        }),
+        _createVNode(_component_VCol, { cols: "12" }, {
+          default: _withCtx(() => [
+            _createVNode(_component_VSwitch, {
               modelValue: config.generate_nfo,
-              "onUpdate:modelValue": _cache[2] || (_cache[2] = $event => ((config.generate_nfo) = $event)),
+              "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((config.generate_nfo) = $event)),
               label: "生成 NFO 元数据",
               hint: "开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。",
               "persistent-hint": "",
@@ -251,7 +265,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VSelect, {
               modelValue: config.mode,
-              "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((config.mode) = $event)),
+              "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((config.mode) = $event)),
               items: modeItems,
               label: "处理方式",
               hint: "只有本地下载模式会执行 HLS 广告分片过滤并生成 MP4。",
@@ -265,7 +279,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.config_url,
-              "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((config.config_url) = $event)),
+              "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.config_url) = $event)),
               label: "LunaTV 配置地址",
               variant: "outlined"
             }, null, 8, ["modelValue"])
@@ -276,7 +290,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.source_allowlist,
-              "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((config.source_allowlist) = $event)),
+              "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.source_allowlist) = $event)),
               label: "启用资源站（可选）",
               placeholder: "留空允许配置中的全部来源",
               hint: "填写来源 key，使用逗号分隔。",
@@ -290,7 +304,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.hls_ad_filter_regex,
-              "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((config.hls_ad_filter_regex) = $event)),
+              "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.hls_ad_filter_regex) = $event)),
               label: "HLS 广告分片 URL 正则（可选）",
               placeholder: "例如 adjump|redtraffic|/ad/",
               hint: "默认过滤常见广告路径；留空则只删除闭合 CUE-OUT/CUE-IN 标记区间。不要用单独的 DISCONTINUITY 作为删除条件。",
@@ -304,7 +318,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.probe_allowed_private_ranges,
-              "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((config.probe_allowed_private_ranges) = $event)),
+              "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.probe_allowed_private_ranges) = $event)),
               label: "可信网络 CIDR（可选）",
               placeholder: "例如 198.18.0.0/15",
               hint: "默认拒绝私网配置、CMS 和媒体地址；Fake-IP 或可信内网环境才填写。",
@@ -318,7 +332,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.download_root,
-              "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.download_root) = $event)),
+              "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.download_root) = $event)),
               label: "下载目录（可留空）",
               placeholder: "留空自动选择",
               hint: "填写后优先使用；留空时依次使用 MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录。",
@@ -332,7 +346,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.download_proxy,
-              "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.download_proxy) = $event)),
+              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.download_proxy) = $event)),
               label: "下载代理（可选）",
               placeholder: "http://192.168.1.2:7890 或 socks5://192.168.1.2:7890",
               hint: "仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。",
@@ -349,7 +363,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.max_concurrent_tasks,
-              "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.max_concurrent_tasks) = $event)),
+              "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.max_concurrent_tasks) = $event)),
               label: "最大任务并发数",
               type: "number",
               min: "1",
@@ -369,7 +383,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.poll_minutes,
-              "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.poll_minutes) = $event)),
+              "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.poll_minutes) = $event)),
               label: "订阅刷新间隔（分钟）",
               type: "number",
               min: "5",
@@ -389,7 +403,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.queue_minutes,
-              "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.queue_minutes) = $event)),
+              "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.queue_minutes) = $event)),
               label: "队列间隔（分钟）",
               type: "number",
               min: "1",
@@ -409,7 +423,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.request_timeout,
-              "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.request_timeout) = $event)),
+              "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.request_timeout) = $event)),
               label: "请求超时（秒）",
               type: "number",
               min: "1",
@@ -429,7 +443,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.source_check_minutes,
-              "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.source_check_minutes) = $event)),
+              "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.source_check_minutes) = $event)),
               label: "来源健康检查间隔（分钟）",
               type: "number",
               min: "15",
@@ -449,7 +463,7 @@ return (_ctx, _cache) => {
           default: _withCtx(() => [
             _createVNode(_component_VTextField, {
               modelValue: config.segment_thread_count,
-              "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.segment_thread_count) = $event)),
+              "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((config.segment_thread_count) = $event)),
               label: "分片线程数",
               type: "number",
               min: "4",
@@ -471,7 +485,7 @@ return (_ctx, _cache) => {
       density: "compact",
       class: "mt-3"
     }, {
-      default: _withCtx(() => [...(_cache[18] || (_cache[18] = [
+      default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
         _createTextVNode(" 目录、DeepSeek、TMDB、整理规则、媒体服务器和链接权限均沿用 MoviePilot 设置；订阅地址内的资源站全部读取。默认 2 个任务、每任务 16 个分片线程，总分片并发限制为 64；遇到 429、超时或磁盘繁忙时请调低。 ", -1)
       ]))]),
       _: 1
@@ -482,7 +496,7 @@ return (_ctx, _cache) => {
         loading: saving.value,
         onClick: saveConfig
       }, {
-        default: _withCtx(() => [...(_cache[19] || (_cache[19] = [
+        default: _withCtx(() => [...(_cache[20] || (_cache[20] = [
           _createTextVNode("保存配置", -1)
         ]))]),
         _: 1

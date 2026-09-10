@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.84"
+    expected_version = "0.4.88"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,8 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.87"] == "校准广告工作台信息层级，明确命中与扫描次数，补充调试开关说明和缓存健康状态提示。"
+    assert history["0.4.88"] == "修复原生识别返回类型：识别链改回宿主领域 MediaInfo，避免整理阶段因缺少领域方法中断，探索与订阅 API 仍返回 schema。"
     assert history["0.4.80"] == (
         "修复同一媒体资产内嵌广告在分辨率探测不可用时仍进入成品：识别高置信度分片序号插入并在 "
         "N_m3u8DL-RE 前跳过广告分片；保留普通连续分片和不确定场景的安全策略。"
@@ -201,20 +203,30 @@ def test_app_page_queue_summary_excludes_terminal_tasks_and_is_independent_from_
     assert "const queueStatus = computed(() => status.value.queue || {})" in app_page
     assert "const queueTotal = computed(() => ['pending', 'running', 'paused']" in app_page
     assert "失败 {{ queueStatus.failed || 0 }}" not in app_page
-    assert "当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 共 {{ queueTotal }} 个活动任务" in app_page
+    assert "下载队列" in app_page
+    assert "等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 活动 {{ queueTotal }}" in app_page
     assert "并发上限：{{ downloadSettings.max_concurrent_tasks || 2 }} 任务 × {{ downloadSettings.segment_thread_count || 16 }} 分片" in app_page
     assert "{{ loading ? '…' : sources.length }}" in app_page
 
 
-def test_app_page_disables_health_check_when_plugin_is_disabled_and_labels_source_count():
+def test_app_page_keeps_one_refresh_action_and_separates_ad_filter_tab():
     project_root = Path(__file__).resolve().parents[1]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
 
-    assert ':disabled="status.enabled !== true || healthCheckStarting || sourceHealth.running"' in app_page
-    assert "请先启用插件后进行健康检查" in app_page
-    assert "<div class=\"section-title\">资源站数量" in app_page
+    assert '立即刷新' in app_page
+    assert '刷新中…' in app_page
+    assert '立即健康检查' not in app_page
+    assert 'role="tablist"' in app_page
+    assert 'activeTab === \'ad-filter\'' in app_page
+    assert 'id="ad-filter-panel"' in app_page
+    assert '次命中，${adEvents.length} 次扫描' in app_page
+    assert 'tab-count-wide' in app_page
+    assert 'h3>扫描日志</h3>' in app_page
+    assert '调试开关只影响日志详细程度' in app_page
+    assert '<section v-else' in app_page
+    assert "<div class=\"section-title\">资源站" in app_page
 
 
 def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
@@ -308,8 +320,9 @@ def test_source_health_ui_uses_cached_reads_and_persists_interval():
     assert "const silent = options?.silent === true" in app_page
     assert "await loadHealthStatus()" in app_page
     assert "await load({ silent: true })" in app_page
-    assert "打开页面仅读取缓存" in app_page
-    assert "搜索会跳过“配置禁用”的来源，网络不通的来源仍会尝试调用" in app_page
+    assert "页面读取缓存" in app_page
+    assert "当前显示缓存状态" in app_page
+    assert "来源会按后台健康检查结果参与搜索" in app_page
     assert "setSourceConfig(source, $event)" in app_page
     assert '@click="recheckSource(source)"' in app_page
     assert "source_check_minutes: 60" in config_page

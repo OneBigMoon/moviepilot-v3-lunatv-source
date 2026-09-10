@@ -12,6 +12,7 @@ const saving = ref(false)
 const message = reactive({ text: '', type: 'info' })
 const defaults = {
   enabled: false,
+  debug_mode: false,
   generate_nfo: false,
   config_url: 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json',
   source_allowlist: '',
@@ -152,6 +153,15 @@ onMounted(() => {
     </VAlert>
     <VRow dense>
       <VCol cols="12"><VSwitch v-model="config.enabled" label="启用原生桥接" color="success" hide-details /></VCol>
+      <VCol cols="12">
+        <VSwitch
+          v-model="config.debug_mode"
+          label="开启广告拦截调试模式"
+          hint="在插件日志和工作台显示每次 HLS 扫描、拦截片段与时长；测试完成后可关闭。"
+          persistent-hint
+          color="warning"
+        />
+      </VCol>
       <VCol cols="12">
         <VSwitch
           v-model="config.generate_nfo"

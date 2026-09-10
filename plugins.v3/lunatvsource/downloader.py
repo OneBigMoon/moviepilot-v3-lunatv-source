@@ -2676,11 +2676,13 @@ class DownloadQueue(_SerialDownloadQueue):
         allowed_private_ranges: Iterable[str] = (),
         ad_filter_regex: str = "",
         download_proxy: object = None,
+        on_ad_scan: Optional[Callable[[DownloadTask, Dict[str, Any]], None]] = None,
     ) -> None:
         self._load = load
         self._save = save
         self._notify = notify
         self._on_complete = on_complete
+        self._on_ad_scan = on_ad_scan
         self._lock = threading.RLock()
         self._stop = False
         (
@@ -3723,7 +3725,7 @@ class DownloadQueue(_SerialDownloadQueue):
                 (
                     self._is_ad_segment_url
                 ),
-                lambda summary: self._log_ad_scan(task, summary),
+                lambda summary: self._handle_ad_scan(task, summary),
                 lambda segment_url: probe_stream_height(
                     segment_url,
                     ffmpeg_path=task.ffmpeg_path,
@@ -3770,6 +3772,18 @@ class DownloadQueue(_SerialDownloadQueue):
                 LOGGER.warning("LunaTV N_m3u8DL-RE failed for %s: %s", task.task_id, exc)
                 return False
             return result if engine_output is None else True
+
+    def _handle_ad_scan(self, task: DownloadTask, summary: Dict[str, Any]) -> None:
+        """Log and publish one completed HLS scan without exposing source URLs."""
+        self._log_ad_scan(task, summary)
+        if self._on_ad_scan is None:
+            return
+        try:
+            self._on_ad_scan(task, dict(summary))
+        except Exception as exc:
+            # Statistics must never turn a successful media download into a
+            # failed task. The owner can persist or display the event.
+            LOGGER.warning("LunaTV HLS 扫描统计回调失败：%s", exc)
 
     def task_cache_size(self, task_id: str) -> int:
         """Return bytes in the controlled cache/stage tree for one task only."""

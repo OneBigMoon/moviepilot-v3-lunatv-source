@@ -11,12 +11,23 @@ const loading = ref(true)
 const error = ref('')
 const sources = ref([])
 const status = ref({})
-const healthCheckStarting = ref(false)
+const adFilter = ref({ debug_mode: false, summary: {}, events: [] })
+const adFilterLoading = ref(true)
+const adFilterError = ref('')
+const debugModeBusy = ref(false)
+const activeTab = ref('sources')
+const adEventFilter = ref('all')
+const adEventQuery = ref('')
+const expandedAdEventKey = ref('')
+const clearConfirming = ref(false)
 const busySourceKeys = ref(new Set())
 let healthPollTimer = null
 let healthPollDeadline = 0
+let adFilterPollTimer = null
+let clearConfirmTimer = null
 const HEALTH_POLL_INTERVAL_MS = 1000
 const HEALTH_POLL_TIMEOUT_MS = 5 * 60 * 1000
+const AD_FILTER_POLL_INTERVAL_MS = 2500
 
 const apiCall = (method, path, payload) => {
   if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
@@ -47,6 +58,80 @@ async function load(options = {}) {
   } finally {
     if (!silent) loading.value = false
   }
+  await loadAdFilter({ silent })
+}
+
+async function loadAdFilter(options = {}) {
+  const silent = options?.silent === true
+  if (!silent) {
+    adFilterLoading.value = true
+    adFilterError.value = ''
+  }
+  try {
+    adFilter.value = unwrap(await apiCall('get', '/ad-filter'))
+  } catch (loadError) {
+    adFilterError.value = loadError?.message || '读取广告拦截调试记录失败'
+  } finally {
+    if (!silent) adFilterLoading.value = false
+  }
+}
+
+function scheduleAdFilterPoll() {
+  if (adFilterPollTimer) clearTimeout(adFilterPollTimer)
+  adFilterPollTimer = setTimeout(async () => {
+    await loadAdFilter({ silent: true })
+    scheduleAdFilterPoll()
+  }, AD_FILTER_POLL_INTERVAL_MS)
+}
+
+async function setDebugMode(enabled) {
+  if (debugModeBusy.value || Boolean(adFilter.value.debug_mode) === Boolean(enabled)) return
+  debugModeBusy.value = true
+  adFilterError.value = ''
+  try {
+    unwrap(await apiCall('post', '/debug', { enabled }))
+    await loadAdFilter({ silent: true })
+    status.value = { ...status.value, debug_mode: Boolean(enabled) }
+  } catch (requestError) {
+    adFilterError.value = requestError?.message || '切换调试模式失败'
+  } finally {
+    debugModeBusy.value = false
+  }
+}
+
+async function clearAdFilterEvents() {
+  if (!adEvents.value.length) return
+  try {
+    unwrap(await apiCall('post', '/ad-filter/clear'))
+    await loadAdFilter({ silent: true })
+    expandedAdEventKey.value = ''
+  } catch (requestError) {
+    adFilterError.value = requestError?.message || '清空广告拦截记录失败'
+  } finally {
+    clearConfirming.value = false
+    if (clearConfirmTimer) clearTimeout(clearConfirmTimer)
+    clearConfirmTimer = null
+  }
+}
+
+function requestClearAdFilterEvents() {
+  if (!adEvents.value.length) return
+  if (clearConfirming.value) {
+    clearAdFilterEvents()
+    return
+  }
+  clearConfirming.value = true
+  if (clearConfirmTimer) clearTimeout(clearConfirmTimer)
+  clearConfirmTimer = setTimeout(() => {
+    clearConfirming.value = false
+    clearConfirmTimer = null
+  }, 4500)
+}
+
+function cancelClearAdFilterEvents() {
+  clearConfirming.value = false
+  if (clearConfirmTimer) clearTimeout(clearConfirmTimer)
+  clearConfirmTimer = null
 }
 
 async function loadHealthStatus() {
@@ -66,8 +151,7 @@ function clearHealthPoll() {
 
 function scheduleHealthPoll() {
   if (Date.now() >= healthPollDeadline) {
-    healthCheckStarting.value = false
-    error.value = '健康检查仍在后台运行，请稍后刷新状态查看结果'
+    error.value = '健康检查仍在后台运行，请稍后点击“立即刷新”查看结果'
     clearHealthPoll()
     return
   }
@@ -76,7 +160,6 @@ function scheduleHealthPoll() {
     try {
       await loadHealthStatus()
     } catch (pollError) {
-      healthCheckStarting.value = false
       error.value = pollError?.message || '刷新健康检查状态失败'
       clearHealthPoll()
       return
@@ -84,29 +167,9 @@ function scheduleHealthPoll() {
     if (sourceHealth.value.running) scheduleHealthPoll()
     else {
       await load({ silent: true })
-      healthCheckStarting.value = false
       clearHealthPoll()
     }
   }, HEALTH_POLL_INTERVAL_MS)
-}
-
-async function startHealthCheck() {
-  if (healthCheckStarting.value || sourceHealth.value.running) return
-  healthCheckStarting.value = true
-  error.value = ''
-  try {
-    unwrap(await apiCall('post', '/sources/refresh'))
-    await loadHealthStatus()
-    if (sourceHealth.value.running) {
-      healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
-      scheduleHealthPoll()
-    } else {
-      healthCheckStarting.value = false
-    }
-  } catch (requestError) {
-    healthCheckStarting.value = false
-    error.value = requestError?.message || '启动健康检查失败'
-  }
 }
 
 function sourceIsBusy(source) {
@@ -173,9 +236,13 @@ const healthProgress = computed(() => {
   if (!healthCheckTotal.value) return 0
   return Math.min(100, Math.round((healthChecked.value / healthCheckTotal.value) * 100))
 })
+const hasCachedHealth = computed(() => sources.value.some(source => (
+  Number(source?.last_checked || 0) > 0
+  || ['healthy', 'failed'].includes(String(source?.health_status || '').toLowerCase())
+)))
 const healthProgressLabel = computed(() => {
   if (sourceHealth.value.running && !healthCheckTotal.value) return '正在读取来源清单…'
-  if (!healthCheckTotal.value) return '尚未开始健康检查'
+  if (!healthCheckTotal.value) return hasCachedHealth.value ? '当前显示缓存状态' : '尚未开始健康检查'
   return `${sourceHealth.value.running ? '本轮进度' : '最近一轮'} ${healthChecked.value} / ${healthCheckTotal.value}`
 })
 const queueStatus = computed(() => status.value.queue || {})
@@ -184,6 +251,63 @@ const queueTotal = computed(() => ['pending', 'running', 'paused']
 const followupStatus = computed(() => status.value.followup_status || {})
 const subscriptionRefreshStatus = computed(() => followupStatus.value.subscription_refresh || {})
 const mediaSyncStatus = computed(() => followupStatus.value.media_server_sync || {})
+const adSummary = computed(() => adFilter.value.summary || {})
+const adEvents = computed(() => Array.isArray(adFilter.value.events) ? adFilter.value.events : [])
+const debugModeEnabled = computed(() => Boolean(adFilter.value.debug_mode ?? status.value.debug_mode))
+const latestAdEvent = computed(() => adEvents.value[0] || null)
+const adBlockedEventCount = computed(() => adEvents.value.filter(event => Number(event.filtered_segments || 0) > 0).length)
+const adCleanEventCount = computed(() => Math.max(0, adEvents.value.length - adBlockedEventCount.value))
+const visibleAdEvents = computed(() => {
+  const filter = adEventFilter.value
+  const query = adEventQuery.value.trim().toLowerCase()
+  return adEvents.value.filter(event => {
+    const filteredSegments = Number(event.filtered_segments || 0)
+    if (filter === 'blocked' && filteredSegments <= 0) return false
+    if (filter === 'clean' && filteredSegments > 0) return false
+    if (!query) return true
+    return [event.title, event.source_name, event.source_key]
+      .some(value => String(value || '').toLowerCase().includes(query))
+  })
+})
+const adMonitoringActive = computed(() => Number(queueStatus.value.running || 0) > 0)
+const adMonitorStatus = computed(() => {
+  if (adMonitoringActive.value) return `有 ${queueStatus.value.running} 个下载任务运行，扫描结果会自动更新`
+  if (latestAdEvent.value) return `最近一次扫描于 ${formattedTime(latestAdEvent.value.timestamp)}`
+  return '等待本地下载任务开始扫描 HLS 清单'
+})
+const sourceSummary = computed(() => {
+  const summary = { healthy: 0, attention: 0, disabled: 0 }
+  for (const source of sources.value) {
+    if (source?.manual_disabled || source?.disabled_reason === 'configured') {
+      summary.disabled += 1
+    } else if (['healthy', 'ready', 'ok'].includes(String(source?.health_status || '').toLowerCase())) {
+      summary.healthy += 1
+    } else {
+      summary.attention += 1
+    }
+  }
+  return summary
+})
+
+function adEventKey(event) {
+  return `${event?.task_id || 'scan'}-${event?.timestamp || 0}`
+}
+
+function toggleAdEvent(event) {
+  const key = adEventKey(event)
+  expandedAdEventKey.value = expandedAdEventKey.value === key ? '' : key
+}
+
+function adEpisodeLabel(event) {
+  if (event?.media_type !== 'tv' || !event?.season) return ''
+  return `S${String(event.season).padStart(2, '0')}E${String(event.episode || 0).padStart(2, '0')}`
+}
+
+function adLogLine(event) {
+  const episode = adEpisodeLabel(event)
+  const target = [event?.title || '未命名任务', episode].filter(Boolean).join(' ')
+  return `[${formattedTime(event?.timestamp)}] ${event?.status_label || '扫描完成'} · ${target} · ${event?.filtered_segments || 0} 段 / ${formattedSeconds(event?.filtered_seconds)} · ${event?.source_name || event?.source_key || 'LunaTV'}`
+}
 
 function followupSummary(item) {
   if (item?.running) return '进行中'
@@ -248,8 +372,22 @@ function sourceHost(source) {
   return url ? new URL(url).hostname : '—'
 }
 
+function formattedSeconds(value) {
+  const seconds = Number(value || 0)
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0 秒'
+  if (seconds < 60) return `${seconds.toFixed(1)} 秒`
+  return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
+}
+
 onMounted(load)
-onBeforeUnmount(clearHealthPoll)
+onMounted(scheduleAdFilterPoll)
+onBeforeUnmount(() => {
+  clearHealthPoll()
+  if (adFilterPollTimer) clearTimeout(adFilterPollTimer)
+  adFilterPollTimer = null
+  if (clearConfirmTimer) clearTimeout(clearConfirmTimer)
+  clearConfirmTimer = null
+})
 </script>
 
 <template>
@@ -271,47 +409,214 @@ onBeforeUnmount(clearHealthPoll)
         <span :class="['chip', status.media_server_sync_running ? 'busy' : 'muted-chip']">媒体库 {{ status.media_server_sync_running ? '同步中' : '自动刷新' }}</span>
       </div>
       <div class="lunatv-actions">
-        <button class="button secondary" :disabled="loading" @click="load">刷新状态</button>
-        <button
-          class="button"
-          :disabled="status.enabled !== true || healthCheckStarting || sourceHealth.running"
-          :aria-label="status.enabled !== true ? '请先启用插件' : (sourceHealth.running ? '健康检查进行中' : '立即健康检查所有来源')"
-          @click="startHealthCheck"
-        >{{ healthCheckStarting || sourceHealth.running ? '健康检查中…' : '立即健康检查' }}</button>
-        <span v-if="status.enabled === false" class="source-caption">请先启用插件后进行健康检查</span>
+        <button class="button secondary" type="button" :disabled="loading" aria-label="立即刷新工作台状态" @click="load">{{ loading ? '刷新中…' : '立即刷新' }}</button>
       </div>
     </div>
 
-    <div v-if="error" class="alert error">{{ error }}</div>
-    <div v-else-if="sourceHealth.last_error" class="alert error">
-      最近一次健康检查失败：{{ sourceHealth.last_error }}
-    </div>
-    <div v-if="status.source_config?.error" class="alert warning">
-      远程来源清单刷新失败，当前使用{{ status.source_config?.origin || '缓存' }}：{{ status.source_config.error }}
-    </div>
-    <div v-if="subscriptionRefreshStatus.error" class="alert warning">
-      最近一次追更失败：{{ subscriptionRefreshStatus.error }}
-    </div>
-    <div v-if="mediaSyncStatus.error" class="alert warning">
-      最近一次媒体库或订阅进度同步失败：{{ mediaSyncStatus.error }}
-    </div>
+    <nav class="page-tabs" role="tablist" aria-label="LunaTV 工作台页签">
+      <button
+        type="button"
+        id="sources-tab"
+        class="page-tab"
+        :class="{ 'is-active': activeTab === 'sources' }"
+        role="tab"
+        :aria-selected="activeTab === 'sources'"
+        aria-controls="sources-panel"
+        @click="activeTab = 'sources'"
+      >
+        <span>资源来源</span>
+        <span class="tab-count">{{ loading ? '…' : sources.length }}</span>
+      </button>
+      <button
+        type="button"
+        id="ad-filter-tab"
+        class="page-tab"
+        :class="{ 'is-active': activeTab === 'ad-filter' }"
+        role="tab"
+        :aria-selected="activeTab === 'ad-filter'"
+        aria-controls="ad-filter-panel"
+        :aria-label="`广告拦截，${adBlockedEventCount} 次命中，${adEvents.length} 次扫描`"
+        @click="activeTab = 'ad-filter'"
+      >
+        <span>广告拦截</span>
+        <span class="tab-count tab-count-wide" :title="`${adBlockedEventCount} 次命中 / ${adEvents.length} 次扫描`">{{ adBlockedEventCount }}/{{ adEvents.length }}</span>
+      </button>
+    </nav>
 
-    <section class="setup-strip">
-      <span>目录：{{ directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置' }}</span>
-      <span>来源：{{ directoryStatus.source || '未配置' }}</span>
-      <span>当前队列：运行 {{ queueStatus.running || 0 }} · 等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 共 {{ queueTotal }} 个活动任务</span>
-      <span>追更：每 {{ subscriptionStatus.refresh_minutes || 30 }} 分钟检查新集</span>
-      <span>最近追更：{{ followupSummary(subscriptionRefreshStatus) }}</span>
-      <span>最近同步：{{ followupSummary(mediaSyncStatus) }}</span>
-      <span>TMDB：{{ status.tmdb_association ? '自动关联' : '关闭' }}</span>
-      <span>缓存：完成后才整理</span>
-      <span>来源健康检查：每 {{ sourceHealth.interval_minutes || 60 }} 分钟</span>
+    <div v-if="error" class="alert error">{{ error }}</div>
+    <template v-if="activeTab === 'sources'">
+      <div v-if="sourceHealth.last_error" class="alert error">
+        最近一次健康检查失败：{{ sourceHealth.last_error }}
+      </div>
+      <div v-if="status.source_config?.error" class="alert warning">
+        远程来源清单刷新失败，当前使用{{ status.source_config?.origin || '缓存' }}：{{ status.source_config.error }}
+      </div>
+      <div v-if="subscriptionRefreshStatus.error" class="alert warning">
+        最近一次追更失败：{{ subscriptionRefreshStatus.error }}
+      </div>
+      <div v-if="mediaSyncStatus.error" class="alert warning">
+        最近一次媒体库或订阅进度同步失败：{{ mediaSyncStatus.error }}
+      </div>
+
+      <section class="overview-grid" aria-label="LunaTV 运行概况">
+        <article class="overview-card overview-card-queue">
+          <div class="overview-card-heading"><span class="overview-label">下载队列</span><span class="overview-status" :class="{ 'is-live': queueStatus.running }">{{ queueStatus.running ? '运行中' : (queueTotal ? '排队中' : '空闲') }}</span></div>
+          <strong>{{ queueStatus.running || 0 }}<small> 个运行中</small></strong>
+          <span class="overview-card-meta">等待 {{ queueStatus.pending || 0 }} · 暂停 {{ queueStatus.paused || 0 }} · 活动 {{ queueTotal }}</span>
+        </article>
+        <article class="overview-card">
+          <div class="overview-card-heading"><span class="overview-label">来源健康</span><span class="overview-status" :class="sourceSummary.attention ? 'is-warning' : 'is-good'">{{ sourceSummary.attention ? '需要关注' : '运行正常' }}</span></div>
+          <strong>{{ sourceSummary.healthy }}<small> 个正常</small></strong>
+          <span class="overview-card-meta">{{ sourceSummary.attention }} 个待处理 · {{ sourceSummary.disabled }} 个已禁用</span>
+        </article>
+        <article class="overview-card overview-card-wide">
+          <div class="overview-card-heading"><span class="overview-label">下载目录</span><span class="overview-status">{{ directoryStatus.source || '未配置' }}</span></div>
+          <strong class="overview-path" :title="directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置'">{{ directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置' }}</strong>
+          <span class="overview-card-meta">完成后整理 · TMDB {{ status.tmdb_association ? '自动关联' : '未启用' }}</span>
+        </article>
+        <article class="overview-card">
+          <div class="overview-card-heading"><span class="overview-label">自动追更</span><span class="overview-status">每 {{ subscriptionStatus.refresh_minutes || 30 }} 分钟</span></div>
+          <strong>{{ followupSummary(subscriptionRefreshStatus) }}</strong>
+          <span class="overview-card-meta">媒体库同步：{{ followupSummary(mediaSyncStatus) }}</span>
+        </article>
+      </section>
+    </template>
+
+    <section v-else id="ad-filter-panel" class="panel ad-filter-panel" role="tabpanel" aria-labelledby="ad-filter-tab">
+      <div class="ad-page-heading">
+        <div>
+          <div class="page-kicker">HLS / DEBUG LOG</div>
+          <h2 id="ad-filter-title">广告拦截监控 <span :class="['debug-badge', debugModeEnabled ? 'is-on' : 'is-off']">{{ debugModeEnabled ? '调试已开启' : '调试已关闭' }}</span></h2>
+          <p>本地下载会在 N_m3u8DL-RE 前扫描 HLS 清单；STRM 原始直链不会经过过滤。调试开关只影响日志详细程度，不改变拦截规则。</p>
+        </div>
+        <div class="ad-page-actions">
+          <span class="auto-refresh"><i class="live-dot" aria-hidden="true"></i>自动更新 · 2.5 秒</span>
+          <label class="debug-switch" title="只控制 DEBUG 日志输出，不改变广告拦截规则">
+            <input
+              type="checkbox"
+              :checked="debugModeEnabled"
+              :disabled="debugModeBusy"
+              @change="setDebugMode($event.target.checked)"
+            />
+            <span>调试日志</span>
+          </label>
+          <template v-if="clearConfirming">
+            <button class="source-action is-danger" type="button" @click="clearAdFilterEvents">确认清空</button>
+            <button class="source-action" type="button" @click="cancelClearAdFilterEvents">取消</button>
+          </template>
+          <button v-else class="source-action" type="button" :disabled="!adEvents.length" @click="requestClearAdFilterEvents">清空记录</button>
+        </div>
+      </div>
+      <div v-if="adFilterError" class="alert warning">{{ adFilterError }}</div>
+      <div class="ad-monitor-state" :class="{ 'is-active': adMonitoringActive, 'is-loading': adFilterLoading }">
+        <span class="monitor-icon" aria-hidden="true"><i></i></span>
+        <div class="monitor-state-copy">
+          <strong>{{ adMonitoringActive ? '监控中' : (latestAdEvent ? '最近扫描已完成' : '等待扫描') }}</strong>
+          <span>{{ adMonitorStatus }}</span>
+        </div>
+        <div class="monitor-state-meta">
+          <span>最近记录</span>
+          <strong>{{ adSummary.last_scan_at ? formattedTime(adSummary.last_scan_at) : '暂无' }}</strong>
+        </div>
+      </div>
+      <div class="ad-metrics">
+        <div class="ad-metric">
+          <span class="ad-metric-label">HLS 扫描</span>
+          <strong>{{ adSummary.scan_count || 0 }}</strong>
+          <small>保留最近 {{ adFilter.retained_events || 100 }} 条</small>
+        </div>
+        <div class="ad-metric is-blocked">
+          <span class="ad-metric-label">拦截片段</span>
+          <strong>{{ adSummary.filtered_segments || 0 }}<small> 段</small></strong>
+          <small>{{ adSummary.blocked_scan_count || 0 }} 次扫描命中</small>
+        </div>
+        <div class="ad-metric">
+          <span class="ad-metric-label">拦截时长</span>
+          <strong>{{ formattedSeconds(adSummary.filtered_seconds) }}</strong>
+          <small>按保存记录累计</small>
+        </div>
+        <div class="ad-metric">
+          <span class="ad-metric-label">命中率</span>
+          <strong>{{ adSummary.scan_count ? Math.round((adSummary.blocked_scan_count / adSummary.scan_count) * 100) : 0 }}<small>%</small></strong>
+          <small>{{ adBlockedEventCount }} 条有拦截记录</small>
+        </div>
+      </div>
+      <div class="ad-log-section">
+        <div class="ad-log-heading">
+          <div>
+            <h3>扫描日志</h3>
+            <span>{{ visibleAdEvents.length }} / {{ adEvents.length }} 条扫描记录 · 点击记录查看调试输出</span>
+          </div>
+          <div class="ad-log-controls">
+            <div class="ad-filter-segments" role="group" aria-label="筛选扫描日志">
+              <button type="button" :class="{ 'is-active': adEventFilter === 'all' }" @click="adEventFilter = 'all'">全部 {{ adEvents.length }}</button>
+              <button type="button" :class="{ 'is-active': adEventFilter === 'blocked' }" @click="adEventFilter = 'blocked'">已拦截 {{ adBlockedEventCount }}</button>
+              <button type="button" :class="{ 'is-active': adEventFilter === 'clean' }" @click="adEventFilter = 'clean'">未发现 {{ adCleanEventCount }}</button>
+            </div>
+            <input v-model="adEventQuery" class="ad-log-search" type="search" placeholder="筛选剧名或来源" aria-label="筛选剧名或来源" />
+          </div>
+        </div>
+        <div v-if="adFilterLoading && !adEvents.length" class="empty">正在读取广告拦截记录…</div>
+        <div v-else-if="!adEvents.length" class="empty ad-empty-state"><strong>还没有扫描记录</strong><span>下载电视剧后，HLS 扫描结果会自动出现在这里。</span></div>
+        <div v-else-if="!visibleAdEvents.length" class="empty ad-empty-state"><strong>没有匹配的记录</strong><span>换一个筛选条件或清空搜索关键词。</span></div>
+        <div v-else class="ad-event-list">
+          <button
+            v-for="event in visibleAdEvents"
+            :key="adEventKey(event)"
+            type="button"
+            class="ad-event"
+            :class="{ 'is-expanded': expandedAdEventKey === adEventKey(event) }"
+            :aria-expanded="expandedAdEventKey === adEventKey(event)"
+            @click="toggleAdEvent(event)"
+          >
+            <div class="ad-event-main">
+              <div class="ad-event-title">
+                <span :class="['ad-event-status', event.filtered_segments ? 'is-blocked' : 'is-clean']">
+                  {{ event.filtered_segments ? '已拦截' : '未发现' }}
+                </span>
+                <strong>{{ event.title || '未命名任务' }}</strong>
+                <span v-if="adEpisodeLabel(event)" class="muted">{{ adEpisodeLabel(event) }}</span>
+              </div>
+              <div class="ad-event-meta">
+                <span>{{ event.source_name || event.source_key || 'LunaTV' }}</span>
+                <span>{{ formattedTime(event.timestamp) }}</span>
+              </div>
+            </div>
+            <div class="ad-event-detail">
+              <strong>{{ event.filtered_segments || 0 }} 段 · {{ formattedSeconds(event.filtered_seconds) }}</strong>
+              <span>CUE {{ event.cue_segments || 0 }}</span>
+              <span>结构 {{ event.splice_segments || 0 }}</span>
+              <span>同资产 {{ event.same_asset_splice_segments || 0 }}</span>
+              <span>正则 {{ event.regex_segments || 0 }}</span>
+              <span class="ad-event-chevron" aria-hidden="true">{{ expandedAdEventKey === adEventKey(event) ? '收起' : '详情' }}</span>
+            </div>
+            <div v-if="expandedAdEventKey === adEventKey(event)" class="ad-event-expanded">
+              <code>{{ adLogLine(event) }}</code>
+              <div class="ad-breakdown">
+                <span>闭合 CUE：{{ event.cue_segments || 0 }} 段 / {{ formattedSeconds(event.cue_seconds) }}</span>
+                <span>结构拼接：{{ event.splice_segments || 0 }} 段 / {{ formattedSeconds(event.splice_seconds) }}</span>
+                <span>同资产插入：{{ event.same_asset_splice_segments || 0 }} 段 / {{ formattedSeconds(event.same_asset_splice_seconds) }}</span>
+                <span>URL 正则：{{ event.regex_segments || 0 }} 段</span>
+                <span>未闭合 CUE：{{ event.unclosed_cue || 0 }}</span>
+                <span>DATERANGE：{{ event.daterange_candidates || 0 }} · DISCONTINUITY：{{ event.discontinuity || 0 }}</span>
+              </div>
+            </div>
+          </button>
+        </div>
+      </div>
     </section>
 
-    <section class="panel">
-      <div class="section-heading">
-        <div class="section-title">资源站数量 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
-        <span class="source-caption">打开页面仅读取缓存；搜索会跳过“配置禁用”的来源，网络不通的来源仍会尝试调用</span>
+    <section v-if="activeTab === 'sources'" id="sources-panel" class="panel source-panel" role="tabpanel" aria-labelledby="sources-tab">
+      <div class="section-heading source-panel-heading">
+        <div>
+          <div class="section-title">资源站 <span class="muted">{{ loading ? '…' : sources.length }}</span></div>
+          <span class="source-caption">页面读取缓存；来源会按后台健康检查结果参与搜索，单源可单独测试。</span>
+        </div>
+        <div class="source-health-summary" aria-label="来源状态汇总">
+          <span class="summary-item is-good"><i class="legend-dot is-healthy" aria-hidden="true"></i>{{ sourceSummary.healthy }} 正常</span>
+          <span class="summary-item is-warning"><i class="legend-dot is-pending" aria-hidden="true"></i>{{ sourceSummary.attention }} 待关注</span>
+          <span class="summary-item"><i class="legend-dot is-pending" aria-hidden="true"></i>{{ sourceSummary.disabled }} 已禁用</span>
+        </div>
       </div>
       <div v-if="!loading && sources.length" :class="['health-overview', { 'is-running': sourceHealth.running }]">
         <div class="health-progress-block">
@@ -417,8 +722,11 @@ onBeforeUnmount(clearHealthPoll)
       </div>
     </section>
 
-    <section class="panel help-panel">
-      <div class="section-title">使用说明</div>
+    <section v-if="activeTab === 'sources'" class="panel help-panel">
+      <div class="section-heading help-heading">
+        <div class="section-title">使用说明</div>
+        <span class="source-caption">常用规则与处理方式</span>
+      </div>
       <div class="help-grid">
         <p><strong>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p>
         <p><strong>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p>
@@ -446,6 +754,10 @@ onBeforeUnmount(clearHealthPoll)
 h1 { margin: 8px 0; font-size: 32px; }
 p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); margin: 0; }
 .header-status { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.page-tabs { display: flex; gap: 4px; margin-bottom: 18px; padding: 4px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 12px; background: rgba(var(--v-theme-surface, 23, 23, 34), .72); }
+.page-tab { flex: 0 0 auto; border: 0; border-radius: 9px; padding: 9px 16px; color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .68)); background: transparent; cursor: pointer; font: inherit; font-size: 13px; font-weight: 650; }
+.page-tab:hover { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .06); }
+.page-tab.is-active { color: rgb(var(--v-theme-on-primary, 255, 255, 255)); background: rgb(var(--v-theme-primary, 139, 92, 246)); box-shadow: 0 4px 12px rgba(var(--v-theme-primary, 139, 92, 246), .24); }
 .chip { border-radius: 999px; background: rgba(var(--v-theme-primary, 139, 92, 246), .14); color: rgb(var(--v-theme-primary, 139, 92, 246)); padding: 6px 9px; font-size: 12px; white-space: nowrap; }
 .chip.ready { background: rgba(var(--v-theme-success, 76, 175, 80), .16); color: rgb(var(--v-theme-on-surface, 232, 231, 241)); }
 .chip.busy { background: rgba(var(--v-theme-warning, 251, 140, 0), .16); color: rgb(var(--v-theme-on-surface, 232, 231, 241)); }
@@ -466,6 +778,31 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 14px; }
 .section-heading .section-title { margin-bottom: 0; }
 .source-caption { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; white-space: nowrap; }
+.ad-filter-heading { align-items: flex-start; }
+.ad-filter-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.debug-switch { display: inline-flex; align-items: center; gap: 7px; color: rgb(var(--v-theme-on-surface, 232, 231, 241)); font-size: 12px; font-weight: 650; cursor: pointer; }
+.debug-switch input { accent-color: rgb(var(--v-theme-primary, 139, 92, 246)); width: 15px; height: 15px; }
+.debug-switch input:disabled { cursor: default; }
+.debug-badge, .ad-event-status { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 650; vertical-align: middle; }
+.debug-badge { margin-left: 6px; }
+.debug-badge.is-on { color: rgb(var(--v-theme-success, 76, 175, 80)); background: rgba(var(--v-theme-success, 76, 175, 80), .16); }
+.debug-badge.is-off { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .08); }
+.ad-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.ad-metric { display: grid; gap: 4px; min-width: 0; padding: 13px 14px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); border-radius: 12px; background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035); }
+.ad-metric.is-blocked { border-color: rgba(var(--v-theme-warning, 251, 140, 0), .34); background: rgba(var(--v-theme-warning, 251, 140, 0), .07); }
+.ad-metric-label { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 12px; }
+.ad-metric strong { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-metric small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-event-list { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; }
+.ad-event { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .10)); border-radius: 11px; background: rgba(var(--v-theme-on-surface, 232, 231, 241), .018); }
+.ad-event-main { min-width: 0; display: grid; gap: 5px; }
+.ad-event-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ad-event-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ad-event-status.is-blocked { color: rgb(var(--v-theme-warning, 251, 140, 0)); background: rgba(var(--v-theme-warning, 251, 140, 0), .16); }
+.ad-event-status.is-clean { color: rgb(var(--v-theme-success, 76, 175, 80)); background: rgba(var(--v-theme-success, 76, 175, 80), .16); }
+.ad-event-meta, .ad-event-detail { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 11px; }
+.ad-event-detail { justify-content: flex-end; white-space: nowrap; }
+.ad-event-detail strong { color: rgb(var(--v-theme-on-surface, 232, 231, 241)); font-size: 12px; }
 .source-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .source-table { width: 100%; min-width: 810px; border-collapse: collapse; font-size: 13px; }
 .source-table th, .source-table td { padding: 11px 12px; border-bottom: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12)); text-align: left; white-space: nowrap; }
@@ -520,7 +857,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .empty { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); padding: 16px 0; }
 .help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); font-size: 13px; line-height: 1.6; }
 .help-grid p { margin: 0; }
-@media (max-width: 760px) { .lunatv-page { padding: 18px; } .lunatv-header { flex-direction: column; align-items: stretch; } .lunatv-actions { justify-content: flex-start; } .section-heading { align-items: flex-start; flex-direction: column; gap: 4px; } }
+@media (max-width: 760px) { .lunatv-page { padding: 18px; } .lunatv-header { flex-direction: column; align-items: stretch; } .lunatv-actions { justify-content: flex-start; } .section-heading { align-items: flex-start; flex-direction: column; gap: 4px; } .page-tabs { margin-bottom: 14px; } .page-tab { flex: 1 1 0; } }
 @media (max-width: 760px) { .help-grid { grid-template-columns: 1fr; } }
 .lunatv-page {
   padding: clamp(18px, 3vw, 32px);
@@ -674,6 +1011,19 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 }
 
 @media (max-width: 900px) {
+  .ad-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ad-event {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ad-event-detail {
+    justify-content: flex-start;
+  }
+
   .health-overview {
     align-items: stretch;
     flex-direction: column;
@@ -694,6 +1044,558 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
     align-items: flex-start;
     flex-direction: column;
     gap: 3px;
+  }
+
+  .ad-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ad-filter-actions {
+    justify-content: flex-start;
+  }
+
+  .source-caption {
+    white-space: normal;
+  }
+}
+
+.tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 20px;
+  margin-left: 8px;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .72);
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .09);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tab-count-wide {
+  min-width: 38px;
+}
+
+.page-tab.is-active .tab-count {
+  color: rgb(var(--v-theme-on-primary, 255, 255, 255));
+  background: rgba(var(--v-theme-on-primary, 255, 255, 255), .18);
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.overview-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 15px 16px;
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .11));
+  border-radius: 14px;
+  background: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-heavy, 1));
+  box-shadow: 0 10px 26px rgba(0, 0, 0, .08);
+}
+
+.overview-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.overview-label,
+.overview-card-meta {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 11px;
+}
+
+.overview-card > strong {
+  min-width: 0;
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.overview-card > strong small {
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.overview-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px !important;
+}
+
+.overview-status,
+.summary-item,
+.auto-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .68);
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .07);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.overview-status.is-live,
+.overview-status.is-good,
+.summary-item.is-good {
+  color: rgb(var(--v-theme-success, 76, 175, 80));
+  background: rgba(var(--v-theme-success, 76, 175, 80), .13);
+}
+
+.overview-status.is-warning,
+.summary-item.is-warning {
+  color: rgb(var(--v-theme-warning, 251, 140, 0));
+  background: rgba(var(--v-theme-warning, 251, 140, 0), .13);
+}
+
+.source-panel-heading,
+.ad-page-heading {
+  align-items: flex-start;
+}
+
+.source-health-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.summary-item .legend-dot {
+  width: 6px;
+  height: 6px;
+}
+
+.ad-filter-panel {
+  padding: 20px;
+}
+
+.ad-page-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 18px;
+}
+
+.page-kicker {
+  margin-bottom: 6px;
+  color: rgb(var(--v-theme-primary, 139, 92, 246));
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .14em;
+}
+
+.ad-page-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 7px;
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.ad-page-heading p {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ad-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auto-refresh {
+  padding: 5px 9px;
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-success, 76, 175, 80));
+  box-shadow: 0 0 0 4px rgba(var(--v-theme-success, 76, 175, 80), .11);
+}
+
+.debug-switch {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .12));
+  border-radius: 8px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+}
+
+.source-action.is-danger {
+  border-color: rgba(var(--v-theme-error, 244, 67, 54), .48);
+  color: rgb(var(--v-theme-error, 244, 67, 54));
+  background: rgba(var(--v-theme-error, 244, 67, 54), .08);
+}
+
+.ad-monitor-state {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 13px 14px;
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .11));
+  border-radius: 13px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .025);
+}
+
+.ad-monitor-state.is-active {
+  border-color: rgba(var(--v-theme-success, 76, 175, 80), .28);
+  background: linear-gradient(90deg, rgba(var(--v-theme-success, 76, 175, 80), .08), rgba(var(--v-theme-on-surface, 232, 231, 241), .02));
+}
+
+.ad-monitor-state.is-loading {
+  opacity: .65;
+}
+
+.monitor-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  background: rgba(var(--v-theme-primary, 139, 92, 246), .12);
+}
+
+.monitor-icon i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .45);
+}
+
+.ad-monitor-state.is-active .monitor-icon {
+  background: rgba(var(--v-theme-success, 76, 175, 80), .13);
+}
+
+.ad-monitor-state.is-active .monitor-icon i {
+  background: rgb(var(--v-theme-success, 76, 175, 80));
+  box-shadow: 0 0 0 5px rgba(var(--v-theme-success, 76, 175, 80), .12);
+  animation: monitor-pulse 1.8s ease-in-out infinite;
+}
+
+.monitor-state-copy,
+.monitor-state-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.monitor-state-copy strong,
+.monitor-state-meta strong {
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 13px;
+}
+
+.monitor-state-copy span,
+.monitor-state-meta span {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 11px;
+}
+
+.monitor-state-meta {
+  text-align: right;
+}
+
+.ad-metrics {
+  gap: 12px;
+  margin-bottom: 0;
+}
+
+.ad-metric {
+  gap: 6px;
+  padding: 15px 16px;
+  border-radius: 13px;
+}
+
+.ad-metric strong {
+  font-size: 22px;
+}
+
+.ad-metric strong small {
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.ad-log-section {
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .10));
+}
+
+.ad-log-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.ad-log-heading h3 {
+  margin: 0 0 3px;
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 15px;
+}
+
+.ad-log-heading > div > span {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62));
+  font-size: 11px;
+}
+
+.ad-log-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ad-filter-segments {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .055);
+}
+
+.ad-filter-segments button {
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 9px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .66);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.ad-filter-segments button.is-active {
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .10);
+}
+
+.ad-log-search {
+  width: 172px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .14));
+  border-radius: 9px;
+  outline: none;
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .035);
+  font: inherit;
+  font-size: 11px;
+}
+
+.ad-log-search::placeholder {
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .38);
+}
+
+.ad-log-search:focus {
+  border-color: rgba(var(--v-theme-primary, 139, 92, 246), .62);
+  box-shadow: 0 0 0 3px rgba(var(--v-theme-primary, 139, 92, 246), .10);
+}
+
+.ad-event-list {
+  gap: 7px;
+  max-height: 500px;
+  padding-right: 4px;
+}
+
+.ad-event {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
+  width: 100%;
+  padding: 12px 13px;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .16s ease, background-color .16s ease, transform .16s ease;
+}
+
+.ad-event:hover {
+  border-color: rgba(var(--v-theme-primary, 139, 92, 246), .28);
+  background: rgba(var(--v-theme-primary, 139, 92, 246), .035);
+}
+
+.ad-event.is-expanded {
+  border-color: rgba(var(--v-theme-primary, 139, 92, 246), .34);
+  background: rgba(var(--v-theme-primary, 139, 92, 246), .045);
+}
+
+.ad-event-detail {
+  flex-wrap: nowrap;
+}
+
+.ad-event-chevron {
+  min-width: 28px;
+  color: rgb(var(--v-theme-primary, 139, 92, 246));
+  text-align: right;
+}
+
+.ad-event-expanded {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(var(--v-border-color, 232, 231, 241), var(--v-border-opacity, .09));
+}
+
+.ad-event-expanded code {
+  display: block;
+  overflow-x: auto;
+  padding: 10px 11px;
+  border-radius: 9px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .86);
+  background: rgba(0, 0, 0, .20);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: nowrap;
+}
+
+.ad-breakdown {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ad-breakdown span {
+  padding: 4px 7px;
+  border-radius: 7px;
+  color: rgba(var(--v-theme-on-surface, 232, 231, 241), .62);
+  background: rgba(var(--v-theme-on-surface, 232, 231, 241), .055);
+  font-size: 10px;
+}
+
+.ad-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  min-height: 180px;
+  text-align: center;
+}
+
+.ad-empty-state strong {
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  font-size: 14px;
+}
+
+.ad-empty-state span {
+  font-size: 12px;
+}
+
+.help-heading {
+  margin-bottom: 12px;
+}
+
+.page-tab:focus-visible,
+.button:focus-visible,
+.source-action:focus-visible,
+.ad-filter-segments button:focus-visible,
+.ad-event:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary, 139, 92, 246));
+  outline-offset: 2px;
+}
+
+@keyframes monitor-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(.72); opacity: .68; }
+}
+
+@media (max-width: 1180px) {
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ad-page-heading,
+  .ad-log-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ad-page-actions,
+  .ad-log-controls {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .source-health-summary {
+    justify-content: flex-start;
+  }
+
+  .ad-filter-panel {
+    padding: 16px;
+  }
+
+  .ad-page-heading h2 {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ad-monitor-state {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .monitor-state-meta {
+    grid-column: 2;
+    text-align: left;
+  }
+
+  .ad-log-controls,
+  .ad-log-search {
+    width: 100%;
+  }
+
+  .ad-filter-segments {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    width: 100%;
+  }
+
+  .ad-event {
+    grid-template-columns: 1fr;
+  }
+
+  .ad-event-detail {
+    justify-content: flex-start;
+    overflow-x: auto;
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ad-monitor-state.is-active .monitor-icon i {
+    animation: none;
   }
 }
 </style>

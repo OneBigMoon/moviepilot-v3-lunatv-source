@@ -50,6 +50,65 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert plugin.get_sidebar_nav() == []
 
 
+def test_ad_filter_workbench_persists_scan_results_and_debug_toggle():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": False})
+    task = DownloadTask(
+        task_id="ad-scan-test",
+        source_key="uku",
+        media_id="demo",
+        title="海底小纵队",
+        year="2024",
+        media_type="tv",
+        season=1,
+        episode=2,
+        url="https://media.example/index.m3u8",
+        root="/tmp/incoming",
+        source_name="测试来源",
+    )
+
+    plugin._record_ad_scan(
+        task,
+        {
+            "cue_segments": 3,
+            "cue_seconds": 18.5,
+            "splice_segments": 2,
+            "splice_seconds": 10.0,
+            "same_asset_splice_segments": 1,
+            "same_asset_splice_seconds": 5.0,
+            "regex_segments": 4,
+            "total_segments": 10,
+            "unclosed_cue": 0,
+            "daterange_candidates": 2,
+            "discontinuity": 4,
+        },
+    )
+
+    payload = plugin.api_ad_filter()["data"]
+    assert payload["summary"] == {
+        "scan_count": 1,
+        "blocked_scan_count": 1,
+        "filtered_segments": 10,
+        "filtered_seconds": 33.5,
+        "last_scan_at": payload["summary"]["last_scan_at"],
+    }
+    event = payload["events"][0]
+    assert event["status"] == "blocked"
+    assert event["status_label"] == "已拦截广告片段"
+    assert event["title"] == "海底小纵队"
+    assert "url" not in event
+    assert plugin.get_data(plugin_module.AD_SCAN_EVENTS_KEY)
+
+    result = plugin.api_debug({"enabled": True})
+    assert result["success"] is True
+    assert plugin.api_status()["data"]["debug_mode"] is True
+    assert plugin._config["debug_mode"] is True
+
+    plugin.api_debug({"enabled": False})
+    cleared = plugin.api_ad_filter_clear()
+    assert cleared["data"]["summary"]["scan_count"] == 0
+
+
 def test_service_registers_subscription_refresh_and_serial_queue():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "poll_minutes": 15, "queue_minutes": 2})
