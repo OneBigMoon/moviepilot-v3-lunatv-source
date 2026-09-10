@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.88"
+    expected_version = "0.4.89"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -90,6 +90,7 @@ def test_manifest_version_and_history_match_release_metadata():
     assert next(iter(history)) == expected_version
     assert history["0.4.87"] == "校准广告工作台信息层级，明确命中与扫描次数，补充调试开关说明和缓存健康状态提示。"
     assert history["0.4.88"] == "修复原生识别返回类型：识别链改回宿主领域 MediaInfo，避免整理阶段因缺少领域方法中断，探索与订阅 API 仍返回 schema。"
+    assert history["0.4.89"] == "修复订阅追更命名年份：优先使用 TMDB 关联年份，避免发布年（如 2020）生成同剧第二个媒体库目录。"
     assert history["0.4.80"] == (
         "修复同一媒体资产内嵌广告在分辨率探测不可用时仍进入成品：识别高置信度分片序号插入并在 "
         "N_m3u8DL-RE 前跳过广告分片；保留普通连续分片和不确定场景的安全策略。"

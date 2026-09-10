@@ -1013,7 +1013,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.88"
+    plugin_version = "0.4.89"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -6066,10 +6066,18 @@ class LunaTVSource(_PluginBase):
                         or (normalized_title if normalized_title != title else result.title)
                         or "未命名"
                     )
+                    # 命名年必须与作品身份一致：CMS 行常带发布年（如
+                    # 海底小纵队 2020），而 TMDB 关联年才是媒体库目录使用的
+                    # 年份。沿用 CMS 年份会让整理链落到另一个年份目录，
+                    # 在 Emby/绿联形成同剧不同条目。
+                    task_year = (
+                        str(association.get("year") or "").strip()
+                        or str(result.year or "").strip()
+                    )
                     task = DownloadTask.from_episode(
                         episode,
                         title=normalize_media_title(task_title),
-                        year=result.year,
+                        year=task_year,
                         media_type=result.media_type,
                         root=root,
                         mode=str(self._config.get("mode") or "download"),
