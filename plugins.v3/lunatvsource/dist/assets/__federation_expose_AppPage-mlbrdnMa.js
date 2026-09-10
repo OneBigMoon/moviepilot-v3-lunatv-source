@@ -1098,7 +1098,7 @@ return (_ctx, _cache) => {
       : _createCommentVNode("", true),
     (activeTab.value === 'sources')
       ? (_openBlock(), _createElementBlock("section", _hoisted_93, [...(_cache[42] || (_cache[42] = [
-          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-fbbe48f8><div class=\"section-title\" data-v-fbbe48f8>使用说明</div><span class=\"source-caption\" data-v-fbbe48f8>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-fbbe48f8><p data-v-fbbe48f8><strong data-v-fbbe48f8>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-fbbe48f8><strong data-v-fbbe48f8>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-fbbe48f8><strong data-v-fbbe48f8>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-fbbe48f8><strong data-v-fbbe48f8>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-fbbe48f8><strong data-v-fbbe48f8>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div>", 2)
+          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-0ecedf58><div class=\"section-title\" data-v-0ecedf58>使用说明</div><span class=\"source-caption\" data-v-0ecedf58>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-0ecedf58><p data-v-0ecedf58><strong data-v-0ecedf58>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-0ecedf58><strong data-v-0ecedf58>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-0ecedf58><strong data-v-0ecedf58>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-0ecedf58><strong data-v-0ecedf58>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-0ecedf58><strong data-v-0ecedf58>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div>", 2)
         ]))]))
       : _createCommentVNode("", true)
   ]))
@@ -1106,6 +1106,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-fbbe48f8"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0ecedf58"]]);
 
 export { AppPage as default };

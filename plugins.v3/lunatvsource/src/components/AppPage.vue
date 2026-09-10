@@ -774,8 +774,8 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 .chip.ready { background: rgba(var(--v-theme-success, 76, 175, 80), .16); color: rgb(var(--v-theme-on-surface, 232, 231, 241)); }
 .chip.busy { background: rgba(var(--v-theme-warning, 251, 140, 0), .16); color: rgb(var(--v-theme-on-surface, 232, 231, 241)); }
 .chip.muted-chip { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasis-opacity, .62)); background: rgba(var(--v-theme-on-surface, 232, 231, 241), .08); }
-.lunatv-actions { display: flex; gap: 10px; align-items: center; }
-.button, .episode-button { border: 0; border-radius: 10px; background: rgb(var(--v-theme-primary, 139, 92, 246)); color: rgb(var(--v-theme-on-primary, 255, 255, 255)); padding: 10px 16px; cursor: pointer; font-weight: 650; }
+.lunatv-actions { display: flex; gap: 10px; align-items: center; flex: 0 0 auto; }
+.button, .episode-button { border: 0; border-radius: 10px; background: rgb(var(--v-theme-primary, 139, 92, 246)); color: rgb(var(--v-theme-on-primary, 255, 255, 255)); padding: 10px 16px; cursor: pointer; font-weight: 650; white-space: nowrap; }
 .button.secondary { background: rgba(var(--v-theme-primary, 139, 92, 246), .14); color: rgb(var(--v-theme-primary, 139, 92, 246)); }
 .button:disabled { opacity: .55; cursor: default; }
 .panel { background: var(--ltv-surface); border: 1px solid var(--ltv-border); border-radius: 16px; padding: 18px; margin-bottom: 18px; backdrop-filter: var(--ltv-blur); }
@@ -887,6 +887,26 @@ html[data-theme='glass'] .lunatv-page {
   --ltv-blur: var(--glass-raised-backdrop-filter, none);
 }
 
+/* MoviePilot paints its own chips and cards with a sheen over a tinted fill.
+   Borrow that material so the status row and panels stay legible when the
+   wallpaper shows through instead of dissolving into it. */
+html[data-theme='glass'] .chip {
+  background-color: rgba(11, 19, 34, .52);
+  background-image: var(--glass-chip-sheen, none);
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+  box-shadow: var(--glass-control-shadow, none);
+}
+html[data-theme='glass'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .34); }
+html[data-theme='glass'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .34); }
+html[data-theme='glass'] .chip.muted-chip { background-color: rgba(11, 19, 34, .4); }
+html[data-theme='glass'] .panel,
+html[data-theme='glass'] .page-tabs { background-image: var(--glass-sheen, none); }
+html[data-theme='glass'] .button.secondary {
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, .1));
+  background-color: var(--glass-control, rgba(11, 19, 34, .52));
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+}
+
 html[data-theme='transparent'] .lunatv-page {
   --ltv-page-bg: transparent;
   --ltv-surface: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
@@ -896,6 +916,18 @@ html[data-theme='transparent'] .lunatv-page {
   --ltv-shadow-soft: 0 10px 24px rgba(0, 0, 0, .12);
   --ltv-blur: blur(var(--transparent-blur, 10px)) saturate(1.2);
 }
+html[data-theme='transparent'] .chip {
+  background-color: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
+  backdrop-filter: blur(var(--transparent-blur, 10px));
+  color: rgb(var(--v-theme-on-surface, 232, 231, 241));
+}
+html[data-theme='transparent'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .28); }
+html[data-theme='transparent'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .28); }
+html[data-theme='transparent'] .button.secondary {
+  border: 1px solid var(--ltv-border);
+  background-color: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
+}
+
 .lunatv-page {
   padding: clamp(18px, 3vw, 32px);
 }
