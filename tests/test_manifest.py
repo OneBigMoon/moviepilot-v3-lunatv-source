@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.91"
+    expected_version = "0.4.93"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,15 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.93"] == (
+        "玻璃主题下状态胶囊与面板改用宿主自己的玻璃材质（光泽 + 着色填充），壁纸透出时保持可读；"
+        "「立即刷新」按钮不再折行。"
+    )
+    assert history["0.4.92"] == (
+        "修复重新下载同一路径的剧集被判「已整理过」而留在待整理目录："
+        "下载完成回调改用宿主自动整理入口（manual=false），让 MoviePilot 按文件指纹"
+        "（大小/修改时间/文件 ID）放行新版本；老宿主自动退回手动入口。"
+    )
     assert history["0.4.87"] == "校准广告工作台信息层级，明确命中与扫描次数，补充调试开关说明和缓存健康状态提示。"
     assert history["0.4.88"] == "修复原生识别返回类型：识别链改回宿主领域 MediaInfo，避免整理阶段因缺少领域方法中断，探索与订阅 API 仍返回 schema。"
     assert history["0.4.91"] == "修复下载完成后自动整理失败：整理请求改用宿主可解析的媒体身份（TMDB 直传，苹果 CMS 身份补成 source:vod，解析不了则交给宿主按文件名识别）。"
