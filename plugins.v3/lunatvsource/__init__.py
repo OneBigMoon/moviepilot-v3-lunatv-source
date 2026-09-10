@@ -1013,7 +1013,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.90"
+    plugin_version = "0.4.91"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -2983,6 +2983,44 @@ class LunaTVSource(_PluginBase):
             return media_source
 
     @staticmethod
+    def _host_native_media_source(media_source: Any) -> Any:
+        """只在宿主认识该来源时返回枚举值，插件自定义来源返回 None。"""
+
+        if _HostMediaSource is None:
+            return None
+        try:
+            return _HostMediaSource(str(media_source or "").strip())
+        except Exception:
+            return None
+
+    def _transfer_media_identity(self, task: DownloadTask) -> Tuple[Any, Optional[str]]:
+        """挑选宿主整理链能解析的媒体身份，解析不了就省略身份。
+
+        宿主收到显式 media_source/media_id 时会强制重新识别，识别失败即
+        中止整理，所以这里不能把宿主不认识的来源原样传下去：宿主原生身份
+        （TMDB 等）直接透传，插件自身的 CMS 身份补成 ``source:vod`` 组合 ID
+        交给本插件的识别器，其余情况返回空身份让宿主按文件名识别。
+        """
+
+        host_source = str(getattr(task, "host_media_source", "") or "").strip()
+        host_id = str(getattr(task, "host_media_id", "") or "").strip()
+        if host_source and host_id:
+            native = self._host_native_media_source(host_source)
+            if native is not None:
+                return native, host_id
+        media_id = str(getattr(task, "media_id", "") or "").strip()
+        if media_id and media_id != "native":
+            if ":" in media_id:
+                return self._host_media_source_value(PLUGIN_MEDIA_SOURCE), media_id
+            source_key = str(getattr(task, "source_key", "") or "").strip()
+            if source_key and source_key != PLUGIN_MEDIA_SOURCE:
+                return (
+                    self._host_media_source_value(PLUGIN_MEDIA_SOURCE),
+                    f"{source_key}:{media_id}",
+                )
+        return None, None
+
+    @staticmethod
     def _host_media_type(media_type: str) -> Any:
         if _HostMediaType is None:
             return media_type
@@ -3880,7 +3918,7 @@ class LunaTVSource(_PluginBase):
             fileitem = _HostStorageChain().get_file_item(storage="local", path=Path(output))
             if not fileitem:
                 return "fallback:file-not-found"
-            media_source, media_id = self._task_media_identity(task)
+            host_media_source, media_id = self._transfer_media_identity(task)
             directory = self._system_directory_info(task.media_type, task.root)
             target_path = str((directory or {}).get("library_path") or "").strip()
             transfer_type = str((directory or {}).get("transfer_type") or "").strip()
@@ -3897,7 +3935,6 @@ class LunaTVSource(_PluginBase):
             except OSError:
                 pass
             transfer_chain = _HostTransferChain()
-            host_media_source = self._host_media_source_value(media_source)
             host_media_type = self._host_media_type(task.media_type)
             scrape = _bool(self._config.get("generate_nfo"), False)
             movie_meta = (
@@ -3934,8 +3971,8 @@ class LunaTVSource(_PluginBase):
                     target_storage="local",
                     target_path=Path(target_path),
                     transfer_type=transfer_type,
-                    media_source=host_media_source,
-                    media_id=media_id,
+                    media_source=host_media_source or None,
+                    media_id=media_id or None,
                     mtype=host_media_type,
                     season=None,
                     force=False,
@@ -3950,8 +3987,8 @@ class LunaTVSource(_PluginBase):
                     target_storage="local",
                     target_path=Path(target_path),
                     transfer_type=transfer_type,
-                    media_source=host_media_source,
-                    media_id=media_id,
+                    media_source=host_media_source or None,
+                    media_id=media_id or None,
                     mtype=host_media_type,
                     season=task.season if task.media_type == "tv" else None,
                     force=False,

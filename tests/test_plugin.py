@@ -4402,6 +4402,106 @@ def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
     assert captured["transfer_type"] == "move"
 
 
+def test_native_transfer_resolves_plugin_cms_identity_for_host_chain(
+    monkeypatch, tmp_path: Path
+):
+    """苹果 CMS 身份要补成 source:vod，宿主才会调本插件识别器解析。"""
+
+    captured = {}
+
+    class MediaSource(str, Enum):
+        TMDB = "themoviedb"
+
+    class StorageChain:
+        def get_file_item(self, **kwargs):
+            return object()
+
+    class TransferChain:
+        def manual_transfer(self, **kwargs):
+            captured.update(kwargs)
+            return True, ""
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
+    monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
+    monkeypatch.setattr(plugin_module, "_HostTransferChain", TransferChain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(
+        plugin,
+        "_system_directory_info",
+        lambda *_args, **_kwargs: {
+            "library_path": str(tmp_path / "library"),
+            "transfer_type": "move",
+        },
+    )
+    task = SimpleNamespace(
+        mode="download",
+        media_type="tv",
+        title="示例剧",
+        year="2026",
+        root=str(tmp_path),
+        source_key="cms-demo",
+        media_id="42",
+        host_media_source=None,
+        host_media_id=None,
+        season=1,
+        episode=1,
+    )
+
+    assert plugin._native_transfer(task, str(tmp_path / "ep.mp4")) == "moviepilot"
+    assert captured["media_source"] == "lunatv"
+    assert captured["media_id"] == "cms-demo:42"
+
+
+def test_native_transfer_omits_unresolvable_media_identity(monkeypatch, tmp_path: Path):
+    """身份解析不了就省略，交给宿主按文件名识别，而不是强制识别失败。"""
+
+    captured = {}
+
+    class MediaSource(str, Enum):
+        TMDB = "themoviedb"
+
+    class StorageChain:
+        def get_file_item(self, **kwargs):
+            return object()
+
+    class TransferChain:
+        def manual_transfer(self, **kwargs):
+            captured.update(kwargs)
+            return True, ""
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
+    monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
+    monkeypatch.setattr(plugin_module, "_HostTransferChain", TransferChain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(
+        plugin,
+        "_system_directory_info",
+        lambda *_args, **_kwargs: {
+            "library_path": str(tmp_path / "library"),
+            "transfer_type": "move",
+        },
+    )
+    task = SimpleNamespace(
+        mode="download",
+        media_type="tv",
+        title="示例剧",
+        year="2026",
+        root=str(tmp_path),
+        source_key="lunatv",
+        media_id="native",
+        host_media_source=None,
+        host_media_id=None,
+        season=1,
+        episode=1,
+    )
+
+    assert plugin._native_transfer(task, str(tmp_path / "ep.mp4")) == "moviepilot"
+    assert captured["media_source"] is None
+    assert captured["media_id"] is None
+
+
 def test_native_transfer_passes_generate_nfo_as_scrape_for_manual_transfer(
     monkeypatch, tmp_path: Path
 ):
