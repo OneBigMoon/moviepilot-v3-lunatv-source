@@ -1013,7 +1013,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.91"
+    plugin_version = "0.4.92"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3946,55 +3946,56 @@ class LunaTVSource(_PluginBase):
                 else None
             )
             direct_transfer = getattr(transfer_chain, "do_transfer", None)
-            if movie_meta is not None and callable(direct_transfer) and transfer_type:
-                # MoviePilot's generic manual entrypoint reparses the source
-                # path.  Some host/parser combinations synthesize S01/E01 for
-                # an otherwise season-free movie and therefore select the TV
-                # rename template.  Supply authoritative movie metadata to
-                # the stable transfer entrypoint so only TV tasks can carry
-                # season/episode information into the library layout.
-                if hasattr(movie_meta, "type"):
-                    movie_meta.type = host_media_type
-                for field_name in (
-                    "begin_season",
-                    "end_season",
-                    "total_season",
-                    "begin_episode",
-                    "end_episode",
-                    "total_episode",
-                ):
-                    if hasattr(movie_meta, field_name):
-                        setattr(movie_meta, field_name, None)
-                state, message = direct_transfer(
-                    fileitem=fileitem,
-                    meta=movie_meta,
-                    target_storage="local",
-                    target_path=Path(target_path),
-                    transfer_type=transfer_type,
-                    media_source=host_media_source or None,
-                    media_id=media_id or None,
-                    mtype=host_media_type,
-                    season=None,
-                    force=False,
-                    background=False,
-                    manual=True,
-                    scrape=scrape,
-                    sync_extra_files=True,
-                )
+            transfer_kwargs: Dict[str, Any] = {
+                "fileitem": fileitem,
+                "target_storage": "local",
+                "target_path": Path(target_path),
+                "transfer_type": transfer_type,
+                "media_source": host_media_source or None,
+                "media_id": media_id or None,
+                "mtype": host_media_type,
+                "season": task.season if task.media_type == "tv" else None,
+                "force": False,
+                "background": False,
+                # Automatic (non-manual) semantics are mandatory here.  The
+                # manual entrypoint skips the host's history gate whenever any
+                # record matches the source path, so a freshly downloaded
+                # release that replaces an older file at the same path is
+                # rejected as "已整理过" and never reaches the library.  The
+                # automatic entrypoint compares the file fingerprint (size /
+                # modify time / fileid) and lets a changed version through to
+                # the host's overwrite handling.
+                "manual": False,
+                "scrape": scrape,
+            }
+            if callable(direct_transfer):
+                if movie_meta is not None:
+                    # MoviePilot's generic entrypoint reparses the source path.
+                    # Some host/parser combinations synthesize S01/E01 for an
+                    # otherwise season-free movie and therefore select the TV
+                    # rename template.  Supply authoritative movie metadata so
+                    # only TV tasks can carry season/episode information into
+                    # the library layout.
+                    if hasattr(movie_meta, "type"):
+                        movie_meta.type = host_media_type
+                    for field_name in (
+                        "begin_season",
+                        "end_season",
+                        "total_season",
+                        "begin_episode",
+                        "end_episode",
+                        "total_episode",
+                    ):
+                        if hasattr(movie_meta, field_name):
+                            setattr(movie_meta, field_name, None)
+                    transfer_kwargs["meta"] = movie_meta
+                    transfer_kwargs["sync_extra_files"] = True
+                state, message = direct_transfer(**transfer_kwargs)
             else:
-                state, message = transfer_chain.manual_transfer(
-                    fileitem=fileitem,
-                    target_storage="local",
-                    target_path=Path(target_path),
-                    transfer_type=transfer_type,
-                    media_source=host_media_source or None,
-                    media_id=media_id or None,
-                    mtype=host_media_type,
-                    season=task.season if task.media_type == "tv" else None,
-                    force=False,
-                    background=False,
-                    scrape=scrape,
-                )
+                # Older hosts only expose the manual entrypoint.
+                for unsupported in ("meta", "manual", "sync_extra_files"):
+                    transfer_kwargs.pop(unsupported, None)
+                state, message = transfer_chain.manual_transfer(**transfer_kwargs)
             if state:
                 if transfer_type.casefold() == "move":
                     source_path = Path(output)

@@ -4357,7 +4357,9 @@ def test_resource_download_event_without_plugin_root_keeps_host_chain():
     assert plugin._queue.list_tasks() == []
 
 
-def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
+def test_native_transfer_uses_automatic_host_entrypoint_with_native_identity(
+    monkeypatch, tmp_path: Path
+):
     captured = {}
 
     class MediaSource(str, Enum):
@@ -4368,9 +4370,12 @@ def test_native_transfer_uses_host_identity(monkeypatch, tmp_path: Path):
             return object()
 
     class TransferChain:
-        def manual_transfer(self, **kwargs):
+        def do_transfer(self, **kwargs):
             captured.update(kwargs)
             return True, ""
+
+        def manual_transfer(self, **kwargs):
+            raise AssertionError("TV 整理必须走自动入口，手动入口会跳过宿主的文件指纹查重闸")
 
     monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
     monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
@@ -4417,9 +4422,12 @@ def test_native_transfer_resolves_plugin_cms_identity_for_host_chain(
             return object()
 
     class TransferChain:
-        def manual_transfer(self, **kwargs):
+        def do_transfer(self, **kwargs):
             captured.update(kwargs)
             return True, ""
+
+        def manual_transfer(self, **kwargs):
+            raise AssertionError("TV 整理必须走自动入口，手动入口会跳过宿主的文件指纹查重闸")
 
     monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
     monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
@@ -4451,6 +4459,61 @@ def test_native_transfer_resolves_plugin_cms_identity_for_host_chain(
     assert plugin._native_transfer(task, str(tmp_path / "ep.mp4")) == "moviepilot"
     assert captured["media_source"] == "lunatv"
     assert captured["media_id"] == "cms-demo:42"
+    # 自动语义：宿主才会按文件指纹放行替换同路径旧文件的重新下载
+    assert captured["manual"] is False
+    assert captured["season"] == 1
+
+
+def test_native_transfer_falls_back_to_manual_entrypoint_on_legacy_host(
+    monkeypatch, tmp_path: Path
+):
+    """老宿主没有 do_transfer 时仍要能整理，且不能把 manual 参数透传过去。"""
+
+    captured = {}
+
+    class MediaSource(str, Enum):
+        TMDB = "themoviedb"
+
+    class StorageChain:
+        def get_file_item(self, **kwargs):
+            return object()
+
+    class TransferChain:
+        def manual_transfer(self, **kwargs):
+            captured.update(kwargs)
+            return True, ""
+
+    monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
+    monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
+    monkeypatch.setattr(plugin_module, "_HostTransferChain", TransferChain)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(
+        plugin,
+        "_system_directory_info",
+        lambda *_args, **_kwargs: {
+            "library_path": str(tmp_path / "library"),
+            "transfer_type": "move",
+        },
+    )
+    task = SimpleNamespace(
+        mode="download",
+        media_type="tv",
+        title="示例剧",
+        year="2026",
+        root=str(tmp_path),
+        source_key="cms-demo",
+        media_id="42",
+        host_media_source=None,
+        host_media_id=None,
+        season=2,
+        episode=3,
+    )
+
+    assert plugin._native_transfer(task, str(tmp_path / "ep.mp4")) == "moviepilot"
+    assert captured["media_id"] == "cms-demo:42"
+    assert captured["season"] == 2
+    assert "manual" not in captured
 
 
 def test_native_transfer_omits_unresolvable_media_identity(monkeypatch, tmp_path: Path):
@@ -4466,9 +4529,12 @@ def test_native_transfer_omits_unresolvable_media_identity(monkeypatch, tmp_path
             return object()
 
     class TransferChain:
-        def manual_transfer(self, **kwargs):
+        def do_transfer(self, **kwargs):
             captured.update(kwargs)
             return True, ""
+
+        def manual_transfer(self, **kwargs):
+            raise AssertionError("TV 整理必须走自动入口，手动入口会跳过宿主的文件指纹查重闸")
 
     monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
     monkeypatch.setattr(plugin_module, "_HostStorageChain", StorageChain)
@@ -4502,7 +4568,7 @@ def test_native_transfer_omits_unresolvable_media_identity(monkeypatch, tmp_path
     assert captured["media_id"] is None
 
 
-def test_native_transfer_passes_generate_nfo_as_scrape_for_manual_transfer(
+def test_native_transfer_passes_generate_nfo_as_scrape_to_host_chain(
     monkeypatch, tmp_path: Path
 ):
     captured = {}
@@ -4518,9 +4584,12 @@ def test_native_transfer_passes_generate_nfo_as_scrape_for_manual_transfer(
             return object()
 
     class TransferChain:
-        def manual_transfer(self, **kwargs):
+        def do_transfer(self, **kwargs):
             captured.update(kwargs)
             return True, ""
+
+        def manual_transfer(self, **kwargs):
+            raise AssertionError("TV 整理必须走自动入口，手动入口会跳过宿主的文件指纹查重闸")
 
     monkeypatch.setattr(plugin_module, "_HostMediaSource", MediaSource)
     monkeypatch.setattr(plugin_module, "_HostMediaType", MediaType)
@@ -4552,11 +4621,13 @@ def test_native_transfer_passes_generate_nfo_as_scrape_for_manual_transfer(
     default_plugin.init_plugin({"enabled": True})
     assert default_plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
     assert captured["scrape"] is False
+    assert captured["manual"] is False
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "generate_nfo": True})
     assert plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
     assert captured["scrape"] is True
+    assert captured["manual"] is False
 
 
 def test_native_movie_transfer_clears_season_metadata(monkeypatch, tmp_path: Path):
@@ -4629,7 +4700,7 @@ def test_native_movie_transfer_clears_season_metadata(monkeypatch, tmp_path: Pat
     assert captured["season"] is None
     assert captured["target_path"] == tmp_path / "library"
     assert captured["transfer_type"] == "copy"
-    assert captured["manual"] is True
+    assert captured["manual"] is False
     assert captured["sync_extra_files"] is True
     meta = captured["meta"]
     assert meta.type is MediaType.MOVIE
