@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.93"
+    expected_version = "0.4.94"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,11 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.94"] == (
+        "修复重新下载同一集的下载历史写入：宿主删除下载历史后残留的 downloadfiles 无主文件行"
+        "不再占用同一路径（插件先回收无主行再写历史，订阅详情与已下载集数恢复正常）；"
+        "仅镜像历史、没有产物的完成行也不再挡住真正的重下。"
+    )
     assert history["0.4.93"] == (
         "玻璃主题下状态胶囊与面板改用宿主自己的玻璃材质（光泽 + 着色填充），壁纸透出时保持可读；"
         "「立即刷新」按钮不再折行。"
