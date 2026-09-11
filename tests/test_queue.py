@@ -51,6 +51,53 @@ def test_download_task_public_dict_redacts_private_error_url(tmp_path: Path):
     assert task.to_dict()["url"].endswith("token=source-secret")
 
 
+def test_queue_completed_outputs_only_reports_finished_artifacts(tmp_path: Path):
+    """已下载任务要能回报产物路径，历史占位行则不能被当成完成。"""
+
+    data: dict = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_args: None)
+    task = DownloadTask(
+        task_id="queue-completed",
+        source_key="lunatv",
+        media_id="site:1",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://source.example/s01e01.m3u8",
+        root=str(tmp_path),
+        mode="download",
+    )
+
+    assert queue.completed_outputs() == {}
+
+    recorded = str(tmp_path / "示例剧 (2026) - S01E01.mp4")
+    assert queue.reconcile_completed(task, output=recorded) is True
+    assert queue.completed_outputs() == {task.identity_key: recorded}
+
+    placeholder_data: dict = {}
+    placeholder_queue = DownloadQueue(
+        placeholder_data.get, placeholder_data.__setitem__, lambda *_args: None
+    )
+    placeholder = DownloadTask(
+        task_id="queue-placeholder",
+        source_key="lunatv",
+        media_id="site:1",
+        title="示例剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://source.example/s01e01.m3u8",
+        root=str(tmp_path),
+        mode="download",
+    )
+    assert placeholder_queue.reconcile_completed(placeholder) is True
+    assert placeholder_queue.summary()["completed"] == 1
+    assert placeholder_queue.completed_outputs() == {}
+
+
 def test_queue_disables_invalid_ad_filter_regex(caplog):
     with caplog.at_level("WARNING", logger="LunaTVSource"):
         queue = DownloadQueue(

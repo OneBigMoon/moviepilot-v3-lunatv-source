@@ -1003,6 +1003,30 @@ def _media_type_value(value: Any) -> str:
     return "movie"
 
 
+def _completed_queue_outputs(queue: Any) -> Dict[str, str]:
+    """Snapshot queue rows that prove an already finished download.
+
+    MoviePilot moves a completed download into the media library, so the queue
+    row can outlive the artifact on disk.  One snapshot per refresh keeps the
+    lookups off the per-episode path.
+    """
+
+    getter = getattr(queue, "completed_outputs", None)
+    if not callable(getter):
+        return {}
+    try:
+        snapshot = getter()
+    except Exception:  # pragma: no cover - defensive, queue API changed
+        return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        str(key): str(value).strip()
+        for key, value in snapshot.items()
+        if str(value or "").strip()
+    }
+
+
 def _coerce_media_identity_source(media_source: Any) -> str:
     return _enum_value(media_source) or PLUGIN_MEDIA_SOURCE
 
@@ -5868,6 +5892,7 @@ class LunaTVSource(_PluginBase):
             active_subscribes.append(subscribe)
         native_progress_ids: set[int] = set()
         native_progress_episodes: Dict[int, set[int]] = {}
+        completed_outputs = _completed_queue_outputs(queue)
         for subscribe in active_subscribes:
             if self._refresh_cancelled(queue):
                 return self._cancelled_refresh_result()
@@ -6218,6 +6243,23 @@ class LunaTVSource(_PluginBase):
                         if self._refresh_cancelled(queue):
                             return self._cancelled_refresh_result()
                         queue.reconcile_completed(task, output=str(existing_path))
+                        reconciled += 1
+                        if subscribe_id and int(task.episode or 0) > 0:
+                            native_progress_episodes.setdefault(
+                                subscribe_id, set()
+                            ).add(int(task.episode))
+                        continue
+                    recorded_output = completed_outputs.get(task.identity_key, "")
+                    if recorded_output:
+                        # The artifact already moved into the media library, so
+                        # the on-disk check above cannot see it any more.  The
+                        # finished queue row is the only local record left:
+                        # rebuild the host download history from it instead of
+                        # losing the episode counter.
+                        self._record_native_history(task, recorded_output)
+                        if self._refresh_cancelled(queue):
+                            return self._cancelled_refresh_result()
+                        queue.reconcile_completed(task, output=recorded_output)
                         reconciled += 1
                         if subscribe_id and int(task.episode or 0) > 0:
                             native_progress_episodes.setdefault(

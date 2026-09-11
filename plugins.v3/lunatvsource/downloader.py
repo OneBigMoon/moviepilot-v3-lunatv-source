@@ -880,6 +880,28 @@ class _SerialDownloadQueue:
         with self._lock:
             return [task.to_dict() for task in reversed(self._read())]
 
+    def completed_outputs(self) -> Dict[str, str]:
+        """Map episode identity keys to the artifact path of a finished download.
+
+        MoviePilot moves a completed download into the media library, so the
+        artifact disappears while the queue row keeps the only local record of
+        that download.  Callers use these paths to rebuild the host download
+        history without downloading the episode a second time.
+
+        Counter-only rows written without an artifact path are omitted: they
+        exist to keep the episode counters honest, not to prove a download.
+        """
+
+        outputs: Dict[str, str] = {}
+        with self._lock:
+            for item in self._read():
+                if item.state != "completed":
+                    continue
+                output = str(item.output or "").strip()
+                if output:
+                    outputs[item.identity_key] = output
+        return outputs
+
     def summary(self) -> Dict[str, int]:
         counts: Dict[str, int] = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
         for task in self._read():

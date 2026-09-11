@@ -5197,6 +5197,98 @@ def test_record_native_history_keeps_path_owned_by_other_identity(monkeypatch, t
     assert [item["download_hash"] for item in files] == ["owner-hash"]
 
 
+def test_refresh_backfills_native_history_from_completed_queue_row(monkeypatch, tmp_path: Path):
+    """产物已被 MoviePilot 整理搬走后，仍要依据队列记录补写下载历史。"""
+
+    histories: list[dict] = []
+    files: list[dict] = []
+    reclaimed: list[str] = []
+
+    class FakeDownloadHistoryOper(_HistoryStubOper):
+        def __init__(self):
+            super().__init__(histories, files, reclaimed)
+
+    _install_download_history_stub(monkeypatch, FakeDownloadHistoryOper)
+
+    result = _result_from_item(
+        CmsSource("cms-demo", "演示源", "https://cms.example/vod"),
+        {
+            "vod_id": "42",
+            "vod_name": "示例剧",
+            "vod_year": "2026",
+            "type_name": "电视剧",
+            "vod_play_url": "S01E01$https://example.test/s01e01.m3u8",
+        },
+    )
+    subscribe = SimpleNamespace(
+        state="R",
+        name="示例剧",
+        year="2026",
+        type="电视剧",
+        season=1,
+        media_source="themoviedb",
+        media_id="106449",
+        save_path=str(tmp_path),
+    )
+    subscribe_module = ModuleType("app.db.oper.subscribe")
+
+    class FakeSubscribeOper:
+        def list(self, state=None):
+            return [subscribe]
+
+    subscribe_module.SubscribeOper = FakeSubscribeOper
+    app_module = ModuleType("app")
+    app_module.__path__ = []
+    app_db_module = ModuleType("app.db")
+    app_db_module.__path__ = []
+    app_db_oper_module = ModuleType("app.db.oper")
+    app_db_oper_module.__path__ = []
+    app_module.db = app_db_module
+    app_db_module.oper = app_db_oper_module
+    app_db_oper_module.subscribe = subscribe_module
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.db", app_db_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper", app_db_oper_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper.subscribe", subscribe_module)
+
+    class Client:
+        def search(self, _query, **_kwargs):
+            return [result]
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda item: (item, {}))
+    monkeypatch.setattr(plugin._ai, "normalize", lambda *_args: ("示例剧", False))
+    monkeypatch.setattr(
+        plugin,
+        "_native_transfer",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not transfer")),
+    )
+
+    first = plugin.refresh_subscriptions()
+    assert first["queued"] == 1
+    assert first["reconciled"] == 0
+
+    # 下载完成：MoviePilot 随后把产物整理进媒体库，下载目录里的文件不复存在。
+    recorded_output = str(tmp_path / "incoming" / "示例剧 (2026) - S01E01.mp4")
+    tasks = plugin._queue._read()
+    tasks[0].state = "completed"
+    tasks[0].output = recorded_output
+    tasks[0].downloaded_bytes = 4096
+    plugin._queue._write(tasks)
+
+    second = plugin.refresh_subscriptions()
+
+    assert second["queued"] == 0
+    assert second["reconciled"] == 1
+    assert plugin._queue.summary()["pending"] == 0
+    assert [item["path"] for item in histories] == [recorded_output]
+    assert histories[0]["media_source"] == "themoviedb"
+    assert histories[0]["media_id"] == "106449"
+    assert [item["fullpath"] for item in files] == [recorded_output]
+
+
 def test_refresh_reconciles_existing_episode_without_enqueue_or_transfer(monkeypatch, tmp_path: Path):
     """An older direct-write artifact must appear in native subscription history."""
     histories: list[dict] = []
