@@ -1058,7 +1058,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.96"
+    plugin_version = "0.4.97"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3456,6 +3456,77 @@ class LunaTVSource(_PluginBase):
             )
         return cards
 
+    @staticmethod
+    def _media_release_date_key(
+        result: CmsResult,
+        association: Optional[Dict[str, Any]],
+    ) -> Tuple[int, int, int]:
+        date_text = str(
+            (association or {}).get("release_date")
+            or result.year
+            or ""
+        ).strip()
+        date_match = re.search(
+            r"(?P<year>\d{4})(?:[-/](?P<month>\d{1,2})(?:[-/](?P<day>\d{1,2}))?)?",
+            date_text,
+        )
+        if not date_match:
+            return (0, 0, 0)
+        return (
+            int(date_match.group("year")),
+            int(date_match.group("month") or 0),
+            int(date_match.group("day") or 0),
+        )
+
+    def _prepare_sorted_media_cards(
+        self,
+        results: List[CmsResult],
+        media_type: str = "",
+        sort: str = "date_desc",
+    ) -> List[Tuple[CmsResult, Dict[str, Any]]]:
+        """Aggregate season rows first, then prepare and order the cards."""
+        aggregated_results = self._season_media_cards(results)
+        requested_media_type = str(media_type or "").strip().lower()
+        if requested_media_type in {"电影", "movie", "film", "movies"}:
+            requested_media_type = "movie"
+        elif requested_media_type in {"电视剧", "tv", "series", "show", "tvshow"}:
+            requested_media_type = "tv"
+        else:
+            requested_media_type = ""
+
+        cards = []
+        for result in aggregated_results:
+            if requested_media_type and result.media_type != requested_media_type:
+                continue
+            prepared, association = self._prepare_result(result)
+            cards.append(
+                (
+                    prepared,
+                    association,
+                    self._media_release_date_key(prepared, association),
+                )
+            )
+
+        sort_key = str(sort or "date_desc").strip().lower()
+        if sort_key == "date_asc":
+            cards.sort(
+                key=lambda item: (
+                    item[2] == (0, 0, 0),
+                    item[2],
+                )
+            )
+        elif sort_key == "title_asc":
+            cards.sort(key=lambda item: str(item[0].title or "").casefold())
+        else:
+            cards.sort(
+                key=lambda item: (
+                    item[2] != (0, 0, 0),
+                    item[2],
+                ),
+                reverse=True,
+            )
+        return [(prepared, association) for prepared, association, _ in cards]
+
     def _sdk_media_info(
         self,
         result: CmsResult,
@@ -5378,6 +5449,8 @@ class LunaTVSource(_PluginBase):
         title: str = "",
         page: int = 1,
         count: int = 30,
+        media_type: str = "",
+        sort: str = "date_desc",
     ) -> Dict[str, Any]:
         """V3 探索数据源接口，返回宿主统一 MediaInfo，而非插件自定义播放器。"""
         del page
@@ -5399,8 +5472,11 @@ class LunaTVSource(_PluginBase):
                 client,
             )
             data = []
-            for result in self._season_media_cards(results):
-                prepared, association = self._prepare_result(result)
+            for prepared, association in self._prepare_sorted_media_cards(
+                results,
+                media_type=media_type,
+                sort=sort,
+            ):
                 if prepared.media_type == "tv":
                     data.append(self._media_info(prepared, association, season_only=True))
                 else:
@@ -7221,8 +7297,7 @@ class LunaTVSource(_PluginBase):
                 client,
             )
             medias = []
-            for result in self._season_media_cards(results):
-                prepared, association = self._prepare_result(result)
+            for prepared, association in self._prepare_sorted_media_cards(results):
                 if prepared.media_type == "tv":
                     medias.append(self._media_info(prepared, association, season_only=True))
                 else:

@@ -921,6 +921,56 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
     ]
 
 
+def test_discover_filters_and_sorts_cards_by_release_date(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    rows = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": "old",
+                "vod_name": "旧电影",
+                "vod_year": "2020",
+                "type_name": "电影",
+                "vod_play_url": "正片$https://video.example/old.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "new",
+                "vod_name": "新电影",
+                "vod_year": "2024",
+                "type_name": "电影",
+                "vod_play_url": "正片$https://video.example/new.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "show",
+                "vod_name": "示例剧",
+                "vod_year": "2025",
+                "type_name": "电视剧",
+                "vod_play_url": "第1集$https://video.example/show.m3u8",
+            },
+        ),
+    ]
+
+    class Client:
+        def search(self, *_args, **_kwargs):
+            return rows
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda result: (result, {}))
+    monkeypatch.setattr(plugin, "_media_info", lambda result, association, **_: result)
+
+    response = plugin.api_discover(keyword="示例", media_type="movie")
+
+    assert [item.title for item in response["data"]] == ["新电影", "旧电影"]
+
+
 def test_global_media_search_returns_lunatv_cards_without_explore_tab(monkeypatch):
     class Client:
         def search(self, query, **kwargs):
@@ -1584,6 +1634,65 @@ def test_global_media_search_collapses_episode_rows_into_season_cards(monkeypatc
         assert [_field(item, "title") for item in projected] == ["小猪佩奇", "小猪佩奇"]
         assert [_field(item, "seasons") for item in projected] == [{1: []}, {2: []}]
         assert all(_field(item, "episodes", []) == [] for item in projected)
+
+
+def test_global_media_search_sorts_after_season_aggregation(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    rows = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": "old-e2",
+                "vod_name": "旧剧 第一季 第2集",
+                "vod_year": "2020",
+                "type_name": "电视剧",
+                "vod_play_url": "第2集$https://video.example/old-e2.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "new-movie",
+                "vod_name": "新电影",
+                "vod_year": "2024",
+                "type_name": "电影",
+                "vod_play_url": "正片$https://video.example/new.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "old-e1",
+                "vod_name": "旧剧 第一季 第1集",
+                "vod_year": "2020",
+                "type_name": "电视剧",
+                "vod_play_url": "第1集$https://video.example/old-e1.m3u8",
+            },
+        ),
+    ]
+
+    class Client:
+        def search(self, *_args, **_kwargs):
+            return rows
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(
+        plugin,
+        "_prepare_result",
+        lambda result: (
+            result,
+            {"release_date": "2020-01-01" if result.title == "旧剧" else "2024-01-01"},
+        ),
+    )
+    monkeypatch.setattr(plugin, "_media_info", lambda result, association, **_: result)
+
+    meta = type("Meta", (), {"name": "旧剧", "year": "", "type": ""})()
+    cards = plugin.search_medias(meta=meta)
+
+    assert [item.title for item in cards] == ["新电影", "旧剧"]
+    assert len(cards[1].episodes) == 2
 
 
 def test_global_media_search_keeps_each_ambiguous_range_season(monkeypatch):

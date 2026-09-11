@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.96"
+    expected_version = "0.4.97"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.97"] == (
+        "探索与全局搜索结果先按电视剧季聚合，再按上映日期倒序；"
+        "没有上映日期时回退到年份，并支持媒体类型与排序筛选。"
+    )
     assert history["0.4.96"] == (
         "修复同一集换来源后重复下载：订阅刷新过去只认当前来源的完成记录，"
         "别的来源已经下载入库的集数被当成缺集重新排队（凡人修仙传曾整季重下）。"
