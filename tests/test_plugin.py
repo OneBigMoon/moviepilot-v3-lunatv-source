@@ -5027,6 +5027,176 @@ def test_record_native_history_uses_source_output_and_is_idempotent(monkeypatch,
     assert transfer_calls == []
 
 
+def _install_download_history_stub(monkeypatch, oper_factory):
+    """注册 stubbed app.db.oper.downloadhistory，供下载历史写入测试使用。"""
+
+    download_module = ModuleType("app.db.oper.downloadhistory")
+    download_module.DownloadHistoryOper = oper_factory
+
+    transfer_module = ModuleType("app.db.oper.transferhistory")
+
+    class FakeTransferHistoryOper:
+        def add(self, **kwargs):
+            return None
+
+    transfer_module.TransferHistoryOper = FakeTransferHistoryOper
+
+    app_module = ModuleType("app")
+    app_module.__path__ = []
+    app_db_module = ModuleType("app.db")
+    app_db_module.__path__ = []
+    app_db_oper_module = ModuleType("app.db.oper")
+    app_db_oper_module.__path__ = []
+    app_module.db = app_db_module
+    app_db_module.oper = app_db_oper_module
+    app_db_oper_module.transferhistory = transfer_module
+    app_db_oper_module.downloadhistory = download_module
+
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.db", app_db_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper", app_db_oper_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper.transferhistory", transfer_module)
+    monkeypatch.setitem(sys.modules, "app.db.oper.downloadhistory", download_module)
+
+
+class _HistoryStubOper:
+    """下载历史操作器最小实现：覆盖插件写入历史用到的查询与写入接口。"""
+
+    def __init__(self, histories, files, reclaimed):
+        self._histories = histories
+        self._files = files
+        self._reclaimed = reclaimed
+
+    def get_by_hash(self, download_hash):
+        return next(
+            (item for item in self._histories if item["download_hash"] == download_hash),
+            None,
+        )
+
+    def get_files_by_hash(self, download_hash, state=None):
+        return [
+            item
+            for item in self._files
+            if item["download_hash"] == download_hash
+            and (state is None or item["state"] == state)
+        ]
+
+    def get_file_by_fullpath(self, fullpath):
+        return next(
+            (item for item in reversed(self._files) if item["fullpath"] == fullpath),
+            None,
+        )
+
+    def get_files_by_fullpath(self, fullpath):
+        return [item for item in self._files if item["fullpath"] == fullpath]
+
+    def delete_file_by_fullpath(self, fullpath):
+        self._reclaimed.append(fullpath)
+        for item in self._files:
+            if item["fullpath"] == fullpath:
+                item["state"] = 0
+
+    def add(self, **kwargs):
+        self._histories.append(kwargs)
+
+    def add_files(self, items):
+        self._files.extend(items)
+
+
+def _history_stub_task(**overrides):
+    values = dict(
+        task_id="tid-history",
+        source_key="cms-demo",
+        source_name="演示源",
+        media_id="cms-demo:42",
+        host_media_source="themoviedb",
+        host_media_id="106449",
+        media_type="tv",
+        title="凡人修仙传",
+        year="2020",
+        season=1,
+        episode=3,
+        mode="download",
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_record_native_history_reclaims_orphaned_path_rows(monkeypatch, tmp_path: Path):
+    """宿主删除下载历史后残留的文件行不应挡住重新下载的历史写入。"""
+
+    histories: list[dict] = []
+    files: list[dict] = []
+    reclaimed: list[str] = []
+
+    class FakeDownloadHistoryOper(_HistoryStubOper):
+        def __init__(self):
+            super().__init__(histories, files, reclaimed)
+
+    _install_download_history_stub(monkeypatch, FakeDownloadHistoryOper)
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    output = str(tmp_path / "凡人修仙传 (2020) - S01E03.mp4")
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text("x")
+    # 宿主的「删除下载历史」只删历史行，文件行会以 state=1 残留下来。
+    files.append({"download_hash": "stale-hash", "fullpath": output, "state": 1})
+
+    task = _history_stub_task()
+    plugin._record_native_history(task, output)
+
+    expected_hash = hashlib.sha1(f"{task.task_id}|{output}".encode("utf-8")).hexdigest()
+    assert reclaimed == [output]
+    assert [item["download_hash"] for item in histories] == [expected_hash]
+    assert histories[0]["media_source"] == "themoviedb"
+    assert histories[0]["media_id"] == "106449"
+    assert [
+        item
+        for item in files
+        if item["download_hash"] == expected_hash and item["state"] == 1
+    ], "重新下载后应写入归属当前任务的文件行"
+    assert all(
+        item["state"] == 0 for item in files if item["download_hash"] == "stale-hash"
+    )
+
+
+def test_record_native_history_keeps_path_owned_by_other_identity(monkeypatch, tmp_path: Path):
+    """路径仍归属于其他媒体身份时，插件不得抢占写入。"""
+
+    histories: list[dict] = []
+    files: list[dict] = []
+    reclaimed: list[str] = []
+
+    class FakeDownloadHistoryOper(_HistoryStubOper):
+        def __init__(self):
+            super().__init__(histories, files, reclaimed)
+
+    _install_download_history_stub(monkeypatch, FakeDownloadHistoryOper)
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+
+    output = str(tmp_path / "其他剧集 - S01E04.mp4")
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output).write_text("x")
+    histories.append(
+        {
+            "download_hash": "owner-hash",
+            "media_source": "themoviedb",
+            "media_id": "999999",
+        }
+    )
+    files.append({"download_hash": "owner-hash", "fullpath": output, "state": 1})
+
+    plugin._record_native_history(_history_stub_task(episode=4), output)
+
+    assert [item["download_hash"] for item in histories] == ["owner-hash"]
+    assert reclaimed == []
+    assert [item["download_hash"] for item in files] == ["owner-hash"]
+
+
 def test_refresh_reconciles_existing_episode_without_enqueue_or_transfer(monkeypatch, tmp_path: Path):
     """An older direct-write artifact must appear in native subscription history."""
     histories: list[dict] = []

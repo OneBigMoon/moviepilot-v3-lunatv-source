@@ -4073,31 +4073,73 @@ class LunaTVSource(_PluginBase):
                 _active(item) and str(_field(item, "fullpath", "")) == output_path
                 for item in existing_files
             )
-            path_has_active_file = bool(existing_path_file and _active(existing_path_file))
-            path_hash = str(_field(existing_path_file, "download_hash", "") or "")
-            if path_has_active_file and path_hash != download_hash:
+
+            # 宿主删除下载历史时只删历史行，不会级联清理 downloadfiles；
+            # 残留的孤儿文件行会长期占用同一个输出路径，让重新下载后的历史
+            # 写入被误判成“路径已被其他任务记录”。这里先识别并回收这类无主行。
+            active_path_rows: List[Any] = []
+            get_files_by_fullpath = getattr(downloadhis, "get_files_by_fullpath", None)
+            if callable(get_files_by_fullpath):
+                try:
+                    active_path_rows = [
+                        row
+                        for row in (get_files_by_fullpath(output_path) or [])
+                        if _active(row)
+                    ]
+                except Exception as exc:
+                    self._logger.debug("读取 MoviePilot 下载历史文件行失败：%s", exc)
+            if not active_path_rows and existing_path_file and _active(existing_path_file):
+                active_path_rows = [existing_path_file]
+
+            orphan_path_rows: List[Any] = []
+            for row in active_path_rows:
+                row_hash = str(_field(row, "download_hash", "") or "")
+                if not row_hash or row_hash == download_hash:
+                    continue
+                row_history = get_by_hash(row_hash)
+                if row_history is None:
+                    orphan_path_rows.append(row)
+                    continue
                 # A refresh creates a new in-memory task id.  If the existing
                 # path already belongs to this same native media identity, it
                 # is an idempotent backfill/retry rather than a collision.
-                existing_path_history = get_by_hash(path_hash) if path_hash else None
-                if existing_path_history:
-                    existing_source = _coerce_media_identity_source(
-                        _field(existing_path_history, "media_source", "")
+                existing_source = _coerce_media_identity_source(
+                    _field(row_history, "media_source", "")
+                )
+                existing_media_id = str(
+                    _field(row_history, "media_id", "") or ""
+                ).strip()
+                if existing_source == media_source and existing_media_id == media_id:
+                    self._logger.debug(
+                        "MoviePilot 下载历史已记录本地文件，跳过重复写入：%s",
+                        output_path,
                     )
-                    existing_media_id = str(
-                        _field(existing_path_history, "media_id", "") or ""
-                    ).strip()
-                    if existing_source == media_source and existing_media_id == media_id:
-                        self._logger.debug(
-                            "MoviePilot 下载历史已记录本地文件，跳过重复写入：%s",
-                            output_path,
-                        )
-                        return
+                    return
                 self._logger.warning(
                     "MoviePilot 下载历史文件路径已被其他任务记录，跳过重复写入：%s",
                     output_path,
                 )
                 return
+
+            reclaimed_orphan_rows = False
+            if orphan_path_rows:
+                reclaim_orphan_rows = getattr(
+                    downloadhis, "delete_file_by_fullpath", None
+                )
+                if callable(reclaim_orphan_rows):
+                    try:
+                        reclaim_orphan_rows(output_path)
+                    except Exception as exc:
+                        self._logger.debug(
+                            "MoviePilot 下载历史无主文件记录暂未回收：%s", exc
+                        )
+                    else:
+                        reclaimed_orphan_rows = True
+                        self._logger.info(
+                            "MoviePilot 下载历史无主文件记录已回收，重新写入：%s",
+                            output_path,
+                        )
+            path_has_active_file = bool(orphan_path_rows) and not reclaimed_orphan_rows
 
             if not existing_history:
                 add_history(
