@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.94"
+    expected_version = "0.4.95"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,11 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.95"] == (
+        "修复订阅「已下载集数」在产物被整理搬走后回退：刷新订阅时按队列里的完成记录"
+        "回填宿主下载历史，不再只看下载目录里是否还有文件；队列滚动到 500 条上限后，"
+        "旧的完成集数仍能维持。"
+    )
     assert history["0.4.94"] == (
         "修复重新下载同一集的下载历史写入：宿主删除下载历史后残留的 downloadfiles 无主文件行"
         "不再占用同一路径（插件先回收无主行再写历史，订阅详情与已下载集数恢复正常）；"
