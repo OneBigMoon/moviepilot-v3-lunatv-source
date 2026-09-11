@@ -5265,6 +5265,9 @@ def test_refresh_backfills_native_history_from_completed_queue_row(monkeypatch, 
         "_native_transfer",
         lambda *_args: (_ for _ in ()).throw(AssertionError("must not transfer")),
     )
+    # Drive the row state by hand: a live drain thread would race the
+    # finished/failed transition this test writes.
+    monkeypatch.setattr(plugin._queue, "wake", lambda: False)
 
     first = plugin.refresh_subscriptions()
     assert first["queued"] == 1
