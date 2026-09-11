@@ -2977,6 +2977,24 @@ class DownloadQueue(_SerialDownloadQueue):
             return {"processed": 0, "stopped": True} if self._stop else {"processed": 0}
         return self._run_claimed(*claimed)
 
+    @staticmethod
+    def _is_artifactless_completion(task: DownloadTask) -> bool:
+        """Recognize completion rows that only mirror MoviePilot's download history.
+
+        Subscription refreshes persist such a row when the host already claims
+        the episode for the same identity (``attempts == 0``, empty ``output``
+        and no bytes).  The claim is durable bookkeeping, but it carries no
+        artifact: once the library files are gone the row must not silently
+        block a real re-download of the same episode.
+        """
+
+        return (
+            task.state == "completed"
+            and not str(task.output or "").strip()
+            and int(getattr(task, "downloaded_bytes", 0) or 0) <= 0
+            and int(getattr(task, "attempts", 0) or 0) <= 0
+        )
+
     def enqueue(self, task: DownloadTask) -> bool:
         """Persist a new task while preserving the legacy boolean contract."""
         if not task.url or not task.root:
@@ -2992,10 +3010,19 @@ class DownloadQueue(_SerialDownloadQueue):
             for existing in tasks:
                 if existing.identity_key != task.identity_key:
                     continue
-                if existing.state in {"pending", "running", "paused", "completed"}:
+                if existing.state in {"pending", "running", "paused"}:
                     return False
-                if existing.state != "failed":
+                if existing.state == "completed" and not self._is_artifactless_completion(
+                    existing
+                ):
                     return False
+                if existing.state not in {"completed", "failed"}:
+                    return False
+                if existing.state == "completed":
+                    LOGGER.info(
+                        "LunaTV 历史占位任务无实际产物，重新排队：identity=%s",
+                        existing.identity_key,
+                    )
                 task.task_id = existing.task_id
                 existing.state = "pending"
                 existing.progress = 0.0

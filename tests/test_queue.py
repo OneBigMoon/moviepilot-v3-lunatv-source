@@ -3043,3 +3043,84 @@ def test_media_commit_rejects_parent_swapped_to_symlink(
     assert stage.read_bytes() == b"media"
     assert not (outside / destination.name).exists()
     assert not (detached / destination.name).exists()
+
+
+def test_enqueue_requeues_artifactless_history_placeholder(tmp_path: Path):
+    """A reconcile-only completion row must not block a real re-download.
+
+    Subscription refreshes persist a completed row (``attempts == 0``) whenever
+    MoviePilot's download history already claims the episode.  When the library
+    files are gone, that placeholder has to give way to a real download of the
+    same identity instead of failing as a duplicate.
+    """
+
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    placeholder = DownloadTask(
+        task_id="history-placeholder",
+        source_key="lunatv",
+        media_id="themoviedb:106449",
+        title="示例",
+        year="2020",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://example.test/a.m3u8",
+        root=str(tmp_path),
+        state="completed",
+        progress=1.0,
+        attempts=0,
+        output="",
+        downloaded_bytes=0,
+    )
+    assert queue.enqueue(placeholder) is True
+
+    re_download = DownloadTask(
+        **{
+            **placeholder.to_dict(),
+            "task_id": "real-download",
+            "state": "pending",
+            "progress": 0.0,
+        }
+    )
+    assert queue.enqueue(re_download) is True
+
+    persisted = _payload_items(data[queue.DATA_KEY])
+    assert len(persisted) == 1
+    assert persisted[0]["task_id"] == "history-placeholder"
+    assert persisted[0]["state"] == "pending"
+    assert persisted[0]["progress"] == 0.0
+    assert queue.summary()["pending"] == 1
+
+
+def test_enqueue_keeps_blocking_real_completion(tmp_path: Path):
+    """Downloaded episodes stay deduplicated even when the file already moved."""
+
+    data = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_: None)
+    completed = DownloadTask(
+        task_id="downloaded",
+        source_key="lunatv",
+        media_id="themoviedb:106449",
+        title="示例",
+        year="2020",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://example.test/a.m3u8",
+        root=str(tmp_path),
+        state="completed",
+        progress=1.0,
+        attempts=1,
+        output="/media/incoming/示例 (2020)/Season 01/示例 (2020) - S01E01.mp4",
+        downloaded_bytes=123,
+    )
+    assert queue.enqueue(completed) is True
+
+    duplicate = DownloadTask(
+        **{**completed.to_dict(), "task_id": "duplicate", "state": "pending"}
+    )
+    assert queue.enqueue(duplicate) is False
+    persisted = _payload_items(data[queue.DATA_KEY])
+    assert [item["task_id"] for item in persisted] == ["downloaded"]
+    assert persisted[0]["state"] == "completed"
