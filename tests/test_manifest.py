@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.95"
+    expected_version = "0.4.96"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,12 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.96"] == (
+        "修复同一集换来源后重复下载：订阅刷新过去只认当前来源的完成记录，"
+        "别的来源已经下载入库的集数被当成缺集重新排队（凡人修仙传曾整季重下）。"
+        "现在按宿主媒体身份（TMDB 等）+ 季集 + 处理方式回填下载历史，"
+        "并顺手清掉旧版本留下的重复排队任务。"
+    )
     assert history["0.4.95"] == (
         "修复订阅「已下载集数」在产物被整理搬走后回退：刷新订阅时按队列里的完成记录"
         "回填宿主下载历史，不再只看下载目录里是否还有文件；队列滚动到 500 条上限后，"
