@@ -30,7 +30,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, NamedTuple, Optional, Tuple
 
 try:  # MoviePilot V3 runtime imports
     from app.plugins import _PluginBase
@@ -1003,21 +1003,14 @@ def _media_type_value(value: Any) -> str:
     return "movie"
 
 
-def _completed_queue_outputs(queue: Any) -> Dict[str, str]:
-    """Snapshot queue rows that prove an already finished download.
+class _CompletedQueueOutputs(NamedTuple):
+    """Finished queue rows indexed by strict identity and by library episode."""
 
-    MoviePilot moves a completed download into the media library, so the queue
-    row can outlive the artifact on disk.  One snapshot per refresh keeps the
-    lookups off the per-episode path.
-    """
+    by_identity: Dict[str, str]
+    by_media_episode: Dict[str, str]
 
-    getter = getattr(queue, "completed_outputs", None)
-    if not callable(getter):
-        return {}
-    try:
-        snapshot = getter()
-    except Exception:  # pragma: no cover - defensive, queue API changed
-        return {}
+
+def _clean_queue_outputs(snapshot: Any) -> Dict[str, str]:
     if not isinstance(snapshot, dict):
         return {}
     return {
@@ -1025,6 +1018,34 @@ def _completed_queue_outputs(queue: Any) -> Dict[str, str]:
         for key, value in snapshot.items()
         if str(value or "").strip()
     }
+
+
+def _completed_queue_outputs(queue: Any) -> _CompletedQueueOutputs:
+    """Snapshot queue rows that prove an already finished download.
+
+    MoviePilot moves a completed download into the media library, so the queue
+    row can outlive the artifact on disk.  One snapshot per refresh keeps the
+    lookups off the per-episode path.  Two indexes come back: the strict
+    per-source identity, and the host media episode, because a refresh may
+    resolve an episode from a different source than the one that fetched it.
+    """
+
+    outputs = _CompletedQueueOutputs({}, {})
+    for attribute, field_name in (
+        ("completed_outputs", "by_identity"),
+        ("completed_media_outputs", "by_media_episode"),
+    ):
+        getter = getattr(queue, attribute, None)
+        if not callable(getter):
+            continue
+        try:
+            snapshot = getter()
+        except Exception:  # pragma: no cover - defensive, queue API changed
+            continue
+        cleaned = _clean_queue_outputs(snapshot)
+        if cleaned:
+            getattr(outputs, field_name).update(cleaned)
+    return outputs
 
 
 def _coerce_media_identity_source(media_source: Any) -> str:
@@ -1037,7 +1058,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.95"
+    plugin_version = "0.4.96"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -4036,6 +4057,24 @@ class LunaTVSource(_PluginBase):
             self._logger.warning("MoviePilot 原生整理失败，保留直写文件：%s", exc)
             return f"fallback:{exc}"
 
+    def _discard_superseded_task(self, queue: Any, task: DownloadTask) -> int:
+        """Drop queued rows for an episode the host library already holds.
+
+        Only an older refresh can leave such a row behind: one that resolved the
+        episode from a source with a finished download while the host download
+        history had not recorded the episode yet.
+        """
+
+        discard = getattr(queue, "discard_pending_superseded", None)
+        media_episode_key = str(getattr(task, "media_episode_key", "") or "")
+        if not callable(discard) or not media_episode_key:
+            return 0
+        try:
+            return int(discard(media_episode_key) or 0)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.debug("清理重复排队任务失败：%s", exc)
+            return 0
+
     def _record_native_history(self, task: DownloadTask, output: str) -> None:
         """把成功文件写入 MoviePilot 下载历史，供订阅详情读取。数据库不可用时不影响下载。"""
         media_source, media_id = self._task_media_identity(task)
@@ -5892,7 +5931,7 @@ class LunaTVSource(_PluginBase):
             active_subscribes.append(subscribe)
         native_progress_ids: set[int] = set()
         native_progress_episodes: Dict[int, set[int]] = {}
-        completed_outputs = _completed_queue_outputs(queue)
+        queue_outputs = _completed_queue_outputs(queue)
         for subscribe in active_subscribes:
             if self._refresh_cancelled(queue):
                 return self._cancelled_refresh_result()
@@ -6249,7 +6288,19 @@ class LunaTVSource(_PluginBase):
                                 subscribe_id, set()
                             ).add(int(task.episode))
                         continue
-                    recorded_output = completed_outputs.get(task.identity_key, "")
+                    recorded_output = queue_outputs.by_identity.get(
+                        task.identity_key, ""
+                    )
+                    if not recorded_output:
+                        # The episode may have been fetched from another source
+                        # in the same library: MoviePilot files and scrapes by
+                        # the host media identity, so a finished row of a
+                        # different source still proves this episode exists.
+                        media_episode_key = task.media_episode_key
+                        if media_episode_key:
+                            recorded_output = queue_outputs.by_media_episode.get(
+                                media_episode_key, ""
+                            )
                     if recorded_output:
                         # The artifact already moved into the media library, so
                         # the on-disk check above cannot see it any more.  The
@@ -6259,7 +6310,19 @@ class LunaTVSource(_PluginBase):
                         self._record_native_history(task, recorded_output)
                         if self._refresh_cancelled(queue):
                             return self._cancelled_refresh_result()
-                        queue.reconcile_completed(task, output=recorded_output)
+                        if not queue.reconcile_completed(task, output=recorded_output):
+                            # An older refresh queued this episode again while
+                            # the host download history was still missing it.
+                            # The artifact is in the library now, so drop that
+                            # duplicate instead of downloading it twice.
+                            dropped = self._discard_superseded_task(queue, task)
+                            if dropped:
+                                self._logger.info(
+                                    "LunaTV 已在媒体库，移除重复排队任务：%s S%sE%s",
+                                    task.title,
+                                    task.season,
+                                    task.episode,
+                                )
                         reconciled += 1
                         if subscribe_id and int(task.episode or 0) > 0:
                             native_progress_episodes.setdefault(

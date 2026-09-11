@@ -342,15 +342,16 @@ class DownloadTask:
             ffmpeg_path=ffmpeg_path,
         )
 
-    @property
-    def identity_key(self) -> str:
+    def _host_media_identity(self) -> str:
         host_source = str(self.host_media_source or "").strip().casefold()
         host_id = str(self.host_media_id or "").strip()
-        media_identity = (
-            f"{host_source}:{host_id}"
-            if host_source and host_id
-            else str(self.media_id or "").strip()
-        )
+        if not host_source or not host_id:
+            return ""
+        return f"{host_source}:{host_id}"
+
+    @property
+    def identity_key(self) -> str:
+        media_identity = self._host_media_identity() or str(self.media_id or "").strip()
         source_name = str(self.source_name or "").strip().casefold()
         source_identity = (
             f"{source_name}:{self.source_key}"
@@ -361,6 +362,21 @@ class DownloadTask:
             f"{source_identity}|{media_identity}|"
             f"{self.season}|{self.episode}|{self.mode}"
         )
+
+    @property
+    def media_episode_key(self) -> str:
+        """Identify one library episode without the source that produced it.
+
+        MoviePilot files, scrapes and tracks subscriptions by the host media
+        identity, so the same episode downloaded from two LunaTV sources is one
+        library entry.  A row without a host identity keeps only its strict
+        :attr:`identity_key` and never cross-matches.
+        """
+
+        host_identity = self._host_media_identity()
+        if not host_identity:
+            return ""
+        return f"{host_identity}|{self.season}|{self.episode}|{self.mode}"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -901,6 +917,56 @@ class _SerialDownloadQueue:
                 if output:
                     outputs[item.identity_key] = output
         return outputs
+
+    def completed_media_outputs(self) -> Dict[str, str]:
+        """Map library episodes to the artifact of a finished download.
+
+        Same contract as :meth:`completed_outputs`, but keyed by
+        :attr:`DownloadTask.media_episode_key`.  A subscription refresh can
+        resolve an episode from a different source than the one that downloaded
+        it, and the host library only knows the media identity, so the strict
+        per-source key alone loses those finished episodes.
+        """
+
+        outputs: Dict[str, str] = {}
+        with self._lock:
+            for item in self._read():
+                if item.state != "completed":
+                    continue
+                output = str(item.output or "").strip()
+                media_key = item.media_episode_key
+                if output and media_key:
+                    outputs[media_key] = output
+        return outputs
+
+    def discard_pending_superseded(self, media_key: str) -> int:
+        """Drop queued re-downloads of a library episode that is already held.
+
+        Called by a subscription refresh that proved the episode finished, so
+        the pending rows it dropped are the ones an older refresh queued while
+        the host download history was still incomplete.  Rows carrying an
+        explicit source (the manual download UI) and running rows stay: the
+        first is the user's own request, the second belongs to the ffmpeg
+        control path.
+        """
+
+        if not media_key:
+            return 0
+        with self._lock:
+            tasks = self._read()
+            kept = [
+                task
+                for task in tasks
+                if not (
+                    task.state in {"pending", "paused"}
+                    and not task.source_sensitive
+                    and task.media_episode_key == media_key
+                )
+            ]
+            removed = len(tasks) - len(kept)
+            if removed:
+                self._write(kept)
+            return removed
 
     def summary(self) -> Dict[str, int]:
         counts: Dict[str, int] = {"pending": 0, "running": 0, "completed": 0, "failed": 0}

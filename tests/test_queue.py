@@ -98,6 +98,56 @@ def test_queue_completed_outputs_only_reports_finished_artifacts(tmp_path: Path)
     assert placeholder_queue.completed_outputs() == {}
 
 
+def test_queue_matches_finished_episode_across_sources(tmp_path: Path):
+    """同一集换源重下前，队列要能证明它已经在媒体库里，并清掉重复排队。"""
+
+    data: dict = {}
+    queue = DownloadQueue(data.get, data.__setitem__, lambda *_args: None)
+
+    def _episode(task_id: str, source_key: str, source_name: str):
+        return DownloadTask(
+            task_id=task_id,
+            source_key=source_key,
+            media_id=f"{source_key}:9",
+            title="示例剧",
+            year="2026",
+            media_type="tv",
+            season=1,
+            episode=5,
+            url=f"https://{source_key}/s01e05.m3u8",
+            root=str(tmp_path),
+            host_media_source="themoviedb",
+            host_media_id="106449",
+            source_name=source_name or None,
+            source_sensitive=bool(source_name),
+            mode="download",
+        )
+
+    fetched = _episode("fetched", "iqiyizyapi.com", "🎬-爱奇艺-")
+    recorded = str(tmp_path / "示例剧 (2026) - S01E05.mp4")
+    assert queue.reconcile_completed(fetched, output=recorded) is True
+
+    requeued = _episode("requeued", "lunatv", "")
+    assert requeued.identity_key != fetched.identity_key
+    assert requeued.media_episode_key == fetched.media_episode_key == "themoviedb:106449|1|5|download"
+    assert queue.enqueue(requeued) is True
+
+    assert queue.completed_outputs() == {fetched.identity_key: recorded}
+    assert queue.completed_media_outputs() == {requeued.media_episode_key: recorded}
+
+    assert queue.discard_pending_superseded(requeued.media_episode_key) == 1
+    assert queue.summary()["pending"] == 0
+    assert queue.summary()["completed"] == 1
+
+    # 手动下载任务带着显式来源，是用户自己的请求，刷新不能替用户取消。
+    manual_data: dict = {}
+    manual_queue = DownloadQueue(manual_data.get, manual_data.__setitem__, lambda *_args: None)
+    manual = _episode("manual", "lunatv", "手动来源")
+    assert manual_queue.enqueue(manual) is True
+    assert manual_queue.discard_pending_superseded(manual.media_episode_key) == 0
+    assert manual_queue.summary()["pending"] == 1
+
+
 def test_queue_disables_invalid_ad_filter_regex(caplog):
     with caplog.at_level("WARNING", logger="LunaTVSource"):
         queue = DownloadQueue(
