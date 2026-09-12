@@ -1178,7 +1178,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.102"
+    plugin_version = "0.4.103"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3829,6 +3829,39 @@ class LunaTVSource(_PluginBase):
                 reverse=True,
             )
         return [(prepared, association) for prepared, association, _ in cards]
+
+    def _prepare_native_media_cards(
+        self,
+        results: List[CmsResult],
+    ) -> List[Tuple[CmsResult, Dict[str, Any]]]:
+        """Prepare native search cards without a blocking TMDB network call.
+
+        MoviePilot invokes plugin media search on its request path. Re-running
+        TMDB recognition for every uncached CMS card can exhaust the host's
+        request timeout even when the CMS search itself has already completed.
+        Reuse an existing association when available; the host can enrich the
+        returned native media identity separately.
+        """
+        cards = []
+        for result in self._season_media_cards(results):
+            cache_key = f"{normalize_search_title(result.title)}|{result.year}|{result.media_type}"
+            with self._tmdb_cache_lock:
+                association = dict(self._tmdb_cache.get(cache_key) or {})
+            cards.append(
+                (
+                    result,
+                    association,
+                    self._media_release_date_key(result, association),
+                )
+            )
+        cards.sort(
+            key=lambda item: (
+                item[2] != (0, 0, 0),
+                item[2],
+            ),
+            reverse=True,
+        )
+        return [(result, association) for result, association, _ in cards]
 
     def _sdk_media_info(
         self,
@@ -7706,7 +7739,7 @@ class LunaTVSource(_PluginBase):
                 client,
             )
             medias = []
-            for prepared, association in self._prepare_sorted_media_cards(results):
+            for prepared, association in self._prepare_native_media_cards(results):
                 if prepared.media_type == "tv":
                     medias.append(self._media_info(prepared, association, season_only=True))
                 else:

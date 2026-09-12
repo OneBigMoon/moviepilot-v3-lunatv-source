@@ -1120,6 +1120,45 @@ def test_global_media_search_does_not_gate_on_optional_ai(monkeypatch):
     assert calls == []
 
 
+def test_global_media_search_does_not_gate_on_uncached_tmdb(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+
+    class Client:
+        def search(self, *_args, **_kwargs):
+            return [
+                _result_from_item(
+                    source,
+                    {
+                        "vod_id": "42",
+                        "vod_name": "示例电影",
+                        "vod_year": "2024",
+                        "type_name": "电影",
+                    },
+                )
+            ]
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(
+        plugin,
+        "_associate_tmdb",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native media search must not call uncached TMDB")
+        ),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "_media_info",
+        lambda result, association, **_: result,
+    )
+
+    meta = type("Meta", (), {"name": "示例电影", "type": "电影"})()
+    cards = plugin.search_medias(meta=meta)
+
+    assert [card.title for card in cards] == ["示例电影"]
+
+
 def test_global_media_search_respects_explicit_other_source():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
