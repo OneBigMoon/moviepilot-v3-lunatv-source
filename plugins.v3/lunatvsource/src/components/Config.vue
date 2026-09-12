@@ -166,7 +166,7 @@ onMounted(() => {
         <VSwitch
           v-model="config.generate_nfo"
           label="生成 NFO 元数据"
-          hint="开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
+          hint="建议开启：绿联优先读取本地 NFO；开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
           persistent-hint
           color="success"
         />

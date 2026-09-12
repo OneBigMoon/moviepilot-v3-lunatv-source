@@ -241,6 +241,48 @@ def test_search_tv_resources_infers_missing_seasons_from_release_years(monkeypat
     }
 
 
+def test_target_tv_identity_keeps_later_cms_season_years(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    rows = [
+        (2020, "目标剧"),
+        (2023, "目标剧"),
+        (2019, "目标剧 第1季"),
+        (2021, "目标剧 第3季"),
+        (2022, "目标剧 第4季"),
+    ]
+    results = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": str(year),
+                "vod_name": title,
+                "vod_year": str(year),
+                "type_name": "电视剧",
+                "vod_play_url": f"第1集$https://video.example/{year}.m3u8",
+            },
+        )
+        for year, title in rows
+    ]
+    plugin = _configured_plugin(monkeypatch, results)
+
+    resources = plugin.search_torrents(
+        {"id": "demo"},
+        "目标剧",
+        mtype="电视剧",
+        media_source="themoviedb",
+        media_id="target-tv-2019",
+        media_title="目标剧",
+        media_year="2019",
+    )
+    payloads = [plugin._decode_resource_token(item.enclosure) for item in resources]
+
+    # The native identity's premiere year is the canonical library year for
+    # every season; the CMS release years are only used to infer the season.
+    assert sorted(payload["season"] for payload in payloads) == [1, 2, 3, 4, 5]
+    assert {payload["year"] for payload in payloads} == {"2019"}
+    assert all(item.media_id == "target-tv-2019" for item in resources)
+
+
 def test_long_season_cards_probe_one_episode_and_keep_full_hd_download(
     monkeypatch, tmp_path: Path
 ):

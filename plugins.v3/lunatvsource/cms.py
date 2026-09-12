@@ -1550,6 +1550,38 @@ class AppleCmsClient:
         ambiguous_year_groups: set[Tuple[str, int]] = set()
         seen_explicit_years: Dict[Tuple[str, int], set[str]] = {}
         upgraded_unknown_groups: Dict[Tuple[str, int], str] = {}
+        season_family_keys: set[str] = set()
+        season_family_counted: set[str] = set()
+
+        def season_family_key(result: CmsResult) -> str:
+            if result.media_type != "tv":
+                return ""
+            return _season_inference_title_key(result.title)
+
+        def discover_season_family_keys(
+            page_results: Iterable[CmsResult],
+        ) -> set[str]:
+            grouped: Dict[str, List[CmsResult]] = {}
+            for result in page_results:
+                key = season_family_key(result)
+                if key:
+                    grouped.setdefault(key, []).append(result)
+            discovered: set[str] = set()
+            for key, members in grouped.items():
+                if len(members) < 2:
+                    continue
+                explicit_seasons: set[int] = set()
+                years: set[int] = set()
+                for member in members:
+                    season = _explicit_result_season(member)
+                    if season is not None:
+                        explicit_seasons.add(season)
+                    year = _result_year_number(member.year)
+                    if year is not None:
+                        years.add(year)
+                if len(explicit_seasons) >= 2 or len(years) >= 2:
+                    discovered.add(key)
+            return discovered
 
         def remember_year_groups(
             page_results: Iterable[CmsResult],
@@ -1677,6 +1709,7 @@ class AppleCmsClient:
             """Select cards and attach same-season bundles independently of row order."""
 
             nonlocal selected_count
+            page_results = list(page_results)
             conflict = False
             media_type_results = [
                 result
@@ -1688,6 +1721,10 @@ class AppleCmsClient:
                 for result in media_type_results
                 if not require_playable or result.episodes
             ]
+            if not selected_group_only:
+                season_family_keys.update(
+                    discover_season_family_keys(playable_results)
+                )
             _, unknown_year_groups = remember_year_groups(media_type_results)
             if (
                 selected_group_only
@@ -1705,6 +1742,12 @@ class AppleCmsClient:
                 identity = _episode_row_identity(result)
                 title_identity = _episode_row_title_identity(result)
                 group_identity = identity or title_identity
+                family_key = season_family_key(result)
+                family_selected = bool(
+                    not selected_group_only
+                    and family_key
+                    and family_key in season_family_keys
+                )
                 matching_key = (
                     matching_group_key(group_identity) if group_identity else None
                 )
@@ -1738,25 +1781,46 @@ class AppleCmsClient:
                 ):
                     group_key = title_identity[:3]
                 if group_key is None:
+                    if family_selected:
+                        if family_key not in season_family_counted:
+                            if selected_count >= limit:
+                                continue
+                            selected_count += 1
+                            season_family_counted.add(family_key)
+                        selected_entries.append(("result", result))
+                        continue
                     if selected_count < limit:
                         selected_entries.append(("result", result))
                         selected_count += 1
                     continue
                 if group_key not in selected_groups:
-                    if selected_count >= limit:
+                    if family_selected:
+                        if family_key not in season_family_counted:
+                            if selected_count >= limit:
+                                continue
+                            selected_count += 1
+                            season_family_counted.add(family_key)
+                    elif selected_count >= limit:
                         continue
+                    else:
+                        selected_count += 1
                     selected_groups[group_key] = []
                     selected_entries.append(("group", group_key))
-                    selected_count += 1
                 if identity:
                     selected_groups[group_key].append(result)
                 else:
                     selected_bundles.setdefault(group_key, []).append(result)
             return conflict
 
-        collect_results(self._results_from_items(source, items, enrich, deadline=deadline))
+        collect_results(
+            self._results_from_items(source, items, enrich, deadline=deadline)
+        )
 
-        if not selected_groups and not (require_playable and not selected_entries):
+        if (
+            not selected_groups
+            and not season_family_keys
+            and not (require_playable and not selected_entries)
+        ):
             return [entry for kind, entry in selected_entries if kind == "result"]
 
         def page_vod_ids(page_items: Iterable[Mapping[str, Any]]) -> Tuple[str, ...]:
@@ -1867,6 +1931,32 @@ class AppleCmsClient:
                     break
                 continue
 
+            if season_family_keys:
+                # A CMS may place later season rows on following pages. Once
+                # a family is identified, page only that family so the source
+                # limit does not reintroduce a truncation before inference.
+                matched_items = []
+                for item in page_items:
+                    result = _result_from_item(source, item)
+                    if (
+                        result.media_type != "tv"
+                        and _media_type_hint(item) == "tv"
+                    ):
+                        result = replace(result, media_type="tv")
+                    if season_family_key(result) in season_family_keys:
+                        matched_items.append(item)
+                if not matched_items:
+                    break
+                collect_results(
+                    self._results_from_items(
+                        source,
+                        matched_items,
+                        enrich,
+                        deadline=deadline,
+                    )
+                )
+                continue
+
             # With require_playable enabled, an all-unplayable first page must
             # not hide later results. Keep the same bounded page safeguards
             # while discovering the first playable card.
@@ -1932,7 +2022,11 @@ class AppleCmsClient:
         media_type_filter: str = "",
     ) -> List[CmsResult]:
         def finalize(items: Iterable[CmsResult]) -> List[CmsResult]:
-            return infer_tv_seasons(list(items)[:limit])
+            # Keep the season evidence together until inference is complete.
+            # Sibling CMS rows are often ordered as unlabelled years first,
+            # followed by the rows that carry explicit season markers.
+            inferred = infer_tv_seasons(list(items))
+            return inferred[:limit]
 
         media_type_filter = _canonical_media_type_filter(media_type_filter)
         ordered_sources = list(self.sources)

@@ -73,7 +73,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.98"
+    expected_version = "0.4.99"
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +88,10 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert history["0.4.99"] == (
+        "修复多季电视剧搜索被源内限额截断：同一季族跨页先聚合再补齐年份缺失的季号；"
+        "资源搜索与订阅刷新均按原生媒体身份保留后续季，并补充绿联本地 NFO 兼容提示。"
+    )
     assert history["0.4.98"] == (
         "修复 CMS 按年份分季但标题漏季号：有明确季号证据时补齐缺失季号，"
         "让资源卡、下载任务与 SxxExx 文件名保持一致，兼容绿联等按文件名或 NFO 刮削的媒体库。"

@@ -916,7 +916,12 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
     assert calls == [
         (
             "示例电影",
-            {"limit": 30, "stop_after_first_source": True, "enrich": False},
+            {
+                "limit": 30,
+                "stop_after_first_source": True,
+                "expand_tv_episode_rows": True,
+                "enrich": False,
+            },
         )
     ]
 
@@ -1617,7 +1622,8 @@ def test_global_media_search_collapses_episode_rows_into_season_cards(monkeypatc
     ]
 
     class Client:
-        def search(self, *_args, **_kwargs):
+        def search(self, *_args, **kwargs):
+            assert kwargs.get("expand_tv_episode_rows") is True
             return rows
 
     plugin = LunaTVSource()

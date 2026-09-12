@@ -752,6 +752,77 @@ def test_subscription_refresh_falls_back_to_exact_title_and_year_when_unmatched(
     assert all("correct.example" in task["url"] for task in tasks)
 
 
+def test_subscription_refresh_keeps_native_tv_identity_across_cms_season_years(
+    monkeypatch, tmp_path: Path
+):
+    source = CmsSource("cms-demo", "演示源", "https://cms.example/vod")
+    rows = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": "season-1",
+                "vod_name": "目标剧 第1季",
+                "vod_year": "2019",
+                "type_name": "电视剧",
+                "vod_play_url": "第1集$https://example.test/s01e01.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "season-3",
+                "vod_name": "目标剧 第3季",
+                "vod_year": "2021",
+                "type_name": "电视剧",
+                "vod_play_url": "第1集$https://example.test/s03e01.m3u8",
+            },
+        ),
+        _result_from_item(
+            source,
+            {
+                "vod_id": "season-4",
+                "vod_name": "目标剧 第4季",
+                "vod_year": "2022",
+                "type_name": "电视剧",
+                "vod_play_url": "第1集$https://example.test/s04e01.m3u8",
+            },
+        ),
+    ]
+    subscribe = SimpleNamespace(
+        state="R",
+        name="目标剧",
+        year="2019",
+        type="电视剧",
+        season=3,
+        media_source="themoviedb",
+        media_id="123",
+        save_path=str(tmp_path),
+    )
+    _install_subscription_operator(monkeypatch, subscribe)
+
+    class Client:
+        @staticmethod
+        def search(_query, **_kwargs):
+            return rows
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda result: (result, {}))
+    monkeypatch.setattr(plugin, "_probe_resource_urls", lambda _urls: {})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    response = plugin.refresh_subscriptions()
+    tasks = plugin._queue.list_tasks()
+
+    assert response["queued"] == 1
+    assert len(tasks) == 1
+    assert tasks[0]["season"] == 3
+    assert tasks[0]["year"] == "2019"
+    assert tasks[0]["host_media_source"] == "themoviedb"
+    assert tasks[0]["host_media_id"] == "123"
+
+
 def test_subscription_refresh_honors_native_start_and_manual_total_episode(
     monkeypatch, tmp_path: Path
 ):

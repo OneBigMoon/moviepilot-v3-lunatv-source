@@ -1004,6 +1004,39 @@ def _media_type_value(value: Any) -> str:
     return "movie"
 
 
+_TV_SEASON_MARKER_RE = re.compile(
+    r"(?:第\s*[0-9一二两三四五六七八九十百千万]+\s*季|"
+    r"\bS(?:EASON)?\s*\d{1,3}\b)",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_tv_season(result: CmsResult) -> bool:
+    """Return whether a CMS row contains a season marker we can trust."""
+
+    if result.media_type != "tv":
+        return False
+    if _TV_SEASON_MARKER_RE.search(str(result.title or "")):
+        return True
+    return any(
+        _TV_SEASON_MARKER_RE.search(str(episode.label or ""))
+        or (episode.season_known and int(episode.season) > 1)
+        for episode in result.episodes
+    )
+
+
+def _explicit_tv_season_numbers(results: List[CmsResult]) -> set[int]:
+    """Return explicit season numbers present in a set of matching TV rows."""
+
+    return {
+        int(episode.season)
+        for result in results
+        if _has_explicit_tv_season(result)
+        for episode in result.episodes
+        if episode.season_known and int(episode.season) > 0
+    }
+
+
 class _CompletedQueueOutputs(NamedTuple):
     """Finished queue rows indexed by strict identity and by library episode."""
 
@@ -1059,7 +1092,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.98"
+    plugin_version = "0.4.99"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -2009,7 +2042,7 @@ class LunaTVSource(_PluginBase):
                         "props": {
                             "model": "generate_nfo",
                             "label": "生成 NFO 元数据",
-                            "hint": "开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。",
+                            "hint": "建议开启：绿联优先读取本地 NFO；开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。",
                             "persistentHint": True,
                         },
                     },
@@ -5467,6 +5500,7 @@ class LunaTVSource(_PluginBase):
                     search_query,
                     limit=max(1, min(int(count or 30), 50)),
                     stop_after_first_source=True,
+                    expand_tv_episode_rows=True,
                     # 探索页只展示元数据；播放地址在原生资源搜索/下载时再读取。
                     # 避免列表结果缺少 vod_play_url 时逐条请求详情，导致界面长时间骨架屏。
                     enrich=False,
@@ -6024,6 +6058,7 @@ class LunaTVSource(_PluginBase):
             title = str(getattr(subscribe, "name", "") or getattr(subscribe, "keyword", "")).strip()
             if not title:
                 continue
+            subscription_year = str(getattr(subscribe, "year", "") or "").strip()
             normalized_title = title
             raw_subscription_season = getattr(subscribe, "season", 0)
             try:
@@ -6068,7 +6103,7 @@ class LunaTVSource(_PluginBase):
                 else:
                     search_query, _ = (self._ai or AiTitleNormalizer(False)).normalize(
                         title,
-                        str(getattr(subscribe, "year", "") or ""),
+                        subscription_year,
                         str(getattr(subscribe, "type", "") or ""),
                     )
                     normalized_title = search_query or title
@@ -6123,6 +6158,23 @@ class LunaTVSource(_PluginBase):
                         )
                     ]
                 results = prepared_results
+                subscription_tv_has_season_family = False
+                if _media_type_value(subscription_type) == "tv":
+                    title_matches = [
+                        result
+                        for result, _association in results
+                        if self._subscription_result_matches(
+                            result,
+                            {},
+                            title=normalized_title,
+                            year="",
+                            identity_source="",
+                            identity_id="",
+                        )
+                    ]
+                    subscription_tv_has_season_family = (
+                        len(_explicit_tv_season_numbers(title_matches)) >= 2
+                    )
             except Exception as exc:
                 self._logger.warning("订阅搜索失败 title=%s error=%s", title, exc)
                 continue
@@ -6148,7 +6200,12 @@ class LunaTVSource(_PluginBase):
                     result,
                     association,
                     title=normalized_title,
-                    year=str(getattr(subscribe, "year", "") or ""),
+                    # A native TV subscription identifies the series, while
+                    # CMS rows often carry each season's release year. Once
+                    # multiple explicit seasons are present, the subscription
+                    # identity is safer than filtering later seasons by a
+                    # row-level year.
+                    year=("" if subscription_tv_has_season_family else subscription_year),
                     identity_source=identity_source,
                     identity_id=identity_id,
                     expected_identity=expected_identity,
@@ -6294,6 +6351,7 @@ class LunaTVSource(_PluginBase):
                     # 在 Emby/绿联形成同剧不同条目。
                     task_year = (
                         str(association.get("year") or "").strip()
+                        or subscription_year
                         or str(result.year or "").strip()
                     )
                     task = DownloadTask.from_episode(
@@ -7289,13 +7347,15 @@ class LunaTVSource(_PluginBase):
                 _media_type_value(getattr(meta, "type", "")),
             )
             client = self._client()
+            search_kwargs: Dict[str, Any] = {
+                "limit": 8,
+                "stop_after_first_source": True,
+                "enrich": False,
+            }
+            if _media_type_value(getattr(meta, "type", "")) == "tv":
+                search_kwargs["expand_tv_episode_rows"] = True
             results = self._filter_currently_searchable_results(
-                client.search(
-                    search_query,
-                    limit=8,
-                    stop_after_first_source=True,
-                    enrich=False,
-                ),
+                client.search(search_query, **search_kwargs),
                 client,
             )
             medias = []
@@ -7338,6 +7398,7 @@ class LunaTVSource(_PluginBase):
         search_query: str,
         results: List[CmsResult],
         mtype: Any = None,
+        media_year: Any = None,
     ) -> CmsResult:
         """Build one TMDB lookup context for an entire CMS resource search.
 
@@ -7372,7 +7433,7 @@ class LunaTVSource(_PluginBase):
             source_name="",
             vod_id="",
             title=normalize_search_title(search_query),
-            year=first.year if first else "",
+            year=str(media_year or (first.year if first else "")).strip(),
             media_type=media_type,
             remark="",
         )
@@ -7754,6 +7815,31 @@ class LunaTVSource(_PluginBase):
                     if str(title or "").strip()
                 )
             )
+            target_tv_has_season_family = False
+            if requested_media_type == "tv":
+                # Keep the premiere-year check for an ordinary same-title
+                # result, but relax it when the returned rows already contain
+                # multiple explicit seasons. In that case later CMS rows may
+                # carry their own release years and belong to the same native
+                # TV identity.
+                title_matches = [
+                    result
+                    for result in results
+                    if any(
+                        self._subscription_result_matches(
+                            result,
+                            {},
+                            title=title,
+                            year="",
+                            identity_source="",
+                            identity_id="",
+                        )
+                        for title in match_titles
+                    )
+                ]
+                target_tv_has_season_family = (
+                    len(_explicit_tv_season_numbers(title_matches)) >= 2
+                )
             results = [
                 result
                 for result in results
@@ -7763,7 +7849,15 @@ class LunaTVSource(_PluginBase):
                         result,
                         {},
                         title=title,
-                        year=target_media_year_value,
+                        # The selected native TV identity is authoritative.
+                        # CMS providers commonly put each season's release
+                        # year on its own row, so the series premiere year
+                        # must not discard later seasons before aggregation.
+                        year=(
+                            ""
+                            if target_tv_has_season_family
+                            else target_media_year_value
+                        ),
                         identity_source="",
                         identity_id="",
                     )
@@ -7780,7 +7874,16 @@ class LunaTVSource(_PluginBase):
         if results and not (
             requested_media_type == "movie" and use_target_media_identity
         ):
-            association_context = self._resource_search_context(search_query, results, mtype)
+            association_context = self._resource_search_context(
+                target_media_title_value or search_query,
+                results,
+                mtype,
+                media_year=(
+                    target_media_year_value
+                    if use_target_media_identity and requested_media_type == "tv"
+                    else None
+                ),
+            )
             association_match_titles = tuple(
                 dict.fromkeys(
                     title

@@ -629,6 +629,135 @@ def test_infer_tv_seasons_rejects_inconsistent_explicit_pairs():
     assert inferred[1].episodes[0].season == 1
 
 
+def test_search_keeps_a_tv_season_family_before_the_source_limit():
+    source = CmsSource("demo", "演示", "https://cms.example/vod")
+    rows = [
+        (2020, "舒克贝塔"),
+        (2023, "舒克贝塔"),
+        (2019, "舒克贝塔 第1季"),
+        (2021, "舒克贝塔 第3季"),
+        (2022, "舒克贝塔 第4季"),
+    ]
+    items = [
+        {
+            "vod_id": str(year),
+            "vod_name": title,
+            "vod_year": str(year),
+            "type_name": "电视剧",
+            "vod_play_url": f"第1集$https://example.test/{year}.m3u8",
+        }
+        for year, title in rows
+    ]
+    client = AppleCmsClient([source])
+    client._request = lambda _source, **_params: {"list": items}
+
+    results = client.search(
+        "舒克贝塔",
+        limit=50,
+        source_limit=3,
+        expand_tv_episode_rows=True,
+        media_type_filter="tv",
+    )
+
+    assert {
+        result.year: result.episodes[0].season
+        for result in results
+    } == {
+        "2019": 1,
+        "2020": 2,
+        "2021": 3,
+        "2022": 4,
+        "2023": 5,
+    }
+
+
+def test_search_keeps_tv_season_family_rows_across_pages():
+    source = CmsSource("demo", "演示", "https://cms.example/vod")
+    pages = {
+        1: [
+            (2020, "跨页剧"),
+            (2023, "跨页剧"),
+            (2019, "跨页剧 第1季"),
+        ],
+        2: [
+            (2021, "跨页剧 第3季"),
+            (2022, "跨页剧 第4季"),
+        ],
+    }
+    calls = []
+
+    def request(_source, **params):
+        page = int(params.get("pg", 1))
+        calls.append(page)
+        return {
+            "pagecount": "2",
+            "list": [
+                {
+                    "vod_id": str(year),
+                    "vod_name": title,
+                    "vod_year": str(year),
+                    "type_name": "电视剧",
+                    "vod_play_url": f"第1集$https://example.test/{year}.m3u8",
+                }
+                for year, title in pages[page]
+            ],
+        }
+
+    client = AppleCmsClient([source])
+    client._request = request
+
+    results = client.search(
+        "跨页剧",
+        limit=50,
+        source_limit=3,
+        expand_tv_episode_rows=True,
+        media_type_filter="tv",
+    )
+
+    assert calls == [1, 2]
+    assert [result.episodes[0].season for result in results] == [2, 5, 1, 3, 4]
+
+
+def test_search_infers_before_applying_global_limit(monkeypatch):
+    source = CmsSource("demo", "演示", "https://cms.example/vod")
+    rows = [
+        (2020, "示例剧"),
+        (2023, "示例剧"),
+        (2019, "示例剧 第1季"),
+        (2021, "示例剧 第3季"),
+        (2022, "示例剧 第4季"),
+    ]
+    results = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": str(year),
+                "vod_name": title,
+                "vod_year": str(year),
+                "type_name": "电视剧",
+                "vod_play_url": f"第1集$https://example.test/{year}.m3u8",
+            },
+        )
+        for year, title in rows
+    ]
+    client = AppleCmsClient([source])
+    monkeypatch.setattr(client, "_search_source", lambda *_args, **_kwargs: results)
+
+    limited = client.search(
+        "示例剧",
+        limit=3,
+        source_limit=3,
+        expand_tv_episode_rows=True,
+        media_type_filter="tv",
+    )
+
+    assert [(result.year, result.episodes[0].season) for result in limited] == [
+        ("2020", 2),
+        ("2023", 5),
+        ("2019", 1),
+    ]
+
+
 def test_result_from_item_recognizes_regional_drama_category_without_movie_class_leak():
     result = _result_from_item(
         CmsSource("demo", "演示", "https://cms.example/vod"),
