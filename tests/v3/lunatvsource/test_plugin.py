@@ -1698,6 +1698,77 @@ def test_resource_torrents_groups_by_source_and_season(monkeypatch):
             for payload in payloads} == {("themoviedb", "123")}
 
 
+def test_resource_torrents_carries_same_episode_alternate_sources(monkeypatch):
+    class TorrentInfo:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    rows = [
+        CmsResult(
+            source_key="source-a",
+            source_name="源A",
+            vod_id="a",
+            title="换源剧",
+            year="2026",
+            media_type="tv",
+            remark="",
+            episodes=(
+                CmsEpisode(1, 1, "第1集", "https://a.example/1080-e1.m3u8"),
+                CmsEpisode(1, 2, "第2集", "https://a.example/1080-e2.m3u8"),
+            ),
+            detail="https://a.example/detail/a",
+        ),
+        CmsResult(
+            source_key="source-b",
+            source_name="源B",
+            vod_id="b",
+            title="换源剧",
+            year="2026",
+            media_type="tv",
+            remark="",
+            episodes=(
+                CmsEpisode(1, 1, "第1集", "https://b.example/720-e1.m3u8"),
+                CmsEpisode(1, 2, "第2集", "https://b.example/720-e2.m3u8"),
+            ),
+            detail="https://b.example/detail/b",
+        ),
+    ]
+
+    monkeypatch.setattr(plugin_module, "_HostTorrentInfo", TorrentInfo)
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(
+        plugin,
+        "_client",
+        lambda: type("Client", (), {"search": lambda self, *_args, **_kwargs: rows})(),
+    )
+    monkeypatch.setattr(plugin, "_associate_tmdb", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        plugin,
+        "_probe_resource_urls",
+        lambda urls: {url: 1080 if "1080" in url else 720 for url in urls},
+    )
+
+    items = plugin._resource_torrents("换源剧", mtype="tv")
+    payloads = [plugin._decode_resource_token(item.enclosure) for item in items]
+    by_source = {payload["source_name"]: payload for payload in payloads}
+
+    assert by_source["源A"]["episodes"][0]["source_candidates"] == [
+        {
+            "url": "https://b.example/720-e1.m3u8",
+            "source_key": "source-b",
+            "source_name": "源B",
+        }
+    ]
+    assert by_source["源B"]["episodes"][1]["source_candidates"] == [
+        {
+            "url": "https://a.example/1080-e2.m3u8",
+            "source_key": "source-a",
+            "source_name": "源A",
+        }
+    ]
+
+
 def test_resource_torrents_collapses_episode_named_cms_rows_into_one_season(monkeypatch):
     class TorrentInfo:
         def __init__(self, **kwargs):
@@ -6233,6 +6304,13 @@ def test_refresh_plugin_season_subscription_queues_highest_resolution_for_same_e
     assert response["queued"] == 1
     assert len(tasks) == 1
     assert tasks[0]["url"] == "https://example.test/1080-s01e01.m3u8"
+    assert tasks[0]["source_candidates"] == [
+        {
+            "url": "https://example.test/480-s01e01.m3u8",
+            "source_key": "cms-demo",
+            "source_name": "演示源",
+        }
+    ]
 
 
 def test_refresh_plugin_season_subscription_keeps_all_sources_seasons_separate(

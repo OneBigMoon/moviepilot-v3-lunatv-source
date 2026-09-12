@@ -7,6 +7,7 @@ MoviePilot V3 的 LunaTV/MoonTV 苹果 CMS 资源插件。
 - 插件主类是 `LunaTVSource`，目录名必须保持为 `lunatvsource`，市场索引位于仓库根目录的 `package.v3.json`。
 - 配置、运行状态和缓存使用 MoviePilot 插件基类提供的接口；不要把运行数据写回插件源码目录。
 - 目录、智能助手、TMDB 关联、媒体识别、整理规则和链接权限由 MoviePilot 全局设置负责。插件配置只保存 LunaTV 来源、下载模式、并发、可选目录覆盖和媒体服务器刷新目标。
+- 单源资源任务会把同集的其他可播放地址持久化为备用候选；下载失败时自动逐个换源，候选耗尽才进入失败状态。`source_strategy=all` 仍会为每个来源分别排队，不重复叠加自动换源。
 - `use_moviepilot_dirs`、`ai_enabled`、`tmdb_association`、`native_recognize` 是历史配置键，保留读取兼容但不再作为独立开关；这样升级后不会出现“界面关闭、运行仍开启”的误导。
 
 ## 绿联媒体库

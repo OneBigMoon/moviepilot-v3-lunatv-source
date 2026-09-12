@@ -258,12 +258,123 @@ def test_queue_is_serial_and_deduplicates(tmp_path: Path):
     assert queue.enqueue(first) is True
     assert queue.enqueue(second) is False
     assert queue.summary()["pending"] == 1
-
     assert queue.pause(first.task_id) is True
     paused_duplicate = DownloadTask(**{**second.to_dict(), "task_id": "3"})
     assert queue.enqueue(paused_duplicate) is False
     assert queue.summary()["paused"] == 1
 
+
+def test_queue_automatically_switches_to_next_source_after_failure(
+    monkeypatch, tmp_path: Path
+):
+    data = {}
+    notifications = []
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda title, text: notifications.append((title, text)),
+    )
+    task = DownloadTask(
+        task_id="source-failover",
+        source_key="source-a",
+        media_id="source-a:1",
+        title="自动换源剧",
+        year="2026",
+        media_type="tv",
+        season=1,
+        episode=1,
+        url="https://source-a.example/s01e01.m3u8",
+        root=str(tmp_path),
+        source_name="源A",
+        source_sensitive=True,
+        source_candidates=[
+            {
+                "url": "https://source-b.example/s01e01.m3u8",
+                "source_key": "source-b",
+                "source_name": "源B",
+            }
+        ],
+    )
+    assert queue.enqueue(task) is True
+
+    calls = []
+
+    def execute(current):
+        calls.append((current.url, current.source_name))
+        if len(calls) == 1:
+            raise RuntimeError("source unavailable")
+        return str(tmp_path / "finished.mp4")
+
+    monkeypatch.setattr(queue, "_execute", execute)
+
+    switched = queue.run_one()
+    assert switched["state"] == "pending"
+    persisted = queue._read()[0]
+    assert persisted.url == "https://source-b.example/s01e01.m3u8"
+    assert persisted.source_name == "源B"
+    assert persisted.source_identity == "源a:source-a"
+    assert persisted.source_candidates == []
+    assert notifications == [("LunaTV 自动换源", "自动换源剧 S01E01：源A下载失败，已切换到源B")]
+
+    restarted = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda title, text: notifications.append((title, text)),
+    )
+    monkeypatch.setattr(restarted, "_execute", execute)
+    completed = restarted.run_one()
+    assert completed["state"] == "completed"
+    assert calls == [
+        ("https://source-a.example/s01e01.m3u8", "源A"),
+        ("https://source-b.example/s01e01.m3u8", "源B"),
+    ]
+    assert restarted.summary()["completed"] == 1
+    assert notifications[-1] == ("LunaTV 已完成", "自动换源剧 S01E01")
+
+
+def test_queue_marks_failed_only_after_source_candidates_are_exhausted(
+    monkeypatch, tmp_path: Path
+):
+    data = {}
+    notifications = []
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda title, text: notifications.append((title, text)),
+    )
+    task = DownloadTask(
+        task_id="source-exhausted",
+        source_key="source-a",
+        media_id="source-a:2",
+        title="候选耗尽剧",
+        year="2026",
+        media_type="movie",
+        season=1,
+        episode=1,
+        url="https://source-a.example/movie.m3u8",
+        root=str(tmp_path),
+        source_candidates=[
+            {
+                "url": "https://source-b.example/movie.m3u8",
+                "source_key": "source-b",
+                "source_name": "源B",
+            }
+        ],
+    )
+    assert queue.enqueue(task) is True
+    monkeypatch.setattr(
+        queue,
+        "_execute",
+        lambda _task: (_ for _ in ()).throw(RuntimeError("both failed")),
+    )
+
+    assert queue.run_one()["state"] == "pending"
+    assert queue.run_one()["state"] == "failed"
+    assert queue.summary()["failed"] == 1
+    assert [title for title, _text in notifications] == [
+        "LunaTV 自动换源",
+        "LunaTV 下载失败",
+    ]
 
 def test_queue_persistence_keeps_non_terminal_tasks_and_caps_terminal_history(
     tmp_path: Path, monkeypatch

@@ -51,6 +51,7 @@ _HLS_PLAYLIST_TOTAL_BYTES = 8 * 1024 * 1024
 _HLS_PLAYLIST_MAX_COUNT = 32
 _HLS_PLAYLIST_MAX_DEPTH = 4
 _HLS_PREPARE_TIMEOUT_SECONDS = 60.0
+MAX_SOURCE_CANDIDATES = 8
 
 
 def _regular_file_size(value: str) -> int:
@@ -86,6 +87,77 @@ def _redact_error_urls(value: object) -> str:
             return raw.split("?", 1)[0].split("#", 1)[0]
 
     return _ERROR_URL_RE.sub(redact, str(value or ""))
+
+
+def _source_url_key(value: object) -> str:
+    """Build a stable de-duplication key without changing the playable URL."""
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+    except ValueError:
+        return ""
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path,
+            parsed.query,
+            "",
+        )
+    )
+
+
+def normalize_source_candidates(
+    value: object,
+    *,
+    current_url: str = "",
+) -> List[Dict[str, str]]:
+    """Keep a small, validated, JSON-safe list of alternate source URLs."""
+    if not isinstance(value, list):
+        return []
+    current_key = _source_url_key(current_url)
+    seen: set[str] = set()
+    candidates: List[Dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str):
+            continue
+        url = url.strip()
+        url_key = _source_url_key(url)
+        if not url_key or url_key == current_key or url_key in seen:
+            continue
+        source_key = item.get("source_key", "")
+        source_name = item.get("source_name", "")
+        if source_key is None:
+            source_key = ""
+        if source_name is None:
+            source_name = ""
+        if not isinstance(source_key, str) or not isinstance(source_name, str):
+            continue
+        seen.add(url_key)
+        candidates.append(
+            {
+                "url": url,
+                "source_key": source_key.strip(),
+                "source_name": source_name.strip(),
+            }
+        )
+        if len(candidates) >= MAX_SOURCE_CANDIDATES:
+            break
+    return candidates
+
+
+def _task_source_identity(
+    source_key: object,
+    source_name: object,
+    source_sensitive: bool,
+) -> str:
+    key = str(source_key or "").strip()
+    name = str(source_name or "").strip().casefold()
+    return f"{name}:{key}" if source_sensitive and name else key
 
 
 def normalize_download_concurrency(
@@ -307,6 +379,10 @@ class DownloadTask:
     # Persist before MoviePilot moves the completed file so season totals stay
     # stable across plugin/container restarts.
     downloaded_bytes: int = 0
+    # Keep the original source identity stable while a failed task rotates
+    # through alternate URLs.
+    source_identity: str = ""
+    source_candidates: List[Dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def from_episode(
@@ -352,11 +428,10 @@ class DownloadTask:
     @property
     def identity_key(self) -> str:
         media_identity = self._host_media_identity() or str(self.media_id or "").strip()
-        source_name = str(self.source_name or "").strip().casefold()
-        source_identity = (
-            f"{source_name}:{self.source_key}"
-            if self.source_sensitive and source_name
-            else str(self.source_key or "").strip()
+        source_identity = self.source_identity.strip() or _task_source_identity(
+            self.source_key,
+            self.source_name,
+            self.source_sensitive,
         )
         return (
             f"{source_identity}|{media_identity}|"
@@ -415,6 +490,7 @@ def _download_task_from_payload(value: object) -> DownloadTask:
         "control_action",
         "output",
         "download_engine",
+        "source_identity",
     )
     optional_string_fields = (
         "host_media_source",
@@ -443,6 +519,12 @@ def _download_task_from_payload(value: object) -> DownloadTask:
         raise ValueError("task record contains an invalid delete flag")
     if type(task.source_sensitive) is not bool:
         raise ValueError("task record contains an invalid source sensitivity flag")
+    if not isinstance(task.source_candidates, list):
+        raise ValueError("task record contains an invalid source candidate list")
+    task.source_candidates = normalize_source_candidates(
+        task.source_candidates,
+        current_url=task.url,
+    )
     if task.control_action not in {"", "pause", "remove"}:
         raise ValueError("task record contains an unknown control action")
     return task
@@ -800,6 +882,11 @@ class _SerialDownloadQueue:
             target.classification_source = getattr(task, "classification_source", None)
             target.source_name = task.source_name
             target.source_sensitive = task.source_sensitive
+            target.source_identity = task.source_identity or target.source_identity
+            target.source_candidates = normalize_source_candidates(
+                task.source_candidates,
+                current_url=task.url,
+            )
             target.mode = task.mode
             target.ffmpeg_path = task.ffmpeg_path
             target.state = "completed"
@@ -2765,12 +2852,14 @@ class DownloadQueue(_SerialDownloadQueue):
         ad_filter_regex: str = "",
         download_proxy: object = None,
         on_ad_scan: Optional[Callable[[DownloadTask, Dict[str, Any]], None]] = None,
+        auto_source_failover: bool = True,
     ) -> None:
         self._load = load
         self._save = save
         self._notify = notify
         self._on_complete = on_complete
         self._on_ad_scan = on_ad_scan
+        self._auto_source_failover = bool(auto_source_failover)
         self._lock = threading.RLock()
         self._stop = False
         (
@@ -3137,6 +3226,12 @@ class DownloadQueue(_SerialDownloadQueue):
                 existing.classification_policy_revision = getattr(task, "classification_policy_revision", None)
                 existing.classification_source = getattr(task, "classification_source", None)
                 existing.source_name = task.source_name
+                existing.source_sensitive = task.source_sensitive
+                existing.source_identity = task.source_identity or existing.source_identity
+                existing.source_candidates = normalize_source_candidates(
+                    task.source_candidates,
+                    current_url=task.url,
+                )
                 existing.mode = task.mode
                 existing.ffmpeg_path = task.ffmpeg_path
                 existing.download_engine = ""
@@ -3267,6 +3362,85 @@ class DownloadQueue(_SerialDownloadQueue):
         assert last_error is not None
         raise last_error
 
+    def _persist_source_failover(
+        self,
+        task: DownloadTask,
+    ) -> Optional[tuple[str, str]]:
+        """Move one failed task to its next persisted source candidate."""
+        tasks = self._read()
+        current = next((item for item in tasks if item.task_id == task.task_id), None)
+        if current is None:
+            return None
+        candidates = normalize_source_candidates(
+            current.source_candidates,
+            current_url=current.url,
+        )
+        if not candidates:
+            return None
+
+        candidate = candidates[0]
+        old_label = str(current.source_name or current.source_key or "当前来源")
+        new_label = str(
+            candidate.get("source_name")
+            or candidate.get("source_key")
+            or "备用来源"
+        )
+        if not current.source_identity:
+            current.source_identity = _task_source_identity(
+                current.source_key,
+                current.source_name,
+                current.source_sensitive,
+            )
+        current.source_candidates = candidates[1:]
+        current.source_key = candidate.get("source_key") or current.source_key
+        current.source_name = candidate.get("source_name") or None
+        current.url = candidate["url"]
+        current.state = "pending"
+        current.progress = 0.0
+        current.error = ""
+        current.control_action = ""
+        current.delete_file = False
+        current.output = ""
+        current.completed_at = 0.0
+        current.downloaded_bytes = 0
+        current.download_engine = ""
+        try:
+            self._write(tasks)
+        except Exception:
+            # A host data store may report an error after applying the write.
+            # Re-read before falling back to a terminal failure so a successful
+            # source switch is never performed twice.
+            persisted = self._read()
+            durable = next(
+                (item for item in persisted if item.task_id == task.task_id),
+                None,
+            )
+            if (
+                durable is None
+                or durable.state != "pending"
+                or durable.url != current.url
+            ):
+                raise
+            current = durable
+
+        # The claimed object is only an in-memory projection; keep it aligned
+        # for notifications and completion callbacks after the next attempt.
+        task.source_key = current.source_key
+        task.source_name = current.source_name
+        task.source_identity = current.source_identity
+        task.source_candidates = list(current.source_candidates)
+        task.url = current.url
+        task.state = current.state
+        task.progress = current.progress
+        task.error = current.error
+        task.control_action = current.control_action
+        task.delete_file = current.delete_file
+        task.output = current.output
+        task.completed_at = current.completed_at
+        task.downloaded_bytes = current.downloaded_bytes
+        task.download_engine = current.download_engine
+        return old_label, new_label
+
     def _persist_terminal_intent(self, intent: _TerminalIntent) -> None:
         if intent.state in {"pause", "remove"}:
             if intent.state == "remove" and intent.output:
@@ -3369,6 +3543,7 @@ class DownloadQueue(_SerialDownloadQueue):
         self, task: DownloadTask, control: _TaskControl, exc: Exception
     ) -> Dict[str, Any]:
         safe_error = _redact_error_urls(exc)
+        switched: Optional[tuple[str, str]] = None
         with self._lock:
             if control.action == "remove":
                 state = "remove"
@@ -3376,21 +3551,42 @@ class DownloadQueue(_SerialDownloadQueue):
                 state = "pause"
             else:
                 state = "failed"
-            try:
-                self._persist_terminal_intent(
-                    _TerminalIntent(
-                        task=task,
-                        control=control,
-                        state=state,
-                        error=safe_error,
-                    )
-                )
-            except Exception:
-                self._defer_terminal(task, control, state, error=safe_error)
-                persisted = False
-            else:
+            if state == "failed" and self._auto_source_failover:
+                try:
+                    switched = self._persist_source_failover(task)
+                except Exception:
+                    LOGGER.exception("LunaTV 自动换源持久化失败")
+            if switched is not None:
                 self._release(task.task_id)
                 persisted = True
+            else:
+                try:
+                    self._persist_terminal_intent(
+                        _TerminalIntent(
+                            task=task,
+                            control=control,
+                            state=state,
+                            error=safe_error,
+                        )
+                    )
+                except Exception:
+                    self._defer_terminal(task, control, state, error=safe_error)
+                    persisted = False
+                else:
+                    self._release(task.task_id)
+                    persisted = True
+        if switched is not None and persisted:
+            old_label, new_label = switched
+            self._notify(
+                "LunaTV 自动换源",
+                f"{self._notification_text(task)}：{old_label}下载失败，已切换到{new_label}",
+            )
+            return {
+                "processed": 1,
+                "task_id": task.task_id,
+                "state": "pending",
+                "source": new_label,
+            }
         if state == "failed" and persisted:
             self._notify(
                 "LunaTV 下载失败",

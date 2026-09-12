@@ -234,6 +234,7 @@ from .downloader import (
     DownloadQueue,
     DownloadTask,
     normalize_download_concurrency,
+    normalize_source_candidates,
 )
 from .proxy import parse_proxy_url
 from .naming import (
@@ -1172,13 +1173,42 @@ def _coerce_media_identity_source(media_source: Any) -> str:
     return _enum_value(media_source) or PLUGIN_MEDIA_SOURCE
 
 
+def _source_candidate_media_key(entry: Dict[str, Any]) -> Tuple[Any, ...]:
+    """Group alternate URLs by one host media episode, never by source ID."""
+    host_source = _coerce_media_identity_source(entry.get("host_media_source"))
+    host_id = str(entry.get("host_media_id") or "").strip()
+    host_identity = (
+        f"{host_source}:{host_id}"
+        if host_source != PLUGIN_MEDIA_SOURCE and host_id
+        else ""
+    )
+    try:
+        season = int(entry.get("season") or 1)
+    except (TypeError, ValueError):
+        season = 1
+    try:
+        episode = int(entry.get("episode") or 1)
+    except (TypeError, ValueError):
+        episode = 1
+    if host_identity:
+        return (host_identity, _media_type_value(entry.get("media_type")), season, episode)
+    return (
+        "",
+        normalize_search_title(str(entry.get("title") or "")).casefold(),
+        str(entry.get("year") or "").strip(),
+        _media_type_value(entry.get("media_type")),
+        season,
+        episode,
+    )
+
+
 class LunaTVSource(_PluginBase):
     """第三方苹果 CMS/m3u8 订阅下载插件。"""
 
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.105"
+    plugin_version = "0.4.106"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -6010,6 +6040,15 @@ class LunaTVSource(_PluginBase):
             media_source="lunatv",
             media_id=media_id,
         )
+        candidate_value = (
+            episode_payload["source_candidates"]
+            if "source_candidates" in episode_payload
+            else payload.get("source_candidates")
+        )
+        task.source_candidates = normalize_source_candidates(
+            candidate_value,
+            current_url=url,
+        )
         manual_classification = self._classification_from_context(
             payload.get("media"),
             payload.get("media_info"),
@@ -6608,13 +6647,15 @@ class LunaTVSource(_PluginBase):
                     result.season_ambiguous and season > 0 and season_in_range
                 ):
                     matching_results.append((result, association))
+            fallback_results: List[Tuple[CmsResult, Dict[str, Any]]] = []
             if str(self._config.get("source_strategy") or "first") != "all":
-                matching_results = self._rank_subscription_results(
+                ranked_results = self._rank_subscription_results(
                     matching_results,
                     season=season,
                     subscribe=subscribe,
                 )
-                matching_results = matching_results[:1]
+                fallback_results = list(ranked_results)
+                matching_results = ranked_results[:1]
             if is_season_subscription:
                 selected_results: List[Tuple[CmsResult, Dict[str, Any]]] = []
                 ambiguous_results: List[Tuple[CmsResult, Dict[str, Any]]] = []
@@ -6771,6 +6812,13 @@ class LunaTVSource(_PluginBase):
                             else f"{result.source_key}:{result.vod_id}"
                         ),
                     )
+                    if fallback_results:
+                        task.source_candidates = self._subscription_source_candidates(
+                            fallback_results,
+                            season=season,
+                            episode=int(episode.episode),
+                            current_url=episode.url,
+                        )
                     if identity_source != PLUGIN_MEDIA_SOURCE and identity_id:
                         task.host_media_source = identity_source
                         task.host_media_id = identity_id
@@ -8037,6 +8085,39 @@ class LunaTVSource(_PluginBase):
         )
         return [item for _, item in ranked]
 
+    def _subscription_source_candidates(
+        self,
+        results: List[Tuple[CmsResult, Dict[str, Any]]],
+        *,
+        season: int,
+        episode: int,
+        current_url: str,
+    ) -> List[Dict[str, str]]:
+        """Return one alternate URL per ranked source for one subscription episode."""
+        candidates: List[Dict[str, str]] = []
+        for result, _association in results:
+            matching = []
+            for item in result.episodes:
+                if not item.url:
+                    continue
+                if result.media_type == "tv":
+                    if season > 0 and int(item.season) != season:
+                        continue
+                    if int(item.episode) != episode:
+                        continue
+                elif episode != 1:
+                    continue
+                matching.append(item)
+            candidates.extend(
+                {
+                    "url": item.url,
+                    "source_key": result.source_key,
+                    "source_name": result.source_name or "",
+                }
+                for item in matching
+            )
+        return normalize_source_candidates(candidates, current_url=current_url)
+
     def _resource_torrents(
         self,
         keyword: str,
@@ -8548,6 +8629,72 @@ class LunaTVSource(_PluginBase):
             group["resolution_probed_episode_count"] = len(probed_episodes)
             group["resolution_probed_episodes"] = probed_episodes
 
+        # A selected resource keeps the other matching URLs as ordered
+        # candidates. The queue consumes these only after the current URL
+        # fails, so a manual source selection still remains the first choice.
+        candidate_pool: Dict[Tuple[Any, ...], List[Tuple[int, int, Dict[str, str]]]] = {}
+        candidate_seen: set[Tuple[Tuple[Any, ...], str]] = set()
+        candidate_order = 0
+
+        def add_candidate(entry: Dict[str, Any], height: int) -> None:
+            nonlocal candidate_order
+            url = str(entry.get("url") or "").strip()
+            if not url:
+                return
+            key = _source_candidate_media_key(entry)
+            url_key = url
+            dedupe_key = (key, url_key)
+            if dedupe_key in candidate_seen:
+                return
+            candidate_seen.add(dedupe_key)
+            candidate_pool.setdefault(key, []).append(
+                (
+                    -max(0, int(height or 0)),
+                    candidate_order,
+                    {
+                        "url": url,
+                        "source_key": str(entry.get("source_key") or "").strip(),
+                        "source_name": str(entry.get("source_name") or "").strip(),
+                    },
+                )
+            )
+            candidate_order += 1
+
+        for group in group_rows:
+            group_episodes = group["sorted_episodes"]
+            if not group_episodes:
+                continue
+            info_media_source = group["host_media_source"]
+            info_media_id = group["host_media_id"]
+            if group_episodes[0]["media_type"] == "tv" and use_target_media_identity:
+                info_media_source = target_media_source_value
+                info_media_id = target_media_id_value
+            for episode in group["episodes"]:
+                episode["title"] = str(group["title"] or episode.get("title") or "")
+                episode["year"] = str(group["year"] or episode.get("year") or "")
+                episode["host_media_source"] = info_media_source
+                episode["host_media_id"] = info_media_id
+                add_candidate(
+                    episode,
+                    quality_heights.get(
+                        str(episode.get("url") or ""),
+                        int(episode.get("resolution_height") or 0),
+                    ),
+                )
+        for row in single_rows:
+            add_candidate(
+                row["payload"],
+                quality_heights.get(row["probe_url"], 0),
+            )
+
+        def attach_candidates(entry: Dict[str, Any]) -> None:
+            key = _source_candidate_media_key(entry)
+            alternatives = sorted(candidate_pool.get(key, ()))
+            entry["source_candidates"] = normalize_source_candidates(
+                [item[2] for item in alternatives],
+                current_url=str(entry.get("url") or ""),
+            )
+
         torrents: List[Any] = []
         torrent_heights: Dict[int, int] = {}
         for group in group_rows:
@@ -8611,6 +8758,9 @@ class LunaTVSource(_PluginBase):
             payload["year"] = canonical_year
             payload["host_media_source"] = info_media_source
             payload["host_media_id"] = info_media_id
+            for episode_payload in group_episodes:
+                attach_candidates(episode_payload)
+            attach_candidates(payload)
             payload["latency_ms"] = latency_ms
             payload["page_url"] = group["page_url"]
             payload["episode_count"] = count
@@ -8639,6 +8789,7 @@ class LunaTVSource(_PluginBase):
             payload = row["payload"]
             if payload["media_type"] == "tv":
                 continue
+            attach_candidates(payload)
             height = quality_heights.get(row["probe_url"], 0)
             quality = stream_quality_label(height)
             payload["resolution"] = quality
@@ -8870,6 +9021,15 @@ class LunaTVSource(_PluginBase):
                 source_sensitive=True,
                 media_source=source_key,
                 media_id=resource_identity or "native",
+            )
+            candidate_value = (
+                entry["source_candidates"]
+                if "source_candidates" in entry
+                else payload.get("source_candidates")
+            )
+            task.source_candidates = normalize_source_candidates(
+                candidate_value,
+                current_url=entry_url,
             )
             entry_classification = entry.get("classification")
             task_classification = dict(classification_snapshot)
