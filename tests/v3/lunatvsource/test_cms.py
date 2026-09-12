@@ -452,6 +452,69 @@ def test_source_to_dict_derives_non_live_configuration_states():
     assert fallback["url"] == "https://api.example/vod"
 
 
+def test_result_reads_standard_cms_poster_fields_and_serializes_them():
+    source = CmsSource(
+        "demo",
+        "演示源",
+        "https://api.example/vod",
+        detail="https://detail.example",
+    )
+    result = _result_from_item(
+        source,
+        {
+            "vod_id": "42",
+            "vod_name": "示例电影",
+            "type_name": "电影",
+            "vod_pic": "https://img.example/poster.jpg",
+        },
+    )
+
+    assert result.poster_path == "https://img.example/poster.jpg"
+    assert result.to_dict()["poster_path"] == result.poster_path
+
+
+def test_search_can_enrich_posters_without_fetching_playable_details():
+    source = CmsSource("demo", "演示源", "https://api.example/vod")
+    calls = []
+
+    def request(_source, **params):
+        calls.append(params)
+        if params["ac"] == "list":
+            return {
+                "list": [
+                    {
+                        "vod_id": "42",
+                        "vod_name": "示例电影",
+                        "type_name": "电影",
+                    }
+                ]
+            }
+        return {
+            "list": [
+                {
+                    "vod_id": "42",
+                    "vod_pic": "https://img.example/poster.jpg",
+                    "vod_play_url": "正片$https://video.example/movie.m3u8",
+                }
+            ]
+        }
+
+    client = AppleCmsClient([source])
+    client._request = request
+
+    results = client.search(
+        "示例电影",
+        enrich=False,
+        include_posters=True,
+    )
+
+    assert results[0].poster_path == "https://img.example/poster.jpg"
+    assert calls == [
+        {"ac": "list", "wd": "示例电影", "pg": 1},
+        {"ac": "detail", "ids": "42"},
+    ]
+
+
 def test_parse_play_urls_reads_multiple_episodes_and_seasons():
     episodes = _parse_play_urls(
         "高清$$$备用",

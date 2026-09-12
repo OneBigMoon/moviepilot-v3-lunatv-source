@@ -1014,6 +1014,7 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
                 "stop_after_first_source": True,
                 "expand_tv_episode_rows": True,
                 "enrich": False,
+                "include_posters": True,
             },
         )
     ]
@@ -1077,6 +1078,7 @@ def test_global_media_search_returns_lunatv_cards_without_explore_tab(monkeypatc
                 "limit": 8,
                 "stop_after_first_source": False,
                 "enrich": False,
+                "include_posters": True,
                 "max_workers": 8,
                 "parallel_wait_timeout": 8.0,
             }
@@ -1975,6 +1977,43 @@ def test_season_media_cards_are_not_order_dependent_when_precise_row_exists():
         assert len(cards) == 1
         assert cards[0].season_ambiguous is False
         assert [(item.season, item.episode) for item in cards[0].episodes] == [(1, 1)]
+
+
+def test_native_media_fields_fall_back_to_cms_poster_when_tmdb_is_unmatched():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    result = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="42",
+        title="示例电影",
+        year="2024",
+        media_type="movie",
+        remark="",
+        poster_path="https://img.example/poster.jpg",
+    )
+
+    fields = plugin._media_info_fields(result, {"status": "unmatched"})
+
+    assert fields["poster_path"] == "https://img.example/poster.jpg"
+
+
+def test_season_media_card_preserves_cms_poster():
+    result = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="42",
+        title="示例剧",
+        year="2024",
+        media_type="tv",
+        remark="",
+        episodes=(CmsEpisode(1, 1, "第1集", "https://video.example/1.m3u8"),),
+        poster_path="https://img.example/poster.jpg",
+    )
+
+    cards = LunaTVSource._season_media_cards([result])
+
+    assert cards[0].poster_path == "https://img.example/poster.jpg"
 
 
 def test_quality_cache_prunes_expired_entries_and_enforces_capacity(monkeypatch):
@@ -5231,6 +5270,31 @@ def test_native_movie_move_success_with_source_removed_returns_moviepilot(
     assert not output.exists()
     assert sleep_calls == 20
     assert transfer_chain.manual_transfer_calls == 0
+
+
+def test_empty_download_parent_cleanup_never_removes_media_directories(
+    tmp_path: Path,
+):
+    root = tmp_path / "incoming"
+    empty_parent = root / "示例电影 (2024)"
+    output = empty_parent / "示例电影.mp4"
+    empty_parent.mkdir(parents=True)
+    task = SimpleNamespace(root=str(root))
+
+    LunaTVSource._remove_empty_download_parents(task, str(output))
+
+    assert not empty_parent.exists()
+    assert root.exists()
+
+    nonempty_parent = root / "保留媒体"
+    nonempty_parent.mkdir()
+    (nonempty_parent / "movie.mp4").write_bytes(b"media")
+    LunaTVSource._remove_empty_download_parents(
+        task,
+        str(nonempty_parent / "moved.mp4"),
+    )
+
+    assert nonempty_parent.exists()
 
 
 def test_native_movie_copy_success_with_source_still_present_returns_moviepilot(

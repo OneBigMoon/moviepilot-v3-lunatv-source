@@ -1178,7 +1178,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.104"
+    plugin_version = "0.4.105"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3622,6 +3622,8 @@ class LunaTVSource(_PluginBase):
         for field in ("poster_path", "backdrop_path", "overview", "vote_average", "release_date"):
             if association.get(field) not in (None, ""):
                 fields[field] = association[field]
+        if fields.get("poster_path") in (None, "") and result.poster_path:
+            fields["poster_path"] = result.poster_path
 
         classification_facts = extract_classification_facts(result)
         if classification_protocol_available() and classification_facts:
@@ -3755,6 +3757,7 @@ class LunaTVSource(_PluginBase):
                     season_ambiguous=bool(group["season_ambiguous"]),
                     cms_type_name=base.cms_type_name,
                     cms_class_names=base.cms_class_names,
+                    poster_path=base.poster_path,
                 )
             )
         return cards
@@ -5770,6 +5773,7 @@ class LunaTVSource(_PluginBase):
                         search_query,
                         stop_after_first_source=True,
                         expand_tv_episode_rows=True,
+                        include_posters=True,
                     ),
                     client,
                 )
@@ -5852,6 +5856,7 @@ class LunaTVSource(_PluginBase):
                     # 探索页只展示元数据；播放地址在原生资源搜索/下载时再读取。
                     # 避免列表结果缺少 vod_play_url 时逐条请求详情，导致界面长时间骨架屏。
                     enrich=False,
+                    include_posters=True,
                 ),
                 client,
             )
@@ -6683,6 +6688,7 @@ class LunaTVSource(_PluginBase):
                                 detail=result.detail,
                                 season_range=result.season_range,
                                 season_ambiguous=False,
+                                poster_path=result.poster_path,
                             ),
                             association,
                         )
@@ -7284,7 +7290,25 @@ class LunaTVSource(_PluginBase):
                 return
             current = path.parent
             while current != root and root in current.parents:
-                current.rmdir()
+                removed = False
+                for attempt in range(20):
+                    try:
+                        current.rmdir()
+                        removed = True
+                        break
+                    except FileNotFoundError:
+                        removed = True
+                        break
+                    except OSError:
+                        try:
+                            if any(current.iterdir()):
+                                return
+                        except OSError:
+                            return
+                        if attempt < 19:
+                            time.sleep(0.05)
+                if not removed:
+                    return
                 current = current.parent
         except (OSError, RuntimeError, TypeError, ValueError):
             return
@@ -7731,6 +7755,7 @@ class LunaTVSource(_PluginBase):
                 "limit": 8,
                 "stop_after_first_source": False,
                 "enrich": False,
+                "include_posters": True,
                 "max_workers": NATIVE_MEDIA_SEARCH_WORKERS,
                 "parallel_wait_timeout": NATIVE_MEDIA_SEARCH_TIMEOUT,
             }

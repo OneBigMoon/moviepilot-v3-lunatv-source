@@ -104,6 +104,12 @@ _TV_EPISODE_ROW_TITLE_RE = re.compile(
 # broken payloads while still covering a 208-episode season at those sizes.
 _TV_EPISODE_ROW_MAX_PAGES = 32
 _DETAIL_IDS_BATCH_SIZE = 50
+_CMS_IMAGE_FIELDS = (
+    "vod_pic",
+    "vod_pic_thumb",
+    "vod_pic_slide",
+    "vod_pic_screenshot",
+)
 
 
 def _season_range(label: str) -> Tuple[int, int]:
@@ -119,6 +125,41 @@ def _season_range(label: str) -> Tuple[int, int]:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _cms_image_url(source: "CmsSource", value: Any) -> str:
+    """Return one safe absolute image URL from a CMS image field."""
+
+    values = value if isinstance(value, (list, tuple)) else (value,)
+    base_url = source.detail or source.api
+    base_scheme = urllib.parse.urlparse(base_url).scheme or "https"
+    for raw_value in values:
+        text = _text(raw_value)
+        if not text:
+            continue
+        candidates = re.split(r"\s*(?:\$\$\$|\|)\s*", text)
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            if candidate.startswith("//"):
+                candidate = f"{base_scheme}:{candidate}"
+            else:
+                candidate = urllib.parse.urljoin(base_url, candidate)
+            parsed = urllib.parse.urlparse(candidate)
+            if parsed.scheme in {"http", "https"} and parsed.hostname:
+                return candidate
+    return ""
+
+
+def _cms_poster_path(source: "CmsSource", item: Mapping[str, Any]) -> str:
+    """Read the standard Apple CMS poster fields in preference order."""
+
+    for field_name in _CMS_IMAGE_FIELDS:
+        poster = _cms_image_url(source, item.get(field_name))
+        if poster:
+            return poster
+    return ""
 
 
 def _chinese_number(value: str) -> int:
@@ -851,6 +892,7 @@ class CmsResult:
     season_ambiguous: bool = False
     cms_type_name: str = ""
     cms_class_names: Tuple[str, ...] = field(default_factory=tuple)
+    poster_path: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -865,8 +907,9 @@ class CmsResult:
             "detail": self.detail,
             "season_range": list(self.season_range),
             "season_ambiguous": self.season_ambiguous,
-        "cms_type_name": self.cms_type_name,
-        "cms_class_names": list(self.cms_class_names),
+            "cms_type_name": self.cms_type_name,
+            "cms_class_names": list(self.cms_class_names),
+            "poster_path": self.poster_path,
         }
 
 
@@ -982,6 +1025,7 @@ def _result_from_item(source: CmsSource, item: Mapping[str, Any]) -> CmsResult:
         detail=_source_detail_url(source, item),
         season_range=season_range,
         season_ambiguous=season_ambiguous,
+        poster_path=_cms_poster_path(source, item),
     )
 
 
@@ -1256,6 +1300,19 @@ def _merge_detail_item(item: Mapping[str, Any], detail: Mapping[str, Any]) -> Di
     return merged
 
 
+def _merge_detail_images(
+    item: Mapping[str, Any], detail: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Add only CMS image metadata without changing a lightweight search row."""
+
+    merged = dict(item)
+    for field_name in _CMS_IMAGE_FIELDS:
+        value = detail.get(field_name)
+        if value not in (None, "", [], {}):
+            merged[field_name] = value
+    return merged
+
+
 def parse_config(payload: Mapping[str, Any], allowlist: Sequence[str] = ()) -> List[CmsSource]:
     raw_sites = payload.get("api_site") if isinstance(payload, Mapping) else None
     if not isinstance(raw_sites, Mapping):
@@ -1378,10 +1435,15 @@ class AppleCmsClient:
             items = items.get("list") or []
         return [item for item in items if isinstance(item, Mapping)]
 
-    def _enrich_item(self, source: CmsSource, item: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Fetch the playable detail payload when the list response is sparse."""
+    def _enrich_item(
+        self,
+        source: CmsSource,
+        item: Mapping[str, Any],
+        poster_only: bool = False,
+    ) -> Mapping[str, Any]:
+        """Fetch detail metadata when an Apple CMS list response is sparse."""
 
-        if _text(item.get("vod_play_url")):
+        if _text(item.get("vod_play_url")) and not poster_only:
             return item
         vod_id = _text(item.get("vod_id"))
         if not vod_id:
@@ -1390,6 +1452,8 @@ class AppleCmsClient:
             payload = self._request(source, ac="detail", ids=vod_id)
             detail_items = self._items(payload)
             if detail_items:
+                if poster_only:
+                    return _merge_detail_images(item, detail_items[0])
                 return _merge_detail_item(item, detail_items[0])
         except Exception:
             # A broken detail endpoint should not hide a valid list result.
@@ -1401,6 +1465,7 @@ class AppleCmsClient:
         source: CmsSource,
         items: Iterable[Mapping[str, Any]],
         enrich: bool,
+        include_posters: bool = False,
         deadline: Optional[float] = None,
     ) -> List[Mapping[str, Any]]:
         """Fill sparse Apple CMS rows with a bulk detail request when possible.
@@ -1412,13 +1477,17 @@ class AppleCmsClient:
         """
 
         materialized = list(items)
-        if not enrich:
+        if not enrich and not include_posters:
             return materialized
         sparse_ids = list(
             dict.fromkeys(
                 _text(item.get("vod_id"))
                 for item in materialized
-                if not _text(item.get("vod_play_url")) and _text(item.get("vod_id"))
+                if _text(item.get("vod_id"))
+                and (
+                    (enrich and not _text(item.get("vod_play_url")))
+                    or (include_posters and not _cms_poster_path(source, item))
+                )
             )
         )
         details: Dict[str, Mapping[str, Any]] = {}
@@ -1442,28 +1511,38 @@ class AppleCmsClient:
         individual_fallbacks: Dict[str, Mapping[str, Any]] = {}
         for item in materialized:
             vod_id = _text(item.get("vod_id"))
-            if _text(item.get("vod_play_url")):
-                enriched.append(item)
-            elif vod_id in details:
-                merged = _merge_detail_item(item, details[vod_id])
-                if _text(merged.get("vod_play_url")):
-                    enriched.append(merged)
-                    continue
-                if self._deadline_expired(deadline):
-                    enriched.append(merged)
-                    continue
-                if vod_id not in individual_fallbacks:
-                    individual_fallbacks[vod_id] = self._enrich_item(source, merged)
-                enriched.append(individual_fallbacks[vod_id])
-            elif not vod_id:
-                enriched.append(item)
-            else:
-                if self._deadline_expired(deadline):
+            detail = details.get(vod_id)
+            if enrich:
+                if detail is not None:
+                    merged = _merge_detail_item(item, detail)
+                    if _text(merged.get("vod_play_url")):
+                        enriched.append(merged)
+                        continue
+                    if self._deadline_expired(deadline):
+                        enriched.append(merged)
+                        continue
+                    if vod_id not in individual_fallbacks:
+                        individual_fallbacks[vod_id] = self._enrich_item(source, merged)
+                    enriched.append(individual_fallbacks[vod_id])
+                elif not vod_id or self._deadline_expired(deadline):
                     enriched.append(item)
-                    continue
-                if vod_id not in individual_fallbacks:
-                    individual_fallbacks[vod_id] = self._enrich_item(source, item)
-                enriched.append(individual_fallbacks[vod_id])
+                else:
+                    if vod_id not in individual_fallbacks:
+                        individual_fallbacks[vod_id] = self._enrich_item(source, item)
+                    enriched.append(individual_fallbacks[vod_id])
+            elif include_posters:
+                if detail is not None:
+                    enriched.append(_merge_detail_images(item, detail))
+                elif not vod_id or self._deadline_expired(deadline):
+                    enriched.append(item)
+                else:
+                    if vod_id not in individual_fallbacks:
+                        individual_fallbacks[vod_id] = self._enrich_item(
+                            source, item, poster_only=True
+                        )
+                    enriched.append(individual_fallbacks[vod_id])
+            else:
+                enriched.append(item)
         return enriched
 
     @staticmethod
@@ -1484,11 +1563,18 @@ class AppleCmsClient:
         source: CmsSource,
         items: Iterable[Mapping[str, Any]],
         enrich: bool,
+        include_posters: bool = False,
         deadline: Optional[float] = None,
     ) -> List[CmsResult]:
         return [
             _result_from_item(source, item)
-            for item in self._enrich_items(source, items, enrich, deadline=deadline)
+            for item in self._enrich_items(
+                source,
+                items,
+                enrich,
+                include_posters=include_posters,
+                deadline=deadline,
+            )
         ]
 
     def _search_source(
@@ -1497,6 +1583,7 @@ class AppleCmsClient:
         query: str,
         limit: int,
         enrich: bool = True,
+        include_posters: bool = False,
         require_playable: bool = False,
         expand_tv_episode_rows: bool = False,
         media_type_filter: str = "",
@@ -1535,7 +1622,12 @@ class AppleCmsClient:
             candidate_items = items if media_type_filter else items[:limit]
             return [
                 result
-                for result in self._results_from_items(source, candidate_items, enrich)
+                for result in self._results_from_items(
+                    source,
+                    candidate_items,
+                    enrich,
+                    include_posters=include_posters,
+                )
                 if (not media_type_filter or result.media_type == media_type_filter)
                 and (not require_playable or result.episodes)
             ][:limit]
@@ -1813,7 +1905,13 @@ class AppleCmsClient:
             return conflict
 
         collect_results(
-            self._results_from_items(source, items, enrich, deadline=deadline)
+            self._results_from_items(
+                source,
+                items,
+                enrich,
+                include_posters=include_posters,
+                deadline=deadline,
+            )
         )
 
         if (
@@ -1924,6 +2022,7 @@ class AppleCmsClient:
                         source,
                         matched_items,
                         enrich,
+                        include_posters=include_posters,
                         deadline=deadline,
                     ),
                     selected_group_only=True,
@@ -1952,6 +2051,7 @@ class AppleCmsClient:
                         source,
                         matched_items,
                         enrich,
+                        include_posters=include_posters,
                         deadline=deadline,
                     )
                 )
@@ -1965,6 +2065,7 @@ class AppleCmsClient:
                     source,
                     page_items,
                     enrich,
+                    include_posters=include_posters,
                     deadline=deadline,
                 )
             )
@@ -2014,6 +2115,7 @@ class AppleCmsClient:
         limit: int = 20,
         stop_after_first_source: bool = False,
         enrich: bool = True,
+        include_posters: bool = False,
         require_playable: bool = False,
         source_limit: Optional[int] = None,
         max_workers: int = 1,
@@ -2097,6 +2199,7 @@ class AppleCmsClient:
                         query=query,
                         limit=per_source_limit,
                         enrich=enrich,
+                        include_posters=include_posters,
                         require_playable=require_playable,
                         expand_tv_episode_rows=expand_tv_episode_rows,
                         media_type_filter=media_type_filter,
@@ -2126,6 +2229,7 @@ class AppleCmsClient:
                     query=query,
                     limit=per_source_limit,
                     enrich=enrich,
+                    include_posters=include_posters,
                     require_playable=require_playable,
                     expand_tv_episode_rows=expand_tv_episode_rows,
                     media_type_filter=media_type_filter,
