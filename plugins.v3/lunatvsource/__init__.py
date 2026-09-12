@@ -1178,7 +1178,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.103"
+    plugin_version = "0.4.104"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3883,7 +3883,9 @@ class LunaTVSource(_PluginBase):
                 return info
             except Exception as exc:
                 self._logger.debug("构造识别链 MediaInfo 失败：%s", exc)
-        return self._media_info(result, association, season_only)
+        if season_only:
+            return self._media_info(result, association, season_only=True)
+        return self._media_info(result, association)
 
     @staticmethod
     def _media_type_matches(configured: Any, media_type: str) -> bool:
@@ -7741,9 +7743,9 @@ class LunaTVSource(_PluginBase):
             medias = []
             for prepared, association in self._prepare_native_media_cards(results):
                 if prepared.media_type == "tv":
-                    medias.append(self._media_info(prepared, association, season_only=True))
+                    medias.append(self._sdk_media_info(prepared, association, season_only=True))
                 else:
-                    medias.append(self._media_info(prepared, association))
+                    medias.append(self._sdk_media_info(prepared, association))
             return medias
         except Exception as exc:
             self._logger.warning("LunaTV 全局媒体搜索失败：%s", exc)

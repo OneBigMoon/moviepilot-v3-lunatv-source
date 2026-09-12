@@ -1159,6 +1159,50 @@ def test_global_media_search_does_not_gate_on_uncached_tmdb(monkeypatch):
     assert [card.title for card in cards] == ["示例电影"]
 
 
+def test_global_media_search_uses_host_domain_media_info(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+
+    class Client:
+        def search(self, *_args, **_kwargs):
+            return [
+                _result_from_item(
+                    source,
+                    {
+                        "vod_id": "42",
+                        "vod_name": "示例电影",
+                        "vod_year": "2024",
+                        "type_name": "电影",
+                    },
+                )
+            ]
+
+    class DomainMediaInfo:
+        def from_dict(self, data):
+            self.__dict__.update(data)
+
+        def to_dict(self):
+            return dict(self.__dict__)
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin_module, "_HostMediaInfo", DomainMediaInfo)
+    monkeypatch.setattr(
+        plugin,
+        "_media_info",
+        lambda *_args, **_kwargs: pytest.fail(
+            "native media search must use the host domain MediaInfo"
+        ),
+    )
+
+    meta = type("Meta", (), {"name": "示例电影", "type": "电影"})()
+    cards = plugin.search_medias(meta=meta)
+
+    assert len(cards) == 1
+    assert isinstance(cards[0], DomainMediaInfo)
+    assert cards[0].to_dict()["title"] == "示例电影"
+
+
 def test_global_media_search_respects_explicit_other_source():
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True})
