@@ -136,6 +136,7 @@ from .cms import (
     CmsResult,
     CmsSource,
     apply_season_counts,
+    infer_tv_seasons,
     load_sources_from_url,
     probe_stream_height,
     stream_quality_label,
@@ -1058,7 +1059,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.97"
+    plugin_version = "0.4.98"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -3389,6 +3390,7 @@ class LunaTVSource(_PluginBase):
     @classmethod
     def _season_media_cards(cls, results: List[CmsResult]) -> List[CmsResult]:
         """Collapse episode-indexed CMS rows into one non-episode card per season."""
+        results = infer_tv_seasons(results)
         groups: Dict[Tuple[str, str, str, str, int], Dict[str, Any]] = {}
         order: List[Tuple[str, Any]] = []
 
@@ -7732,6 +7734,7 @@ class LunaTVSource(_PluginBase):
         if requested_media_type:
             search_kwargs["media_type_filter"] = requested_media_type
         results = client.search(search_query, **search_kwargs)
+        results = infer_tv_seasons(results)
         completed_sources = progress_state["finished"] or source_count
         total_sources = progress_state["total"] or source_count
         on_progress(

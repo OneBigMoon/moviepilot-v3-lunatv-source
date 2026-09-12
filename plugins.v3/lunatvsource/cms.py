@@ -17,6 +17,7 @@ import urllib.parse
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .classification import normalize_cms_class_names
+from .naming import normalize_media_title
 from .proxy import (
     ProxyAuthenticationError,
     ProxyResponseError,
@@ -1122,6 +1123,123 @@ def apply_season_counts(result: CmsResult, season_counts: Mapping[int, int]) -> 
     return replace(result, episodes=tuple(mapped), season_ambiguous=False)
 
 
+def _season_inference_title_key(title: str) -> str:
+    """Return a stable title key for comparing season rows from one source."""
+
+    normalized = normalize_media_title(title)
+    return re.sub(r"[\s._\-·•・∙:：;；|/\\]+", "", normalized).casefold()
+
+
+def _result_year_number(value: Any) -> Optional[int]:
+    match = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", _text(value))
+    if not match:
+        return None
+    return int(match.group(0))
+
+
+def _explicit_result_season(result: CmsResult) -> Optional[int]:
+    """Return a single season backed by an explicit title/episode marker."""
+
+    if result.media_type != "tv" or result.season_ambiguous:
+        return None
+
+    title_match = _SEASON_RE.search(_text(result.title))
+    if title_match:
+        value = title_match.group("season") or title_match.group("s_season")
+        season = _chinese_number(value)
+        if season >= 0:
+            return season
+
+    labelled_seasons = {
+        int(episode.season)
+        for episode in result.episodes
+        if _has_explicit_season(episode.label)
+    }
+    if len(labelled_seasons) == 1:
+        return next(iter(labelled_seasons))
+    if len(labelled_seasons) > 1:
+        return None
+
+    # A merged episode-row result may have lost the original SxxEyy title,
+    # but its non-default season value still carries explicit evidence.
+    known_seasons = {
+        int(episode.season)
+        for episode in result.episodes
+        if episode.season_known
+    }
+    if len(known_seasons) == 1:
+        season = next(iter(known_seasons))
+        if season != 1:
+            return season
+    return None
+
+
+def infer_tv_seasons(results: Sequence[CmsResult]) -> List[CmsResult]:
+    """Fill missing season markers when release years prove a stable sequence.
+
+    Some CMS rows publish a season year but omit the season marker.  Infer only
+    when at least two explicit year/season pairs share the same ordinal offset
+    across every year present in that title group.  This covers rows such as
+    2019/S01, 2021/S03, 2022/S04 without turning an arbitrary year into a
+    guessed season.
+    """
+
+    materialized = list(results)
+    grouped: Dict[Tuple[str, str], List[Tuple[int, int]]] = {}
+    for index, result in enumerate(materialized):
+        if result.media_type != "tv":
+            continue
+        title_key = _season_inference_title_key(result.title)
+        year = _result_year_number(result.year)
+        if not title_key or year is None:
+            continue
+        grouped.setdefault((str(result.source_key), title_key), []).append(
+            (index, year)
+        )
+
+    for rows in grouped.values():
+        years = sorted({year for _, year in rows})
+        if len(years) < 2:
+            continue
+        year_rank = {year: rank for rank, year in enumerate(years, start=1)}
+        explicit_by_year: Dict[int, set[int]] = {}
+        for index, year in rows:
+            season = _explicit_result_season(materialized[index])
+            if season is not None and season > 0:
+                explicit_by_year.setdefault(year, set()).add(season)
+        if len(explicit_by_year) < 2 or any(
+            len(seasons) != 1 for seasons in explicit_by_year.values()
+        ):
+            continue
+
+        offsets = {
+            next(iter(seasons)) - year_rank[year]
+            for year, seasons in explicit_by_year.items()
+        }
+        if len(offsets) != 1:
+            continue
+        offset = next(iter(offsets))
+
+        for index, year in rows:
+            result = materialized[index]
+            if _explicit_result_season(result) is not None:
+                continue
+            season = year_rank[year] + offset
+            if season <= 0 or result.season_ambiguous:
+                continue
+            episodes = tuple(
+                replace(episode, season=season, season_known=True)
+                for episode in result.episodes
+            )
+            materialized[index] = replace(
+                result,
+                episodes=episodes,
+                season_range=(season, season),
+                season_ambiguous=False,
+            )
+    return materialized
+
+
 def _merge_detail_item(item: Mapping[str, Any], detail: Mapping[str, Any]) -> Dict[str, Any]:
     """Merge a detail response without discarding list metadata.
 
@@ -1813,6 +1931,9 @@ class AppleCmsClient:
         expand_tv_episode_rows: bool = False,
         media_type_filter: str = "",
     ) -> List[CmsResult]:
+        def finalize(items: Iterable[CmsResult]) -> List[CmsResult]:
+            return infer_tv_seasons(list(items)[:limit])
+
         media_type_filter = _canonical_media_type_filter(media_type_filter)
         ordered_sources = list(self.sources)
         total_sources = len(ordered_sources)
@@ -1884,7 +2005,7 @@ class AppleCmsClient:
                     settle_unfinished_sources()
                     break
             settle_unfinished_sources()
-            return results[:limit]
+            return finalize(results)
 
         futures: Dict[Any, int] = {}
         pending_futures = set()
@@ -1932,8 +2053,8 @@ class AppleCmsClient:
             for idx in sorted(source_results):
                 merge_source_results(source_results[idx])
                 if len(results) >= limit:
-                    return results[:limit]
-            return results[:limit]
+                    return finalize(results)
+            return finalize(results)
         finally:
             settle_unfinished_sources()
             # ``wait=False`` is intentional: slow third-party source calls do

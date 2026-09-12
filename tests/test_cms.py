@@ -16,6 +16,7 @@ from lunatvsource_test.cms import (
     _parse_play_urls,
     _result_from_item,
     apply_season_counts,
+    infer_tv_seasons,
     parse_config,
     probe_stream_height,
     stream_quality_label,
@@ -570,6 +571,62 @@ def test_result_from_item_recognizes_chinese_season_title():
     )
     assert result.media_type == "tv"
     assert [(episode.season, episode.episode, episode.season_known) for episode in result.episodes] == [(8, 45, True)]
+
+
+def test_infer_tv_seasons_from_consistent_release_years():
+    source = CmsSource("demo", "演示", "https://cms.example/vod")
+    rows = [
+        (2019, "舒克贝塔 第1季"),
+        (2020, "舒克贝塔"),
+        (2021, "舒克贝塔 第3季"),
+        (2022, "舒克贝塔 第4季"),
+        (2023, "舒克贝塔"),
+    ]
+    results = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": str(year),
+                "vod_name": title,
+                "vod_year": str(year),
+                "type_name": "电视剧",
+                "vod_play_url": f"第1集$https://example.test/{year}.m3u8",
+            },
+        )
+        for year, title in rows
+    ]
+
+    inferred = infer_tv_seasons(results)
+
+    assert [result.episodes[0].season for result in inferred] == [1, 2, 3, 4, 5]
+    assert all(result.episodes[0].season_known for result in inferred)
+
+
+def test_infer_tv_seasons_rejects_inconsistent_explicit_pairs():
+    source = CmsSource("demo", "演示", "https://cms.example/vod")
+    rows = [
+        (2019, "示例剧 第1季"),
+        (2020, "示例剧"),
+        (2021, "示例剧 第2季"),
+        (2022, "示例剧 第4季"),
+    ]
+    results = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": str(year),
+                "vod_name": title,
+                "vod_year": str(year),
+                "type_name": "电视剧",
+                "vod_play_url": f"第1集$https://example.test/{year}.m3u8",
+            },
+        )
+        for year, title in rows
+    ]
+
+    inferred = infer_tv_seasons(results)
+
+    assert inferred[1].episodes[0].season == 1
 
 
 def test_result_from_item_recognizes_regional_drama_category_without_movie_class_leak():

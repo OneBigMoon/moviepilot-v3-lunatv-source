@@ -201,6 +201,46 @@ def test_search_tv_resources_sort_seasons_ascending_before_quality(monkeypatch):
     ] == [1, 2, 3]
 
 
+def test_search_tv_resources_infers_missing_seasons_from_release_years(monkeypatch):
+    source = CmsSource("demo", "演示源", "https://cms.example/vod")
+    rows = [
+        (2019, "舒克贝塔 第1季"),
+        (2020, "舒克贝塔"),
+        (2021, "舒克贝塔 第3季"),
+        (2022, "舒克贝塔 第4季"),
+        (2023, "舒克贝塔"),
+    ]
+    results = [
+        _result_from_item(
+            source,
+            {
+                "vod_id": str(year),
+                "vod_name": title,
+                "vod_year": str(year),
+                "type_name": "电视剧",
+                "vod_play_url": f"第1集$https://video.example/{year}.m3u8",
+            },
+        )
+        for year, title in rows
+    ]
+    plugin = _configured_plugin(monkeypatch, results)
+
+    resources = plugin.search_torrents(
+        {"id": "demo"}, "舒克贝塔", mtype="电视剧"
+    )
+    payloads = [plugin._decode_resource_token(item.enclosure) for item in resources]
+
+    assert {
+        payload["year"]: payload["season"]
+        for payload in payloads
+        if payload and payload.get("year")
+    } == {"2019": 1, "2020": 2, "2021": 3, "2022": 4, "2023": 5}
+    assert {item.title for item in resources} == {
+        f"舒克贝塔 ({year}) · 第{season}季"
+        for year, season in ((2019, 1), (2020, 2), (2021, 3), (2022, 4), (2023, 5))
+    }
+
+
 def test_long_season_cards_probe_one_episode_and_keep_full_hd_download(
     monkeypatch, tmp_path: Path
 ):
