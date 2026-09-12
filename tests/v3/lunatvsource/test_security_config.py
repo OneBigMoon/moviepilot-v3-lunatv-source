@@ -1,5 +1,5 @@
-from lunatvsource_test import LunaTVSource
-import lunatvsource_test as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+import app.plugins.lunatvsource as plugin_module
 
 
 def test_probe_allowlist_does_not_inherit_image_proxy_settings(monkeypatch):

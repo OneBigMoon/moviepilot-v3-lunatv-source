@@ -5,12 +5,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-import lunatvsource_test as plugin_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import CmsEpisode, CmsResult, CmsSource, _result_from_item
-from lunatvsource_test.downloader import DownloadQueue, DownloadTask
-from lunatvsource_test.m3u8_engine import M3U8EngineInstallError
-from lunatvsource_test.naming import media_path
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import CmsEpisode, CmsResult, CmsSource, _result_from_item
+from app.plugins.lunatvsource.downloader import DownloadQueue, DownloadTask
+from app.plugins.lunatvsource.m3u8_engine import M3U8EngineInstallError
+from app.plugins.lunatvsource.naming import media_path
 
 
 def _install_subscription_operator(monkeypatch, subscribe):

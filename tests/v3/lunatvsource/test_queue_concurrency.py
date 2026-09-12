@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import lunatvsource_test.downloader as downloader_module
-from lunatvsource_test.downloader import DownloadQueue, DownloadTask
+import app.plugins.lunatvsource.downloader as downloader_module
+from app.plugins.lunatvsource.downloader import DownloadQueue, DownloadTask
 
 
 def _payload_items(payload):

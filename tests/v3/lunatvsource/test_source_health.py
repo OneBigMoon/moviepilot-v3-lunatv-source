@@ -7,9 +7,9 @@ from typing import Dict
 
 import pytest
 
-import lunatvsource_test as plugin_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import AppleCmsClient, CmsResult, CmsSource
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import AppleCmsClient, CmsResult, CmsSource
 
 
 def make_source(key: str, *, comment: str = "") -> CmsSource:

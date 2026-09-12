@@ -21,23 +21,39 @@ const adEventQuery = ref('')
 const expandedAdEventKey = ref('')
 const clearConfirming = ref(false)
 const busySourceKeys = ref(new Set())
+const hostTheme = ref('')
 let healthPollTimer = null
 let healthPollDeadline = 0
 let adFilterPollTimer = null
 let clearConfirmTimer = null
+let themeObserver = null
+let componentUnmounted = false
 const HEALTH_POLL_INTERVAL_MS = 1000
 const HEALTH_POLL_TIMEOUT_MS = 5 * 60 * 1000
 const AD_FILTER_POLL_INTERVAL_MS = 2500
 
-const apiCall = (method, path, payload) => {
-  if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
-  return Promise.reject(new Error('MoviePilot API 客户端未注入'))
+const apiCall = (method, path, payload, options) => {
+  if (typeof props.api?.[method] !== 'function') {
+    return Promise.reject(new Error('MoviePilot API 客户端未注入'))
+  }
+  const request = props.api[method]
+  const url = `plugin/${props.pluginId}${path}`
+  if (payload === undefined && options !== undefined) return request(url, options)
+  if (options !== undefined) return request(url, payload, options)
+  if (payload !== undefined) return request(url, payload)
+  return request(url)
 }
 
 function unwrap(response) {
-  const body = response?.data ?? response
+  // V3 returns the endpoint payload directly. Keep a narrow fallback for
+  // older hosts that still wrap it in an Axios-like { data } object.
+  const body = response?.success !== undefined
+    ? response
+    : response?.data?.success !== undefined
+      ? response.data
+      : response
   if (body?.success === false) throw new Error(body.message || '请求失败')
-  return body?.data ?? body ?? {}
+  return body?.success === true ? (body.data ?? {}) : (body ?? {})
 }
 
 async function load(options = {}) {
@@ -47,9 +63,10 @@ async function load(options = {}) {
     error.value = ''
   }
   try {
+    const requestOptions = silent ? { feedback: 'silent' } : undefined
     const [statusResponse, sourceResponse] = await Promise.all([
-      apiCall('get', '/status'),
-      apiCall('get', '/sources'),
+      apiCall('get', '/status', undefined, requestOptions),
+      apiCall('get', '/sources', undefined, requestOptions),
     ])
     status.value = unwrap(statusResponse)
     sources.value = unwrap(sourceResponse) || []
@@ -68,7 +85,12 @@ async function loadAdFilter(options = {}) {
     adFilterError.value = ''
   }
   try {
-    adFilter.value = unwrap(await apiCall('get', '/ad-filter'))
+    adFilter.value = unwrap(await apiCall(
+      'get',
+      '/ad-filter',
+      undefined,
+      silent ? { feedback: 'silent' } : undefined,
+    ))
   } catch (loadError) {
     adFilterError.value = loadError?.message || '读取广告拦截调试记录失败'
   } finally {
@@ -77,10 +99,11 @@ async function loadAdFilter(options = {}) {
 }
 
 function scheduleAdFilterPoll() {
+  if (componentUnmounted) return
   if (adFilterPollTimer) clearTimeout(adFilterPollTimer)
   adFilterPollTimer = setTimeout(async () => {
     await loadAdFilter({ silent: true })
-    scheduleAdFilterPoll()
+    if (!componentUnmounted) scheduleAdFilterPoll()
   }, AD_FILTER_POLL_INTERVAL_MS)
 }
 
@@ -89,7 +112,7 @@ async function setDebugMode(enabled) {
   debugModeBusy.value = true
   adFilterError.value = ''
   try {
-    unwrap(await apiCall('post', '/debug', { enabled }))
+    unwrap(await apiCall('post', '/debug', { enabled }, { feedback: 'silent' }))
     await loadAdFilter({ silent: true })
     status.value = { ...status.value, debug_mode: Boolean(enabled) }
   } catch (requestError) {
@@ -102,7 +125,7 @@ async function setDebugMode(enabled) {
 async function clearAdFilterEvents() {
   if (!adEvents.value.length) return
   try {
-    unwrap(await apiCall('post', '/ad-filter/clear'))
+    unwrap(await apiCall('post', '/ad-filter/clear', undefined, { feedback: 'silent' }))
     await loadAdFilter({ silent: true })
     expandedAdEventKey.value = ''
   } catch (requestError) {
@@ -136,8 +159,8 @@ function cancelClearAdFilterEvents() {
 
 async function loadHealthStatus() {
   const [statusResponse, sourceResponse] = await Promise.all([
-    apiCall('get', '/status'),
-    apiCall('get', '/sources'),
+    apiCall('get', '/status', undefined, { feedback: 'silent' }),
+    apiCall('get', '/sources', undefined, { feedback: 'silent' }),
   ])
   status.value = unwrap(statusResponse)
   sources.value = unwrap(sourceResponse) || []
@@ -150,6 +173,7 @@ function clearHealthPoll() {
 }
 
 function scheduleHealthPoll() {
+  if (componentUnmounted) return
   if (Date.now() >= healthPollDeadline) {
     error.value = '健康检查仍在后台运行，请稍后点击“立即刷新”查看结果'
     clearHealthPoll()
@@ -160,10 +184,12 @@ function scheduleHealthPoll() {
     try {
       await loadHealthStatus()
     } catch (pollError) {
+      if (componentUnmounted) return
       error.value = pollError?.message || '刷新健康检查状态失败'
       clearHealthPoll()
       return
     }
+    if (componentUnmounted) return
     if (sourceHealth.value.running) scheduleHealthPoll()
     else {
       await load({ silent: true })
@@ -183,7 +209,12 @@ async function setSourceEnabled(source, enabled) {
   busySourceKeys.value = nextBusyKeys
   error.value = ''
   try {
-    const result = unwrap(await apiCall('post', '/sources/state', { source_key: source.key, enabled }))
+    const result = unwrap(await apiCall(
+      'post',
+      '/sources/state',
+      { source_key: source.key, enabled },
+      { feedback: 'silent' },
+    ))
     await load({ silent: true })
     if (enabled && result?.check_started && sourceHealth.value.running) {
       healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
@@ -210,7 +241,12 @@ async function recheckSource(source) {
   busySourceKeys.value = nextBusyKeys
   error.value = ''
   try {
-    unwrap(await apiCall('post', '/sources/refresh', { source_key: source.key }))
+    unwrap(await apiCall(
+      'post',
+      '/sources/refresh',
+      { source_key: source.key },
+      { feedback: 'silent' },
+    ))
     await load({ silent: true })
     if (sourceHealth.value.running) {
       healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS
@@ -379,19 +415,36 @@ function formattedSeconds(value) {
   return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
 }
 
+function syncHostTheme() {
+  if (typeof document === 'undefined') return
+  hostTheme.value = document.documentElement?.dataset?.theme || ''
+}
+
 onMounted(load)
 onMounted(scheduleAdFilterPoll)
+onMounted(() => {
+  syncHostTheme()
+  if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return
+  themeObserver = new MutationObserver(syncHostTheme)
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  })
+})
 onBeforeUnmount(() => {
+  componentUnmounted = true
   clearHealthPoll()
   if (adFilterPollTimer) clearTimeout(adFilterPollTimer)
   adFilterPollTimer = null
   if (clearConfirmTimer) clearTimeout(clearConfirmTimer)
   clearConfirmTimer = null
+  themeObserver?.disconnect()
+  themeObserver = null
 })
 </script>
 
 <template>
-  <div class="lunatv-page">
+  <div class="lunatv-page" :data-host-theme="hostTheme">
     <div class="lunatv-header">
       <div>
         <div class="lunatv-eyebrow">THIRD-PARTY CMS / M3U8</div>
@@ -472,7 +525,7 @@ onBeforeUnmount(() => {
         <article class="overview-card overview-card-wide">
           <div class="overview-card-heading"><span class="overview-label">下载目录</span><span class="overview-status">{{ directoryStatus.source || '未配置' }}</span></div>
           <strong class="overview-path" :title="directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置'">{{ directoryStatus.configured_root || directoryStatus.auto_roots?.[0]?.download_path || '未配置' }}</strong>
-          <span class="overview-card-meta">完成后整理 · TMDB {{ status.tmdb_association ? '自动关联' : '未启用' }}</span>
+          <span class="overview-card-meta">完成后整理 · TMDB 由 MoviePilot 原生链关联</span>
         </article>
         <article class="overview-card">
           <div class="overview-card-heading"><span class="overview-label">自动追更</span><span class="overview-status">每 {{ subscriptionStatus.refresh_minutes || 30 }} 分钟</span></div>
@@ -875,7 +928,7 @@ p { color: rgba(var(--v-theme-on-surface, 232, 231, 241), var(--v-medium-emphasi
 /* Follow MoviePilot's own themes: the glass and transparency modes paint a
    wallpaper behind the page, so the plugin page drops its opaque background
    and borrows the host's surface material instead of inventing its own. */
-html[data-theme='glass'] .lunatv-page {
+.lunatv-page[data-host-theme='glass'] {
   --ltv-page-bg: transparent;
   --ltv-surface: var(--glass-surface-raised, rgba(11, 19, 34, .32));
   --ltv-surface-soft: var(--glass-control, rgba(255, 255, 255, .07));
@@ -890,24 +943,24 @@ html[data-theme='glass'] .lunatv-page {
 /* MoviePilot paints its own chips and cards with a sheen over a tinted fill.
    Borrow that material so the status row and panels stay legible when the
    wallpaper shows through instead of dissolving into it. */
-html[data-theme='glass'] .chip {
+.lunatv-page[data-host-theme='glass'] .chip {
   background-color: rgba(11, 19, 34, .52);
   background-image: var(--glass-chip-sheen, none);
   color: rgb(var(--v-theme-on-surface, 232, 231, 241));
   box-shadow: var(--glass-control-shadow, none);
 }
-html[data-theme='glass'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .34); }
-html[data-theme='glass'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .34); }
-html[data-theme='glass'] .chip.muted-chip { background-color: rgba(11, 19, 34, .4); }
-html[data-theme='glass'] .panel,
-html[data-theme='glass'] .page-tabs { background-image: var(--glass-sheen, none); }
-html[data-theme='glass'] .button.secondary {
+.lunatv-page[data-host-theme='glass'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .34); }
+.lunatv-page[data-host-theme='glass'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .34); }
+.lunatv-page[data-host-theme='glass'] .chip.muted-chip { background-color: rgba(11, 19, 34, .4); }
+.lunatv-page[data-host-theme='glass'] .panel,
+.lunatv-page[data-host-theme='glass'] .page-tabs { background-image: var(--glass-sheen, none); }
+.lunatv-page[data-host-theme='glass'] .button.secondary {
   border: 1px solid var(--glass-border, rgba(255, 255, 255, .1));
   background-color: var(--glass-control, rgba(11, 19, 34, .52));
   color: rgb(var(--v-theme-on-surface, 232, 231, 241));
 }
 
-html[data-theme='transparent'] .lunatv-page {
+.lunatv-page[data-host-theme='transparent'] {
   --ltv-page-bg: transparent;
   --ltv-surface: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
   --ltv-surface-soft: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity-light, .2));
@@ -916,14 +969,14 @@ html[data-theme='transparent'] .lunatv-page {
   --ltv-shadow-soft: 0 10px 24px rgba(0, 0, 0, .12);
   --ltv-blur: blur(var(--transparent-blur, 10px)) saturate(1.2);
 }
-html[data-theme='transparent'] .chip {
+.lunatv-page[data-host-theme='transparent'] .chip {
   background-color: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
   backdrop-filter: blur(var(--transparent-blur, 10px));
   color: rgb(var(--v-theme-on-surface, 232, 231, 241));
 }
-html[data-theme='transparent'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .28); }
-html[data-theme='transparent'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .28); }
-html[data-theme='transparent'] .button.secondary {
+.lunatv-page[data-host-theme='transparent'] .chip.ready { background-color: rgba(var(--v-theme-success, 76, 175, 80), .28); }
+.lunatv-page[data-host-theme='transparent'] .chip.busy { background-color: rgba(var(--v-theme-warning, 251, 140, 0), .28); }
+.lunatv-page[data-host-theme='transparent'] .button.secondary {
   border: 1px solid var(--ltv-border);
   background-color: rgba(var(--v-theme-surface, 23, 23, 34), var(--transparent-opacity, .3));
 }

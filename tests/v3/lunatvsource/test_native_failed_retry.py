@@ -1,7 +1,7 @@
 import pytest
 
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.downloader import DownloadTask
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.downloader import DownloadTask
 
 
 @pytest.mark.parametrize("media_type", ["movie", "tv"])

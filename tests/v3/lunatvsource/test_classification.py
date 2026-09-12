@@ -1,13 +1,13 @@
 from types import SimpleNamespace
 
-import lunatvsource_test as plugin_module
-import lunatvsource_test.classification as classification_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import CmsEpisode, CmsResult
+import app.plugins.lunatvsource as plugin_module
+import app.plugins.lunatvsource.classification as classification_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import CmsEpisode, CmsResult
 
 
 def test_classification_facts_are_stable_and_normalized():
-    from lunatvsource_test.classification import (
+    from app.plugins.lunatvsource.classification import (
         CMS_CLASS_NAMES_FIELD,
         CMS_SOURCE_KEY_FIELD,
         CMS_TYPE_NAME_FIELD,

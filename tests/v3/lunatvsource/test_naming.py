@@ -1,4 +1,4 @@
-from lunatvsource_test.naming import media_path, normalize_media_title, normalize_search_title, safe_component
+from app.plugins.lunatvsource.naming import media_path, normalize_media_title, normalize_search_title, safe_component
 
 
 def test_safe_component_removes_path_separators():

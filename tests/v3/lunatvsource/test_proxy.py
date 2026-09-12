@@ -13,18 +13,18 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-import lunatvsource_test.cms as cms_module
-import lunatvsource_test.downloader as downloader_module
-import lunatvsource_test.m3u8_engine as m3u8_module
-import lunatvsource_test.proxy as proxy_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import _fetch_public_url
-from lunatvsource_test.m3u8_engine import (
+import app.plugins.lunatvsource.cms as cms_module
+import app.plugins.lunatvsource.downloader as downloader_module
+import app.plugins.lunatvsource.m3u8_engine as m3u8_module
+import app.plugins.lunatvsource.proxy as proxy_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import _fetch_public_url
+from app.plugins.lunatvsource.m3u8_engine import (
     EngineSpec,
     ManagedBinaryInstaller,
     ReleaseAsset,
 )
-from lunatvsource_test.proxy import (
+from app.plugins.lunatvsource.proxy import (
     ProxyAuthenticationError,
     ProxyConnectionError,
     ProxyResponseError,
@@ -336,7 +336,7 @@ def test_socks5_uses_domain_address_at_proxy(monkeypatch):
 
     fake_socket = FakeSocket()
     monkeypatch.setattr(
-        "lunatvsource_test.proxy.socket.create_connection",
+        "app.plugins.lunatvsource.proxy.socket.create_connection",
         lambda _address, _timeout: fake_socket,
     )
     spec = parse_proxy_url("socks5://127.0.0.1:7890")

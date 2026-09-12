@@ -18,12 +18,12 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install --disable-pip-version-check pytest==8.3.5
-      - run: python -m pytest tests
+      - run: python -m pytest tests/v3/lunatvsource
       - name: Verify release tag matches manifest
         if: startsWith(github.ref, 'refs/tags/')
         env:
           LUNATV_RELEASE_TAG: ${{ github.ref_name }}
-        run: python -m pytest -q tests/test_manifest.py::test_manifest_version_and_history_match_release_metadata
+        run: python -m pytest -q tests/v3/lunatvsource/test_manifest.py::test_manifest_version_and_history_match_release_metadata
       - name: Verify release tag commit belongs to main
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -37,6 +37,8 @@ jobs:
         working-directory: plugins.v3/lunatvsource
       - run: npm run build
         working-directory: plugins.v3/lunatvsource
+      - name: Verify federation CSS and release metadata
+        run: python .github/scripts/check_federation_css.py
       - name: Verify generated dist committed
         run: |
           git diff --check

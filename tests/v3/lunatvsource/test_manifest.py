@@ -4,11 +4,12 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.m3u8_engine import N_M3U8DL_RE_SPEC
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.m3u8_engine import N_M3U8DL_RE_SPEC
 
 
-def test_generate_nfo_config_is_exposed_and_disabled_by_default():
+def test_generate_nfo_config_is_exposed_and_enabled_by_default():
     form, defaults = LunaTVSource().get_form()
     models = []
     pending = [form]
@@ -23,11 +24,11 @@ def test_generate_nfo_config_is_exposed_and_disabled_by_default():
             pending.extend(value)
 
     assert "generate_nfo" in models
-    assert defaults["generate_nfo"] is False
+    assert defaults["generate_nfo"] is True
 
 
 def test_manifest_and_plugin_icons_use_https_url():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     package = json.loads((project_root / "package.v3.json").read_text(encoding="utf-8"))
 
     manifest = package["LunaTVSource"]
@@ -45,7 +46,7 @@ def test_manifest_and_plugin_icons_use_https_url():
 
 
 def test_linux_engine_archives_and_license_are_bundled_and_verified():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     vendor_dir = (
         project_root
         / "plugins.v3"
@@ -64,7 +65,7 @@ def test_linux_engine_archives_and_license_are_bundled_and_verified():
 
 
 def test_manifest_version_and_history_match_release_metadata():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     manifest = json.loads((project_root / "package.v3.json").read_text(encoding="utf-8"))["LunaTVSource"]
     package = json.loads(
         (project_root / "plugins.v3" / "lunatvsource" / "package.json").read_text(encoding="utf-8")
@@ -73,7 +74,7 @@ def test_manifest_version_and_history_match_release_metadata():
         (project_root / "plugins.v3" / "lunatvsource" / "package-lock.json").read_text(encoding="utf-8")
     )
 
-    expected_version = "0.4.99"
+    expected_version = manifest["version"]
     assert manifest["version"] == expected_version
     assert LunaTVSource.plugin_version == expected_version
     assert package["version"] == expected_version
@@ -88,6 +89,7 @@ def test_manifest_version_and_history_match_release_metadata():
 
     history = manifest["history"]
     assert next(iter(history)) == expected_version
+    assert str(history[expected_version]).strip()
     assert history["0.4.99"] == (
         "修复多季电视剧搜索被源内限额截断：同一季族跨页先聚合再补齐年份缺失的季号；"
         "资源搜索与订阅刷新均按原生媒体身份保留后续季，并补充绿联本地 NFO 兼容提示。"
@@ -210,8 +212,59 @@ def test_manifest_version_and_history_match_release_metadata():
     )
 
 
+def test_plugin_api_declarations_are_explicitly_enveloped_for_v3():
+    api = LunaTVSource().get_api()
+
+    assert len(api) == 14
+    assert all(item.get("summary") for item in api)
+    assert all("response_model" in item for item in api)
+    assert all(item["methods"] for item in api)
+
+
+def test_api_response_uses_host_envelope_when_available(monkeypatch):
+    class FakeResponse:
+        def __init__(self, *, success, message, data):
+            self.success = success
+            self.message = message
+            self.data = data
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_schemas",
+        type("Schemas", (), {"Response": FakeResponse}),
+    )
+
+    response = plugin_module._api_response(
+        success=True,
+        data={"ready": True},
+    )
+
+    assert isinstance(response, FakeResponse)
+    assert response.success is True
+    assert response.message == ""
+    assert response.data == {"ready": True}
+
+
+def test_api_declarations_keep_models_when_host_schema_is_available(monkeypatch):
+    class FakeResponse:
+        @classmethod
+        def __class_getitem__(cls, data_type):
+            return (cls.__name__, data_type)
+
+    monkeypatch.setattr(
+        plugin_module,
+        "_schemas",
+        type("Schemas", (), {"Response": FakeResponse, "MediaInfo": dict}),
+    )
+
+    api = LunaTVSource().get_api()
+
+    assert all(item["response_model"] is not None for item in api)
+    assert api[9]["path"] == "/discover"
+
+
 def test_app_page_shows_loading_state_before_empty_sources():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
@@ -227,7 +280,7 @@ def test_app_page_shows_loading_state_before_empty_sources():
 
 
 def test_app_page_queue_summary_excludes_terminal_tasks_and_is_independent_from_source_count():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
@@ -246,7 +299,7 @@ def test_app_page_queue_summary_excludes_terminal_tasks_and_is_independent_from_
 
 
 def test_app_page_keeps_one_refresh_action_and_separates_ad_filter_tab():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
@@ -266,7 +319,7 @@ def test_app_page_keeps_one_refresh_action_and_separates_ad_filter_tab():
 
 
 def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
@@ -287,8 +340,8 @@ def test_app_page_follows_moviepilot_theme_and_fills_plugin_dialog():
     )
 
 
-def test_frontend_uses_native_download_management_and_optional_download_directory():
-    project_root = Path(__file__).resolve().parents[1]
+def test_frontend_uses_native_download_management_and_explicit_config_contract():
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")
@@ -306,6 +359,7 @@ def test_frontend_uses_native_download_management_and_optional_download_director
     assert "hls_ad_filter_regex:" in config_page
     assert 'v-model="config.download_root"' in config_page
     assert 'v-model="config.source_allowlist"' in config_page
+    assert 'v-model="config.source_strategy"' in config_page
     assert 'v-model="config.probe_allowed_private_ranges"' in config_page
     assert 'v-model="config.hls_ad_filter_regex"' in config_page
     assert "download_root: String(config.download_root || '').trim()" in config_page
@@ -313,22 +367,54 @@ def test_frontend_uses_native_download_management_and_optional_download_director
     assert "probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim()" in config_page
     assert "hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim()" in config_page
     assert 'v-model="config.mode"' in config_page
+    assert 'v-model="config.generate_nfo"' in config_page
+    assert 'v-model="config.moviepilot_organize"' in config_page
+    assert 'v-model="config.ffmpeg_path"' in config_page
+    assert 'v-model="config.mediaserver_name"' in config_page
+    assert "绿联兼容必须开启" in config_page
+    assert "STRM 只保存原始直链，不经过原生整理，也不会生成 NFO" in config_page
+    assert "已有错误条目需先让 MoviePilot 覆盖旧 NFO" in config_page
+    assert "normalizeBoolean" in config_page
+    assert "function unwrapApiResponse(response)" in config_page
+    assert "response?.data?.success !== undefined" in config_page
+    assert "['generate_nfo', true]" in config_page
+    assert "source_strategy: config.source_strategy === 'all' ? 'all' : 'first'" in config_page
+    assert "ffmpeg_path: String(config.ffmpeg_path || '').trim() || 'ffmpeg'" in config_page
+    assert "mediaserver_name: String(config.mediaserver_name || '').trim()" in config_page
+    assert "...config," not in config_page.split("const payload = {", 1)[1].split("const response", 1)[0]
+    for deprecated_key in ("use_moviepilot_dirs", "ai_enabled", "tmdb_association", "native_recognize"):
+        assert deprecated_key not in config_page
     assert '下载到本地并整理（去广告）' in config_page
     assert '生成 STRM（原始直链，不去广告）' in config_page
     assert "const mode = config.mode === 'strm' ? 'strm' : 'download'" in config_page
-    assert "只有本地下载模式会执行 HLS 广告分片过滤" in config_page
-    legacy_form, _ = LunaTVSource().get_form()
+    assert "本地下载模式会执行 HLS 广告分片过滤并由原生整理生成 NFO" in config_page
+    native_form, native_defaults = LunaTVSource().get_form()
+    native_text = str(native_form)
+    assert native_defaults["source_strategy"] == "first"
+    for model in ("source_allowlist", "source_strategy", "download_root", "ffmpeg_path", "queue_minutes", "mediaserver_name"):
+        assert f"'model': '{model}'" in native_text
+    legacy_form, _ = LunaTVSource().get_form_legacy()
     legacy_text = str(legacy_form)
+    assert "生成 NFO 元数据" in legacy_text
     assert "下载到本地并整理（去广告）" in legacy_text
     assert "生成 STRM（原始直链，不去广告）" in legacy_text
+    assert "旧版同名配置仅为升级兼容保留" in legacy_text
+    for deprecated_key in ("use_moviepilot_dirs", "ai_enabled", "tmdb_association", "native_recognize"):
+        assert f'"model": "{deprecated_key}"' not in legacy_text
+    assert "TMDB 由 MoviePilot 原生链关联" in app_page
+    assert "response?.success !== undefined" in app_page
+    assert "response?.data?.success !== undefined" in app_page
+    assert "feedback: 'silent'" in app_page
+    assert "componentUnmounted" in app_page
+    assert "onBeforeUnmount" in config_page
     assert "请填写下载目录" not in config_page
     assert "下载目录（可留空）" in config_page
     assert "MoviePilot 传入目录、订阅保存目录、按媒体类型的本地下载目录" in config_page
     assert "config.download_root = defaults.download_root" not in config_page
 
 
-def test_config_preserves_source_strategy_while_defaulting_to_first():
-    project_root = Path(__file__).resolve().parents[1]
+def test_config_serializes_source_strategy_and_defaults_to_first():
+    project_root = Path(__file__).resolve().parents[3]
     config_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "Config.vue"
     ).read_text(encoding="utf-8")
@@ -336,12 +422,45 @@ def test_config_preserves_source_strategy_while_defaulting_to_first():
     payload = config_page.split("const payload = {", 1)[1].split("const response", 1)[0]
 
     assert "source_strategy: 'first'," in defaults
-    assert "...config," in payload
-    assert "source_strategy:" not in payload
+    assert "source_strategy: config.source_strategy === 'all' ? 'all' : 'first'" in payload
+    assert "...config," not in payload
+
+
+def test_v3_plugin_documentation_and_federation_gate_are_present():
+    project_root = Path(__file__).resolve().parents[3]
+    plugin_readme = project_root / "plugins.v3" / "lunatvsource" / "README.md"
+    plugin_tests = project_root / "tests" / "v3" / "lunatvsource"
+    federation_gate = project_root / ".github" / "scripts" / "check_federation_css.py"
+    test_conftest = project_root / "tests" / "conftest.py"
+    workflow = (project_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert plugin_readme.is_file()
+    assert plugin_tests.is_dir()
+    assert list(plugin_tests.glob("test_*.py"))
+    readme_text = plugin_readme.read_text(encoding="utf-8")
+    assert "MoviePilot V3" in readme_text
+    assert "不支持同一宿主内创建多个 LunaTVSource 虚拟分身" in readme_text
+    assert federation_gate.is_file()
+    assert "dynamicLoadingCss" in federation_gate.read_text(encoding="utf-8")
+    assert "python .github/scripts/check_federation_css.py" in workflow
+    assert 'PACKAGE_NAME = "app.plugins.lunatvsource"' in test_conftest.read_text(
+        encoding="utf-8"
+    )
+    legacy_import_markers = (
+        "import " + "lunatvsource_test",
+        "from " + "lunatvsource_test",
+    )
+    assert not any(
+        any(
+            marker in path.read_text(encoding="utf-8")
+            for marker in legacy_import_markers
+        )
+        for path in (project_root / "tests").rglob("test_*.py")
+    )
 
 
 def test_source_health_ui_uses_cached_reads_and_persists_interval():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     app_page = (
         project_root / "plugins.v3" / "lunatvsource" / "src" / "components" / "AppPage.vue"
     ).read_text(encoding="utf-8")

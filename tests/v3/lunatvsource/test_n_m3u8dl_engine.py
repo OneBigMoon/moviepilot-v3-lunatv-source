@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from lunatvsource_test.m3u8_engine import M3U8EngineError, N_m3u8DLEngine
+from app.plugins.lunatvsource.m3u8_engine import M3U8EngineError, N_m3u8DLEngine
 
 
 @pytest.mark.parametrize(

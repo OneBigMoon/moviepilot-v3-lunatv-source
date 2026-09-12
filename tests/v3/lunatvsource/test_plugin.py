@@ -1,14 +1,14 @@
-from lunatvsource_test import LunaTVSource
-import lunatvsource_test as plugin_module
-from lunatvsource_test.cms import (
+from app.plugins.lunatvsource import LunaTVSource
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource.cms import (
     AppleCmsClient,
     CmsEpisode,
     CmsResult,
     CmsSource,
     _result_from_item,
 )
-from lunatvsource_test.downloader import DownloadQueue, DownloadTask
-from lunatvsource_test.naming import media_path
+from app.plugins.lunatvsource.downloader import DownloadQueue, DownloadTask
+from app.plugins.lunatvsource.naming import media_path
 from pathlib import Path
 from collections.abc import Mapping
 import hashlib
@@ -47,7 +47,100 @@ def test_status_exposes_serial_queue_and_ai_fallback():
     assert status["ai"]["enabled"] is True
     assert status["ai"]["available"] is False
     assert status["media_source"] == "lunatv"
+    assert status["host_controls"]["tmdb_association"] == "MoviePilot"
     assert plugin.get_sidebar_nav() == []
+
+
+def test_debug_toggle_persists_only_its_own_config_key(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "debug_mode": False,
+            "ai_enabled": False,
+            "unknown_legacy_key": "must-not-be-rewritten",
+        }
+    )
+    saved = []
+    monkeypatch.setattr(plugin, "update_config", lambda value: saved.append(value))
+
+    response = plugin.api_debug({"enabled": True})
+
+    assert response["success"] is True
+    assert saved == [{"debug_mode": True}]
+
+
+def test_api_error_messages_do_not_expose_exception_details(monkeypatch):
+    plugin = LunaTVSource()
+
+    def fail_catalog():
+        raise RuntimeError("/private/config?token=secret")
+
+    monkeypatch.setattr(plugin, "_cached_source_catalog", fail_catalog)
+
+    response = plugin.api_sources()
+
+    assert response["success"] is False
+    assert response["message"] == "读取 LunaTV 配置失败"
+    assert "secret" not in response["message"]
+
+
+def test_public_status_error_details_are_redacted():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": False})
+    plugin._source_config_error = (
+        "GET https://user:password@example.test/config?token=secret failed at /private/config"
+    )
+    plugin._followup_status = {
+        "subscription_refresh": {
+            "error": "refresh failed: /private/state?token=secret"
+        }
+    }
+
+    status = plugin.api_status()["data"]
+    public_error = status["source_config"]["error"]
+    followup_error = status["followup_status"]["subscription_refresh"]["error"]
+
+    assert "password" not in public_error
+    assert "secret" not in public_error
+    assert "/private/config" not in public_error
+    assert "example.test/config" in public_error
+    assert "secret" not in followup_error
+    assert "/private/state" not in followup_error
+
+
+def test_init_normalizes_supported_settings_and_keeps_legacy_keys_nonfunctional():
+    plugin = LunaTVSource()
+    plugin.init_plugin(
+        {
+            "enabled": False,
+            "mode": "unexpected",
+            "source_strategy": " ALL ",
+            "config_url": "  ",
+            "download_root": "  /media/incoming  ",
+            "ffmpeg_path": "  /usr/bin/ffmpeg  ",
+            "mediaserver_name": "  Emby  ",
+            "ai_enabled": False,
+            "tmdb_association": False,
+            "native_recognize": False,
+            "use_moviepilot_dirs": False,
+        }
+    )
+
+    assert plugin._config["mode"] == "download"
+    assert plugin._config["source_strategy"] == "all"
+    assert plugin._config["config_url"] == plugin_module.DEFAULT_CONFIG_URL
+    assert plugin._config["download_root"] == "/media/incoming"
+    assert plugin._config["ffmpeg_path"] == "/usr/bin/ffmpeg"
+    assert plugin._config["mediaserver_name"] == "Emby"
+    assert plugin._config["ai_enabled"] is False
+    assert plugin._config["tmdb_association"] is False
+    assert plugin._config["native_recognize"] is False
+    assert plugin._config["use_moviepilot_dirs"] is False
+    legacy_form, _ = plugin.get_form_legacy()
+    legacy_models = str(legacy_form)
+    for key in ("use_moviepilot_dirs", "ai_enabled", "tmdb_association", "native_recognize"):
+        assert f'"model": "{key}"' not in legacy_models
 
 
 def test_ad_filter_workbench_persists_scan_results_and_debug_toggle():
@@ -391,7 +484,7 @@ def test_api_search_expands_episode_rows_for_downloadable_results(monkeypatch):
 
     response = plugin.api_search({"query": "示例剧"})
 
-    assert response == {"success": True, "data": []}
+    assert response == {"success": True, "message": "", "data": []}
     assert calls and calls[0][1]["expand_tv_episode_rows"] is True
 
 
@@ -912,7 +1005,7 @@ def test_discover_accepts_native_keyword_and_stops_after_first_source(monkeypatc
     plugin.init_plugin({"enabled": True})
     monkeypatch.setattr(plugin, "_client", lambda: Client())
     response = plugin.api_discover(keyword="示例电影")
-    assert response == {"success": True, "data": []}
+    assert response == {"success": True, "message": "", "data": []}
     assert calls == [
         (
             "示例电影",
@@ -980,7 +1073,13 @@ def test_global_media_search_returns_lunatv_cards_without_explore_tab(monkeypatc
     class Client:
         def search(self, query, **kwargs):
             assert query == "示例电影"
-            assert kwargs == {"limit": 8, "stop_after_first_source": True, "enrich": False}
+            assert kwargs == {
+                "limit": 8,
+                "stop_after_first_source": False,
+                "enrich": False,
+                "max_workers": 8,
+                "parallel_wait_timeout": 8.0,
+            }
             return [_result_from_item(
                 CmsSource("demo", "演示源", "https://cms.example/vod"),
                 {"vod_id": "42", "vod_name": "示例电影", "type_name": "电影"},
@@ -996,6 +1095,29 @@ def test_global_media_search_returns_lunatv_cards_without_explore_tab(monkeypatc
     assert len(results) == 1
     assert results[0].title == "示例电影"
     assert plugin.get_media_source() == []
+
+
+def test_global_media_search_does_not_gate_on_optional_ai(monkeypatch):
+    calls = []
+
+    class Ai:
+        def normalize(self, *_args, **_kwargs):
+            calls.append(True)
+            raise AssertionError("global media search must not call optional AI")
+
+    class Client:
+        def search(self, query, **_kwargs):
+            assert query == "示例剧"
+            return []
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    plugin._ai = Ai()
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+
+    meta = type("Meta", (), {"name": "示例剧", "year": "", "type": "电视剧"})()
+    assert plugin.search_medias(meta=meta) == []
+    assert calls == []
 
 
 def test_global_media_search_respects_explicit_other_source():
@@ -4732,11 +4854,16 @@ def test_native_transfer_passes_generate_nfo_as_scrape_to_host_chain(
         episode=1,
     )
 
+    opt_out_plugin = LunaTVSource()
+    opt_out_plugin.init_plugin({"enabled": True, "generate_nfo": False})
+    assert opt_out_plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
+    assert captured["scrape"] is False
+    assert captured["manual"] is False
+
     default_plugin = LunaTVSource()
     default_plugin.init_plugin({"enabled": True})
     assert default_plugin._native_transfer(task, str(tmp_path / "episode.mp4")) == "moviepilot"
-    assert captured["scrape"] is False
-    assert captured["manual"] is False
+    assert captured["scrape"] is True
 
     plugin = LunaTVSource()
     plugin.init_plugin({"enabled": True, "generate_nfo": True})

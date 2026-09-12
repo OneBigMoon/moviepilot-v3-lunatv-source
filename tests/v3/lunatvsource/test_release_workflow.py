@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_release_workflow_publishes_assets_before_native_immutability_locks_them():
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     workflow = (project_root / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -18,3 +18,4 @@ def test_release_workflow_publishes_assets_before_native_immutability_locks_them
     assert workflow.index(publish_draft) < workflow.index(immutable_check)
     assert workflow.index(immutable_check) < workflow.index(mutable_cleanup)
     assert "removed mutable release and kept tag" in workflow
+    assert "tests/v3/lunatvsource/test_manifest.py::test_manifest_version_and_history_match_release_metadata" in workflow

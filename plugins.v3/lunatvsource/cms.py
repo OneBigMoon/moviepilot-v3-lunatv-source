@@ -2020,6 +2020,7 @@ class AppleCmsClient:
         progress_callback: Optional[Callable[..., None]] = None,
         expand_tv_episode_rows: bool = False,
         media_type_filter: str = "",
+        parallel_wait_timeout: Optional[float] = None,
     ) -> List[CmsResult]:
         def finalize(items: Iterable[CmsResult]) -> List[CmsResult]:
             # Keep the season evidence together until inference is complete.
@@ -2075,7 +2076,19 @@ class AppleCmsClient:
             return []
         per_source_limit = max(1, min(int(source_limit or limit), int(limit)))
         max_workers = max(1, int(max_workers))
-        if stop_after_first_source or max_workers == 1 or len(ordered_sources) <= 1:
+        budget_override = None
+        if parallel_wait_timeout is not None:
+            try:
+                budget_override = max(0.0, float(parallel_wait_timeout))
+            except (TypeError, ValueError):
+                budget_override = 0.0
+        use_parallel = (
+            not stop_after_first_source
+            and max_workers > 1
+            and len(ordered_sources) > 0
+            and (len(ordered_sources) > 1 or budget_override is not None)
+        )
+        if not use_parallel:
             for index, source in enumerate(ordered_sources):
                 source_result_count = len(results)
                 try:
@@ -2120,7 +2133,11 @@ class AppleCmsClient:
                 futures[future] = idx
                 pending_futures.add(future)
 
-            deadline = time.monotonic() + self._parallel_wait_seconds()
+            deadline = time.monotonic() + (
+                budget_override
+                if budget_override is not None
+                else self._parallel_wait_seconds()
+            )
             while pending_futures:
                 done_futures, pending_futures = wait(
                     pending_futures,

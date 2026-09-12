@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from lunatvsource_test.m3u8_engine import (
+from app.plugins.lunatvsource.m3u8_engine import (
     EngineSpec,
     M3U8EngineCancelled,
     M3U8EngineError,
@@ -126,7 +126,7 @@ def test_installer_removes_hash_mismatch_download(monkeypatch, tmp_path: Path):
     installer = ManagedBinaryInstaller(tmp_path, _spec())
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen",
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen",
         lambda *_args, **_kwargs: io.BytesIO(b"wrong-content"),
     )
 
@@ -268,7 +268,7 @@ def test_installer_never_falls_back_to_a_path_binary(monkeypatch, tmp_path: Path
         ),
     )
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.shutil.which",
+        "app.plugins.lunatvsource.m3u8_engine.shutil.which",
         lambda _name: (_ for _ in ()).throw(AssertionError("PATH must not be used")),
     )
 
@@ -313,7 +313,7 @@ def test_engine_commands_and_progress_parsing(tmp_path: Path):
 
 def test_n_engine_resolves_bare_ffmpeg_path(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.shutil.which",
+        "app.plugins.lunatvsource.m3u8_engine.shutil.which",
         lambda executable: "/resolved/bin/ffmpeg" if executable == "ffmpeg" else None,
     )
     engine = N_m3u8DLEngine(tmp_path)
@@ -512,15 +512,15 @@ def test_engine_processes_ready_output_before_stall_timeout(
         raise ProcessLookupError(3, "gone")
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.subprocess.Popen",
+        "app.plugins.lunatvsource.m3u8_engine.subprocess.Popen",
         lambda *_args, **_kwargs: process,
     )
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.selectors.DefaultSelector", Selector
+        "app.plugins.lunatvsource.m3u8_engine.selectors.DefaultSelector", Selector
     )
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", killpg)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.os.killpg", killpg)
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.time.monotonic", lambda: clock["value"]
+        "app.plugins.lunatvsource.m3u8_engine.time.monotonic", lambda: clock["value"]
     )
     monkeypatch.setattr(engine, "PROCESS_TOTAL_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(engine, "PROCESS_NO_PROGRESS_TIMEOUT_SECONDS", 1.0)
@@ -597,13 +597,13 @@ def test_engine_processes_due_cache_activity_before_stall_timeout(
     def killpg(*_args):
         raise ProcessLookupError(3, "gone")
 
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.subprocess.Popen", popen)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.subprocess.Popen", popen)
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.selectors.DefaultSelector", Selector
+        "app.plugins.lunatvsource.m3u8_engine.selectors.DefaultSelector", Selector
     )
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", killpg)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.os.killpg", killpg)
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.time.monotonic", lambda: clock["value"]
+        "app.plugins.lunatvsource.m3u8_engine.time.monotonic", lambda: clock["value"]
     )
     monkeypatch.setattr(engine, "PROCESS_TOTAL_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(engine, "PROCESS_NO_PROGRESS_TIMEOUT_SECONDS", 1.0)
@@ -787,9 +787,9 @@ def test_terminate_uses_process_group_even_if_leader_exited(monkeypatch) -> None
             raise ProcessLookupError(3, "disappeared")
 
     process = FakeProcess()
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.monotonic", fake_monotonic)
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.sleep", fake_sleep)
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", fake_killpg)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.time.sleep", fake_sleep)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.os.killpg", fake_killpg)
 
     N_m3u8DLEngine._terminate(process)
 
@@ -845,9 +845,9 @@ def test_terminate_escalates_to_sigkill_when_group_lingers(monkeypatch) -> None:
             raise ProcessLookupError(3, "disappeared")
 
     process = FakeProcess()
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.monotonic", fake_monotonic)
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.time.sleep", fake_sleep)
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.killpg", fake_killpg)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.time.sleep", fake_sleep)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.os.killpg", fake_killpg)
 
     N_m3u8DLEngine._terminate(process)
 
@@ -1032,7 +1032,7 @@ def test_installer_download_cancels_and_removes_partial_archive(
 
     response = Response()
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen",
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen",
         lambda *_args, **_kwargs: response,
     )
 
@@ -1070,11 +1070,11 @@ def test_installer_download_total_deadline_removes_partial_archive(
         return next(clock_values, 2.0)
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen",
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen",
         lambda *_args, **_kwargs: response,
     )
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.time.monotonic", monotonic
+        "app.plugins.lunatvsource.m3u8_engine.time.monotonic", monotonic
     )
     monkeypatch.setattr(installer, "DOWNLOAD_TOTAL_TIMEOUT_SECONDS", 1.0)
 
@@ -1272,10 +1272,10 @@ def test_installer_limits_io_timeout_and_prefers_read1(monkeypatch, tmp_path: Pa
         return response
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.time.monotonic", monotonic
+        "app.plugins.lunatvsource.m3u8_engine.time.monotonic", monotonic
     )
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen", urlopen
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen", urlopen
     )
 
     archive = installer._download_archive(asset)
@@ -1301,7 +1301,7 @@ def test_installer_retries_transient_connection_failures(monkeypatch, tmp_path: 
         return io.BytesIO(b"tool")
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen", urlopen
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen", urlopen
     )
 
     archive = installer._download_archive(asset)
@@ -1323,7 +1323,7 @@ def test_installer_does_not_retry_http_errors(monkeypatch, tmp_path: Path):
         raise urllib.error.HTTPError(asset.url, 404, "not found", None, None)
 
     monkeypatch.setattr(
-        "lunatvsource_test.m3u8_engine.urllib.request.urlopen", urlopen
+        "app.plugins.lunatvsource.m3u8_engine.urllib.request.urlopen", urlopen
     )
 
     with pytest.raises(M3U8EngineInstallError, match="release download failed"):
@@ -1475,7 +1475,7 @@ def test_n_stage_cleanup_fd_resists_parent_symlink_replacement(
         "supports_follow_symlinks",
         os.supports_follow_symlinks | {stat_with_parent_swap},
     )
-    monkeypatch.setattr("lunatvsource_test.m3u8_engine.os.stat", stat_with_parent_swap)
+    monkeypatch.setattr("app.plugins.lunatvsource.m3u8_engine.os.stat", stat_with_parent_swap)
 
     engine._clear_stale_stage_outputs(stage_dir)
 

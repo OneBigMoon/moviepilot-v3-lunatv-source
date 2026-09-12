@@ -95,7 +95,9 @@ class AiTitleNormalizer:
                 "thinking_level": getattr(settings, "LLM_THINKING_LEVEL", None),
             }
         except Exception as exc:
-            return None, f"MoviePilot 智能助手不可用：{exc}"
+            if self.logger:
+                self.logger.warning("读取 MoviePilot 智能助手配置失败：%s", exc)
+            return None, "MoviePilot 智能助手不可用"
         if not str(config.get("api_key") or "").strip():
             return None, "未配置 MoviePilot 智能助手 API Key"
         if not str(config.get("model") or "").strip():
@@ -154,5 +156,5 @@ class AiTitleNormalizer:
         except Exception as exc:  # AI is an enhancement, never a hard dependency.
             if self.logger:
                 self.logger.warning("LunaTV AI 标题识别失败：%s", exc)
-            return normalize_search_title(original), str(exc)
+            return normalize_search_title(original), "MoviePilot 智能助手调用失败"
         return normalize_search_title(original), "ai_empty"

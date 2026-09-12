@@ -4,9 +4,9 @@ import socket
 import time
 
 import pytest
-import lunatvsource_test.cms as cms_module
+import app.plugins.lunatvsource.cms as cms_module
 
-from lunatvsource_test.cms import (
+from app.plugins.lunatvsource.cms import (
     AppleCmsClient,
     CmsSource,
     _fetch_public_url,
@@ -59,7 +59,7 @@ def test_public_probe_url_rejects_private_and_mixed_dns(monkeypatch):
     ) is True
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
         ],
@@ -67,7 +67,7 @@ def test_public_probe_url_rejects_private_and_mixed_dns(monkeypatch):
     assert _is_public_probe_url("https://video.example/media.m3u8") is True
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
@@ -76,7 +76,7 @@ def test_public_probe_url_rejects_private_and_mixed_dns(monkeypatch):
     assert _is_public_probe_url("https://video.example/media.m3u8") is True
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.2.148", 443)),
             (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fdfe:dcba:9876::241", 443, 0, 0)),
@@ -90,7 +90,7 @@ def test_public_probe_url_rejects_private_and_mixed_dns(monkeypatch):
     assert _is_public_probe_url("http://video.example/media.m3u8") is False
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443)),
         ],
@@ -129,12 +129,12 @@ def test_public_fetch_pins_dns_and_rejects_private_redirect(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         ],
     )
-    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.http.client.HTTPConnection", Connection)
 
     with pytest.raises(ValueError, match="non-public"):
         _fetch_public_url("http://video.example/start.m3u8", 3.0, 1024)
@@ -199,12 +199,12 @@ def test_public_fetch_percent_encodes_non_ascii_request_target(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         ],
     )
-    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.http.client.HTTPConnection", Connection)
 
     payload, final_url = _fetch_public_url(
         "http://video.example/第1集/播放.m3u8?token=值&part=1%2F2",
@@ -258,12 +258,12 @@ def test_json_get_rejects_public_redirect_to_private(monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "lunatvsource_test.cms.socket.getaddrinfo",
+        "app.plugins.lunatvsource.cms.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80)),
         ],
     )
-    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.http.client.HTTPConnection", Connection)
 
     with pytest.raises(ValueError, match="non-public"):
         _json_get("http://config.example/config.json", 3.0)
@@ -295,7 +295,7 @@ def test_json_get_allows_explicit_trusted_cidr(monkeypatch):
         def close():
             pass
 
-    monkeypatch.setattr("lunatvsource_test.cms.http.client.HTTPConnection", Connection)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.http.client.HTTPConnection", Connection)
 
     assert _json_get(
         "http://10.0.0.8/config.json",
@@ -350,9 +350,9 @@ def test_probe_media_sample_uses_safe_suffix_for_dotted_parent_path(monkeypatch)
 
 
 def test_probe_stream_height_reads_master_playlist_resolution(monkeypatch):
-    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms._is_public_probe_url", lambda *_args: True)
     monkeypatch.setattr(
-        "lunatvsource_test.cms._probe_media_sample",
+        "app.plugins.lunatvsource.cms._probe_media_sample",
         lambda *_args, **_kwargs: (1080, b"", ""),
     )
     assert probe_stream_height("https://example.test/master.m3u8") == 1080
@@ -368,12 +368,12 @@ def test_probe_stream_height_falls_back_to_first_video_stream(monkeypatch):
         assert not args[-1].startswith(("http://", "https://"))
         return ProcessResult()
 
-    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms._is_public_probe_url", lambda *_args: True)
     monkeypatch.setattr(
-        "lunatvsource_test.cms._probe_media_sample",
+        "app.plugins.lunatvsource.cms._probe_media_sample",
         lambda *_args, **_kwargs: (0, b"segment", ".ts"),
     )
-    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", run)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.subprocess.run", run)
     assert probe_stream_height("https://example.test/media.m3u8") == 480
 
 
@@ -388,12 +388,12 @@ def test_probe_stream_height_decodes_one_frame_when_ffprobe_has_no_dimensions(mo
         calls.append(args)
         return next(results)
 
-    monkeypatch.setattr("lunatvsource_test.cms._is_public_probe_url", lambda *_args: True)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms._is_public_probe_url", lambda *_args: True)
     monkeypatch.setattr(
-        "lunatvsource_test.cms._probe_media_sample",
+        "app.plugins.lunatvsource.cms._probe_media_sample",
         lambda *_args, **_kwargs: (0, b"segment", ".ts"),
     )
-    monkeypatch.setattr("lunatvsource_test.cms.subprocess.run", run)
+    monkeypatch.setattr("app.plugins.lunatvsource.cms.subprocess.run", run)
 
     assert probe_stream_height("https://example.test/media.m3u8") == 720
     assert len(calls) == 2
@@ -2512,6 +2512,33 @@ def test_search_parallel_returns_completed_sources_within_total_budget():
         # Let the still-running worker finish so the test process does not
         # retain a deliberately slow task.
         release_slow.set()
+
+
+def test_search_parallel_budget_applies_to_a_single_source():
+    from threading import Event
+
+    source = CmsSource(key="slow", name="慢源", api="https://slow.example/vod")
+    client = AppleCmsClient([source])
+    started = Event()
+    release = Event()
+
+    def fake_search_source(source, **_params):
+        started.set()
+        release.wait(1)
+        return []
+
+    client._search_source = fake_search_source
+    started_at = time.monotonic()
+    try:
+        assert client.search(
+            "demo",
+            max_workers=8,
+            parallel_wait_timeout=0.2,
+        ) == []
+        assert started.is_set()
+        assert time.monotonic() - started_at < 0.5
+    finally:
+        release.set()
 
 
 def test_search_progress_reports_parallel_completion_before_total_budget():

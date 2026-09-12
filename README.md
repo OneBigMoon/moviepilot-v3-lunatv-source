@@ -15,7 +15,7 @@
 - 下载队列默认同时运行 2 个任务，每个任务使用 16 个分片线程；任务数可配置范围为 1–4，分片线程可配置范围为 4–32，二者乘积会限制在 64 以内。同一目标文件始终串行，避免不同来源争用同一个 `.part` 或成品文件。
 - 支持 m3u8/HTTP 资源下载到指定目录，或生成 `.strm`；HLS 去广告仅在“下载到本地并整理”模式执行，STRM 保留原始播放直链。
 - 默认调用 MoviePilot 原生整理链；插件只在宿主链不可用时保留直写结果，完成记录统一回到 MoviePilot 原生历史。
-- 需要兼容绿联季号显示时，建议打开“生成 NFO 元数据”；绿联优先读取媒体目录内的 NFO，已有错误条目仍需在绿联中刷新或重新识别。
+- 绿联兼容默认开启“生成 NFO 元数据”：本地下载并由 MoviePilot 原生整理后，会在最终媒体库目录生成 `tvshow.nfo`、`season.nfo` 和单集同名 NFO；STRM 模式不会生成这些文件。绿联媒体库需开启“优先读取本地信息”和“自动添加到合集”。已有错误条目不会自动迁移，应先让 MoviePilot 覆盖旧 NFO（必要时备份后删除旧的 `tvshow.nfo`、`season.nfo` 和单集 NFO），再在绿联中执行“完整覆盖”或手动重新识别。
 - 下载完成后沿用 MoviePilot 已启用媒体服务器设置触发媒体库刷新；播放不放在插件页，仍由既有媒体服务器页面负责。
 - 原生下载管理会投影插件任务的季集、可用时的 VOD 进度、暂停/继续和删除操作；暂停或删除运行中任务会先安全终止当前下载进程，不把虚拟任务转发给 qBittorrent。
 - 原生整季删除默认只移除任务并保留已完成文件；只有 MoviePilot 明确传入“删除文件”选项时才清理下载目录内对应文件。
@@ -25,17 +25,19 @@
 - 自动复用 MoviePilot“智能助手配置”（DeepSeek 等 OpenAI 兼容模型）清理片名后再搜索；未配置或调用失败自动回退原名称。
 - 搜索结果自动调用 MoviePilot 原生识别链关联 TMDB；TMDB 能提供完整季集数时，会帮助拆分平铺的多季合集。
 - 搜索结果会显示默认 TMDB 关联；同名或多季作品可重新搜索候选并手动切换，所选作品的季集数会参与安全拆分。
-- 插件设置只保留一个下载目录，默认 `/downloads/未整理`；LunaTV 的 m3u8 下载统一优先写入该暂存目录。
+- 插件只提供一个可选的下载目录覆盖，默认留空；留空时依次复用订阅保存目录和 MoviePilot 的本地目录设置，不假设宿主存在某个固定路径。
 - 任务通知通过 MoviePilot 插件消息能力发送；MoviePilot 的媒体库扫描可以继续接管已完成文件。
 
 ## 目录与命名
 
-下载目录默认使用 `/downloads/未整理`。该路径必须在 MoviePilot 容器内存在且可写；下载完成后继续交给 MoviePilot 原生整理链，媒体库目录和整理规则无需在插件中重复配置。
+下载目录默认留空，由 MoviePilot 的订阅保存目录或本地目录设置决定；只有填写插件目录覆盖时，才要求该路径在 MoviePilot 容器内存在且可写。下载完成后继续交给 MoviePilot 原生整理链，媒体库目录和整理规则无需在插件中重复配置。
 
 ```text
 电影名 (年份)/电影名 (年份).mp4
 剧名 (年份)/Season 01/剧名 (年份) - S01E01.mp4
 ```
+
+绿联按 NFO 的季集字段和视频系列元数据建立合集，文件名只是兜底识别依据。下载到本地时请保持“下载后调用 MoviePilot 整理链”和“生成 NFO 元数据”开启；媒体库监听目录不要在视频刚落地、NFO 尚未写完时抢先扫描，否则绿联官方提示可能产生重复条目。
 
 下载先写入 `.part`，成功后再改为正式文件名，避免媒体库扫描到半成品。目录内没有正在下载的缓存文件时，媒体库才会显示完整文件夹；MoviePilot/Emby 的自动监控建议在确认前暂时关闭。
 
@@ -57,12 +59,21 @@ https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json
 
 插件工作台只负责诊断、排队和状态，不内置 m3u8 播放器。你已有 Emby 时，只需按 MoviePilot 原生媒体服务器设置完成映射，插件会沿用已启用的媒体服务器并自动请求同步。第三方组件及其版权仍归各自权利人所有，使用时请遵循其许可证；详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
+## MoviePilot V3 兼容边界
+
+- 目录、智能助手、TMDB 关联、媒体识别、整理规则和链接权限以 MoviePilot 全局设置为准；插件不再提供会覆盖宿主行为的重复开关。旧版本留下的 `use_moviepilot_dirs`、`ai_enabled`、`tmdb_association`、`native_recognize` 只为读取历史配置保留，重新保存后不会继续写入。
+- 插件为兼容较早 V3 宿主保留了可恢复的搜索/下载桥接，并在 `stop_service()` 中清理；这类进程级桥接无法安全区分同一宿主内的多个虚拟分身，因此当前不建议为本插件创建多个虚拟实例。
+- 想开发或打包插件时，先阅读插件目录内的 [V3 README](plugins.v3/lunatvsource/README.md)；测试位于官方约定的 `tests/v3/lunatvsource/`，发布前还会检查 Vue 联邦 CSS 不污染宿主页面，并验证 `dist` 与发布清单一致。
+- [实机端到端验收记录](LIVE_E2E_ACCEPTANCE.md) 是 `v0.4.62` 的历史失败记录；发布新版本前必须在目标 MoviePilot V3 宿主重新执行加载、保存、搜索、下载、停用和媒体库可见性验证。
+
 ## 开发检查
 
 ```bash
-python3 -m pytest tests
+python3 -m pytest tests/v3/lunatvsource
 python3 -m compileall plugins.v3/lunatvsource
-cd plugins.v3/lunatvsource && npm ci && npm run build
+npm --prefix plugins.v3/lunatvsource ci
+npm --prefix plugins.v3/lunatvsource run build
+python3 .github/scripts/check_federation_css.py
 git diff --check
 ```
 

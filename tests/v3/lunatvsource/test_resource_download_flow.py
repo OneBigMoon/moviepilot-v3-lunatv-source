@@ -1,8 +1,8 @@
 from pathlib import Path
 
-import lunatvsource_test as plugin_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import CmsSource, _result_from_item
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import CmsSource, _result_from_item
 
 
 class FakeTorrentInfo:

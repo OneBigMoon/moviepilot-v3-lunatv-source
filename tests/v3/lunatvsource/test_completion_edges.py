@@ -2,10 +2,10 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-import lunatvsource_test as plugin_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import CmsSource, _result_from_item
-from lunatvsource_test.downloader import DownloadQueue, DownloadTask
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import CmsSource, _result_from_item
+from app.plugins.lunatvsource.downloader import DownloadQueue, DownloadTask
 
 
 def test_api_search_collapses_tv_episode_rows_into_season_result(monkeypatch):

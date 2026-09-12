@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -10,10 +10,11 @@ const props = defineProps({
 const emit = defineEmits(['save', 'close'])
 const saving = ref(false)
 const message = reactive({ text: '', type: 'info' })
+let messageTimer = null
 const defaults = {
   enabled: false,
   debug_mode: false,
-  generate_nfo: false,
+  generate_nfo: true,
   config_url: 'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/LunaTV-config.json',
   source_allowlist: '',
   probe_allowed_private_ranges: '',
@@ -22,15 +23,11 @@ const defaults = {
   source_strategy: 'first',
   download_root: '',
   download_proxy: '',
-  use_moviepilot_dirs: true,
   ffmpeg_path: 'ffmpeg',
   poll_minutes: 30,
   queue_minutes: 1,
   request_timeout: 15,
-  ai_enabled: true,
-  tmdb_association: true,
   moviepilot_organize: true,
-  native_recognize: true,
   mediaserver_name: '',
   max_concurrent_tasks: 2,
   segment_thread_count: 16,
@@ -41,6 +38,16 @@ const modeItems = [
   { title: '生成 STRM（原始直链，不去广告）', value: 'strm' },
 ]
 const config = reactive({ ...defaults })
+
+function normalizeBoolean(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true
+  }
+  return Boolean(value)
+}
 
 function validateIntegerRange(value, label, min, max) {
   const number = Number(value)
@@ -80,9 +87,21 @@ function validateProxy(value) {
 }
 
 function showMessage(text, type = 'info') {
+  if (messageTimer !== null) clearTimeout(messageTimer)
   message.text = text
   message.type = type
-  if (text) setTimeout(() => { if (message.text === text) message.text = '' }, 3500)
+  messageTimer = text
+    ? setTimeout(() => {
+      if (message.text === text) message.text = ''
+      messageTimer = null
+    }, 3500)
+    : null
+}
+
+function unwrapApiResponse(response) {
+  if (response?.success !== undefined) return response
+  if (response?.data?.success !== undefined) return response.data
+  return response
 }
 
 async function saveConfig() {
@@ -105,13 +124,20 @@ async function saveConfig() {
   try {
     const mode = config.mode === 'strm' ? 'strm' : 'download'
     const payload = {
-      ...config,
+      enabled: Boolean(config.enabled),
+      debug_mode: Boolean(config.debug_mode),
+      generate_nfo: Boolean(config.generate_nfo),
+      config_url: String(config.config_url || '').trim() || defaults.config_url,
       source_allowlist: String(config.source_allowlist || '').trim(),
       probe_allowed_private_ranges: String(config.probe_allowed_private_ranges || '').trim(),
       hls_ad_filter_regex: String(config.hls_ad_filter_regex || '').trim(),
+      mode,
+      source_strategy: config.source_strategy === 'all' ? 'all' : 'first',
       download_root: String(config.download_root || '').trim(),
       download_proxy: String(config.download_proxy || '').trim(),
-      mode,
+      ffmpeg_path: String(config.ffmpeg_path || '').trim() || 'ffmpeg',
+      moviepilot_organize: Boolean(config.moviepilot_organize),
+      mediaserver_name: String(config.mediaserver_name || '').trim(),
       poll_minutes: Number(config.poll_minutes),
       queue_minutes: Number(config.queue_minutes),
       request_timeout: Number(config.request_timeout),
@@ -119,8 +145,12 @@ async function saveConfig() {
       segment_thread_count: Number(config.segment_thread_count),
       source_check_minutes: Number(config.source_check_minutes),
     }
-    const response = await props.api.put(`plugin/${props.pluginId || 'LunaTVSource'}`, payload)
-    const result = response?.data ?? response
+    const response = await props.api.put(
+      `plugin/${props.pluginId || 'LunaTVSource'}`,
+      payload,
+      { feedback: 'silent' },
+    )
+    const result = unwrapApiResponse(response)
     if (result?.success === false) throw new Error(result.message || '保存配置失败')
     emit('save', payload)
     showMessage('配置已保存', 'success')
@@ -133,7 +163,24 @@ async function saveConfig() {
 
 onMounted(() => {
   Object.assign(config, defaults, props.initialConfig || {})
+  for (const [key, fallback] of [
+    ['enabled', false],
+    ['debug_mode', false],
+    ['generate_nfo', true],
+    ['moviepilot_organize', true],
+  ]) {
+    config[key] = normalizeBoolean(config[key], fallback)
+  }
+  config.config_url = String(config.config_url || '').trim() || defaults.config_url
+  config.source_strategy = config.source_strategy === 'all' ? 'all' : 'first'
+  config.ffmpeg_path = String(config.ffmpeg_path || '').trim() || 'ffmpeg'
+  config.mediaserver_name = String(config.mediaserver_name || '').trim()
   config.mode = config.mode === 'strm' ? 'strm' : 'download'
+})
+
+onBeforeUnmount(() => {
+  if (messageTimer !== null) clearTimeout(messageTimer)
+  messageTimer = null
 })
 </script>
 
@@ -148,8 +195,8 @@ onMounted(() => {
     </VToolbar>
     <VDivider class="mb-4" />
     <VAlert v-if="message.text" :type="message.type" variant="tonal" density="compact" class="mb-4">{{ message.text }}</VAlert>
-  <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      保存后，LunaTV/苹果 CMS 将接入 MoviePilot 的原生搜索、订阅与下载入口。要去广告请选择“下载到本地并整理”；STRM 是原始直链，不经过 HLS 分片过滤。
+    <VAlert type="info" variant="tonal" density="compact" class="mb-4">
+      保存后，LunaTV/苹果 CMS 将接入 MoviePilot 的原生搜索、订阅与下载入口。绿联需要季集信息时请选择“下载到本地并整理”，并保持 NFO 与原生整理开启。
     </VAlert>
     <VRow dense>
       <VCol cols="12"><VSwitch v-model="config.enabled" label="启用原生桥接" color="success" hide-details /></VCol>
@@ -166,17 +213,41 @@ onMounted(() => {
         <VSwitch
           v-model="config.generate_nfo"
           label="生成 NFO 元数据"
-          hint="建议开启：绿联优先读取本地 NFO；开启后，下载完成并由 MoviePilot 原生整理时生成 NFO。"
+          hint="绿联兼容建议开启；原生整理会生成 tvshow.nfo、season.nfo 和单集同名 NFO。"
           persistent-hint
           color="success"
         />
+      </VCol>
+      <VCol cols="12">
+        <VSwitch
+          v-model="config.moviepilot_organize"
+          label="下载后调用 MoviePilot 整理链"
+          hint="绿联兼容必须开启；NFO 会写入最终媒体库目录。"
+          persistent-hint
+          color="success"
+        />
+      </VCol>
+      <VCol v-if="config.mode === 'strm'" cols="12">
+        <VAlert type="warning" variant="tonal" density="compact">
+          STRM 只保存原始直链，不经过原生整理，也不会生成 NFO；需要绿联正确显示季集时请选择本地下载并整理。
+        </VAlert>
+      </VCol>
+      <VCol v-else-if="config.generate_nfo && !config.moviepilot_organize" cols="12">
+        <VAlert type="warning" variant="tonal" density="compact">
+          当前关闭了原生整理，NFO 不会写入最终媒体库；绿联可能无法显示季号。
+        </VAlert>
+      </VCol>
+      <VCol v-else-if="!config.generate_nfo" cols="12">
+        <VAlert type="warning" variant="tonal" density="compact">
+          当前关闭了 NFO 生成；绿联可能无法显示季号。打开后，新下载会生成季集元数据；已有错误条目需先让 MoviePilot 覆盖旧 NFO，再在绿联完整覆盖或重新识别。
+        </VAlert>
       </VCol>
       <VCol cols="12">
         <VSelect
           v-model="config.mode"
           :items="modeItems"
           label="处理方式"
-          hint="只有本地下载模式会执行 HLS 广告分片过滤并生成 MP4。"
+          hint="本地下载模式会执行 HLS 广告分片过滤并由原生整理生成 NFO；STRM 保留原始直链。"
           persistent-hint
           variant="outlined"
         />
@@ -188,6 +259,19 @@ onMounted(() => {
           label="启用资源站（可选）"
           placeholder="留空允许配置中的全部来源"
           hint="填写来源 key，使用逗号分隔。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VSelect
+          v-model="config.source_strategy"
+          :items="[
+            { title: '按配置顺序选一个（推荐）', value: 'first' },
+            { title: '所有匹配源都排队', value: 'all' },
+          ]"
+          label="订阅资源站策略"
+          hint="默认每集选择一个可用来源；需要多源备份时才选择全部排队。"
           persistent-hint
           variant="outlined"
         />
@@ -228,6 +312,16 @@ onMounted(() => {
           label="下载代理（可选）"
           placeholder="http://192.168.1.2:7890 或 socks5://192.168.1.2:7890"
           hint="仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
+      <VCol cols="12">
+        <VTextField
+          v-model="config.ffmpeg_path"
+          label="ffmpeg 路径"
+          placeholder="ffmpeg"
+          hint="通常保持默认值；只有容器内的 ffmpeg 不在 PATH 时才填写绝对路径。"
           persistent-hint
           variant="outlined"
         />
@@ -310,9 +404,19 @@ onMounted(() => {
           variant="outlined"
         />
       </VCol>
+      <VCol cols="12">
+        <VTextField
+          v-model="config.mediaserver_name"
+          label="完成后刷新媒体服务器（可选）"
+          placeholder="留空刷新所有已启用服务器，例如 Emby"
+          hint="仅控制下载完成后的同步目标，播放仍在 Emby/Jellyfin 页面完成。"
+          persistent-hint
+          variant="outlined"
+        />
+      </VCol>
     </VRow>
     <VAlert type="warning" variant="tonal" density="compact" class="mt-3">
-      目录、DeepSeek、TMDB、整理规则、媒体服务器和链接权限均沿用 MoviePilot 设置；订阅地址内的资源站全部读取。默认 2 个任务、每任务 16 个分片线程，总分片并发限制为 64；遇到 429、超时或磁盘繁忙时请调低。
+      DeepSeek、TMDB、整理规则和链接权限沿用 MoviePilot 全局设置；下载目录留空时复用宿主目录。默认 2 个任务、每任务 16 个分片线程，总分片并发限制为 64；遇到 429、超时或磁盘繁忙时请调低。
     </VAlert>
     <div class="d-flex justify-end mt-4"><VBtn color="primary" :loading="saving" @click="saveConfig">保存配置</VBtn></div>
   </div>

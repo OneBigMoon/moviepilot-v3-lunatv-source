@@ -1,6 +1,6 @@
-import lunatvsource_test as plugin_module
-from lunatvsource_test import LunaTVSource
-from lunatvsource_test.cms import CmsEpisode, CmsResult
+import app.plugins.lunatvsource as plugin_module
+from app.plugins.lunatvsource import LunaTVSource
+from app.plugins.lunatvsource.cms import CmsEpisode, CmsResult
 
 
 def test_tv_native_projection_keeps_quality_out_of_card_title_and_description(monkeypatch):

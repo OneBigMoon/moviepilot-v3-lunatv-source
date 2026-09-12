@@ -11,7 +11,7 @@ const _export_sfc = (sfc, props) => {
 const {createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,normalizeClass:_normalizeClass,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createTextVNode:_createTextVNode,Fragment:_Fragment,vModelText:_vModelText,withDirectives:_withDirectives,renderList:_renderList,normalizeStyle:_normalizeStyle,createStaticVNode:_createStaticVNode} = await importShared('vue');
 
 
-const _hoisted_1 = { class: "lunatv-page" };
+const _hoisted_1 = ["data-host-theme"];
 const _hoisted_2 = { class: "lunatv-header" };
 const _hoisted_3 = { class: "header-status" };
 const _hoisted_4 = { class: "chip" };
@@ -60,130 +60,129 @@ const _hoisted_24 = { class: "overview-card overview-card-wide" };
 const _hoisted_25 = { class: "overview-card-heading" };
 const _hoisted_26 = { class: "overview-status" };
 const _hoisted_27 = ["title"];
-const _hoisted_28 = { class: "overview-card-meta" };
-const _hoisted_29 = { class: "overview-card" };
-const _hoisted_30 = { class: "overview-card-heading" };
-const _hoisted_31 = { class: "overview-status" };
-const _hoisted_32 = { class: "overview-card-meta" };
-const _hoisted_33 = {
+const _hoisted_28 = { class: "overview-card" };
+const _hoisted_29 = { class: "overview-card-heading" };
+const _hoisted_30 = { class: "overview-status" };
+const _hoisted_31 = { class: "overview-card-meta" };
+const _hoisted_32 = {
   key: 2,
   id: "ad-filter-panel",
   class: "panel ad-filter-panel",
   role: "tabpanel",
   "aria-labelledby": "ad-filter-tab"
 };
-const _hoisted_34 = { class: "ad-page-heading" };
-const _hoisted_35 = { id: "ad-filter-title" };
-const _hoisted_36 = { class: "ad-page-actions" };
-const _hoisted_37 = {
+const _hoisted_33 = { class: "ad-page-heading" };
+const _hoisted_34 = { id: "ad-filter-title" };
+const _hoisted_35 = { class: "ad-page-actions" };
+const _hoisted_36 = {
   class: "debug-switch",
   title: "只控制 DEBUG 日志输出，不改变广告拦截规则"
 };
-const _hoisted_38 = ["checked", "disabled"];
-const _hoisted_39 = ["disabled"];
-const _hoisted_40 = {
+const _hoisted_37 = ["checked", "disabled"];
+const _hoisted_38 = ["disabled"];
+const _hoisted_39 = {
   key: 0,
   class: "alert warning"
 };
-const _hoisted_41 = { class: "monitor-state-copy" };
-const _hoisted_42 = { class: "monitor-state-meta" };
-const _hoisted_43 = { class: "ad-metrics" };
-const _hoisted_44 = { class: "ad-metric" };
-const _hoisted_45 = { class: "ad-metric is-blocked" };
+const _hoisted_40 = { class: "monitor-state-copy" };
+const _hoisted_41 = { class: "monitor-state-meta" };
+const _hoisted_42 = { class: "ad-metrics" };
+const _hoisted_43 = { class: "ad-metric" };
+const _hoisted_44 = { class: "ad-metric is-blocked" };
+const _hoisted_45 = { class: "ad-metric" };
 const _hoisted_46 = { class: "ad-metric" };
-const _hoisted_47 = { class: "ad-metric" };
-const _hoisted_48 = { class: "ad-log-section" };
-const _hoisted_49 = { class: "ad-log-heading" };
-const _hoisted_50 = { class: "ad-log-controls" };
-const _hoisted_51 = {
+const _hoisted_47 = { class: "ad-log-section" };
+const _hoisted_48 = { class: "ad-log-heading" };
+const _hoisted_49 = { class: "ad-log-controls" };
+const _hoisted_50 = {
   class: "ad-filter-segments",
   role: "group",
   "aria-label": "筛选扫描日志"
 };
-const _hoisted_52 = {
+const _hoisted_51 = {
   key: 0,
   class: "empty"
 };
-const _hoisted_53 = {
+const _hoisted_52 = {
   key: 1,
   class: "empty ad-empty-state"
 };
-const _hoisted_54 = {
+const _hoisted_53 = {
   key: 2,
   class: "empty ad-empty-state"
 };
-const _hoisted_55 = {
+const _hoisted_54 = {
   key: 3,
   class: "ad-event-list"
 };
-const _hoisted_56 = ["aria-expanded", "onClick"];
-const _hoisted_57 = { class: "ad-event-main" };
-const _hoisted_58 = { class: "ad-event-title" };
-const _hoisted_59 = {
+const _hoisted_55 = ["aria-expanded", "onClick"];
+const _hoisted_56 = { class: "ad-event-main" };
+const _hoisted_57 = { class: "ad-event-title" };
+const _hoisted_58 = {
   key: 0,
   class: "muted"
 };
-const _hoisted_60 = { class: "ad-event-meta" };
-const _hoisted_61 = { class: "ad-event-detail" };
-const _hoisted_62 = {
+const _hoisted_59 = { class: "ad-event-meta" };
+const _hoisted_60 = { class: "ad-event-detail" };
+const _hoisted_61 = {
   class: "ad-event-chevron",
   "aria-hidden": "true"
 };
-const _hoisted_63 = {
+const _hoisted_62 = {
   key: 0,
   class: "ad-event-expanded"
 };
-const _hoisted_64 = { class: "ad-breakdown" };
-const _hoisted_65 = {
+const _hoisted_63 = { class: "ad-breakdown" };
+const _hoisted_64 = {
   key: 3,
   id: "sources-panel",
   class: "panel source-panel",
   role: "tabpanel",
   "aria-labelledby": "sources-tab"
 };
-const _hoisted_66 = { class: "section-heading source-panel-heading" };
-const _hoisted_67 = { class: "section-title" };
-const _hoisted_68 = { class: "muted" };
-const _hoisted_69 = {
+const _hoisted_65 = { class: "section-heading source-panel-heading" };
+const _hoisted_66 = { class: "section-title" };
+const _hoisted_67 = { class: "muted" };
+const _hoisted_68 = {
   class: "source-health-summary",
   "aria-label": "来源状态汇总"
 };
-const _hoisted_70 = { class: "summary-item is-good" };
-const _hoisted_71 = { class: "summary-item is-warning" };
-const _hoisted_72 = { class: "summary-item" };
-const _hoisted_73 = { class: "health-progress-block" };
-const _hoisted_74 = { class: "health-progress-heading" };
-const _hoisted_75 = { class: "health-progress-title" };
-const _hoisted_76 = { class: "health-progress-count" };
-const _hoisted_77 = ["aria-label", "aria-valuenow"];
-const _hoisted_78 = {
+const _hoisted_69 = { class: "summary-item is-good" };
+const _hoisted_70 = { class: "summary-item is-warning" };
+const _hoisted_71 = { class: "summary-item" };
+const _hoisted_72 = { class: "health-progress-block" };
+const _hoisted_73 = { class: "health-progress-heading" };
+const _hoisted_74 = { class: "health-progress-title" };
+const _hoisted_75 = { class: "health-progress-count" };
+const _hoisted_76 = ["aria-label", "aria-valuenow"];
+const _hoisted_77 = {
   key: 1,
   class: "empty"
 };
-const _hoisted_79 = {
+const _hoisted_78 = {
   key: 2,
   class: "empty"
 };
-const _hoisted_80 = {
+const _hoisted_79 = {
   key: 3,
   class: "source-table-wrap"
 };
-const _hoisted_81 = { class: "source-table" };
-const _hoisted_82 = { class: "health-status" };
-const _hoisted_83 = { class: "network-metrics" };
-const _hoisted_84 = ["title"];
-const _hoisted_85 = { class: "source-identity" };
-const _hoisted_86 = { class: "source-name" };
-const _hoisted_87 = { class: "source-key" };
-const _hoisted_88 = ["href"];
-const _hoisted_89 = {
+const _hoisted_80 = { class: "source-table" };
+const _hoisted_81 = { class: "health-status" };
+const _hoisted_82 = { class: "network-metrics" };
+const _hoisted_83 = ["title"];
+const _hoisted_84 = { class: "source-identity" };
+const _hoisted_85 = { class: "source-name" };
+const _hoisted_86 = { class: "source-key" };
+const _hoisted_87 = ["href"];
+const _hoisted_88 = {
   key: 1,
   class: "muted"
 };
-const _hoisted_90 = { class: "source-actions" };
-const _hoisted_91 = ["value", "disabled", "aria-label", "onChange"];
-const _hoisted_92 = ["disabled", "aria-label", "onClick"];
-const _hoisted_93 = {
+const _hoisted_89 = { class: "source-actions" };
+const _hoisted_90 = ["value", "disabled", "aria-label", "onChange"];
+const _hoisted_91 = ["disabled", "aria-label", "onClick"];
+const _hoisted_92 = {
   key: 4,
   class: "panel help-panel"
 };
@@ -221,19 +220,35 @@ const adEventQuery = ref('');
 const expandedAdEventKey = ref('');
 const clearConfirming = ref(false);
 const busySourceKeys = ref(new Set());
+const hostTheme = ref('');
 let healthPollTimer = null;
 let healthPollDeadline = 0;
 let adFilterPollTimer = null;
 let clearConfirmTimer = null;
-const apiCall = (method, path, payload) => {
-  if (typeof props.api?.[method] === 'function') return props.api[method](`plugin/${props.pluginId}${path}`, payload)
-  return Promise.reject(new Error('MoviePilot API 客户端未注入'))
+let themeObserver = null;
+let componentUnmounted = false;
+const apiCall = (method, path, payload, options) => {
+  if (typeof props.api?.[method] !== 'function') {
+    return Promise.reject(new Error('MoviePilot API 客户端未注入'))
+  }
+  const request = props.api[method];
+  const url = `plugin/${props.pluginId}${path}`;
+  if (payload === undefined && options !== undefined) return request(url, options)
+  if (options !== undefined) return request(url, payload, options)
+  if (payload !== undefined) return request(url, payload)
+  return request(url)
 };
 
 function unwrap(response) {
-  const body = response?.data ?? response;
+  // V3 returns the endpoint payload directly. Keep a narrow fallback for
+  // older hosts that still wrap it in an Axios-like { data } object.
+  const body = response?.success !== undefined
+    ? response
+    : response?.data?.success !== undefined
+      ? response.data
+      : response;
   if (body?.success === false) throw new Error(body.message || '请求失败')
-  return body?.data ?? body ?? {}
+  return body?.success === true ? (body.data ?? {}) : (body ?? {})
 }
 
 async function load(options = {}) {
@@ -243,9 +258,10 @@ async function load(options = {}) {
     error.value = '';
   }
   try {
+    const requestOptions = silent ? { feedback: 'silent' } : undefined;
     const [statusResponse, sourceResponse] = await Promise.all([
-      apiCall('get', '/status'),
-      apiCall('get', '/sources'),
+      apiCall('get', '/status', undefined, requestOptions),
+      apiCall('get', '/sources', undefined, requestOptions),
     ]);
     status.value = unwrap(statusResponse);
     sources.value = unwrap(sourceResponse) || [];
@@ -264,7 +280,12 @@ async function loadAdFilter(options = {}) {
     adFilterError.value = '';
   }
   try {
-    adFilter.value = unwrap(await apiCall('get', '/ad-filter'));
+    adFilter.value = unwrap(await apiCall(
+      'get',
+      '/ad-filter',
+      undefined,
+      silent ? { feedback: 'silent' } : undefined,
+    ));
   } catch (loadError) {
     adFilterError.value = loadError?.message || '读取广告拦截调试记录失败';
   } finally {
@@ -273,10 +294,11 @@ async function loadAdFilter(options = {}) {
 }
 
 function scheduleAdFilterPoll() {
+  if (componentUnmounted) return
   if (adFilterPollTimer) clearTimeout(adFilterPollTimer);
   adFilterPollTimer = setTimeout(async () => {
     await loadAdFilter({ silent: true });
-    scheduleAdFilterPoll();
+    if (!componentUnmounted) scheduleAdFilterPoll();
   }, AD_FILTER_POLL_INTERVAL_MS);
 }
 
@@ -285,7 +307,7 @@ async function setDebugMode(enabled) {
   debugModeBusy.value = true;
   adFilterError.value = '';
   try {
-    unwrap(await apiCall('post', '/debug', { enabled }));
+    unwrap(await apiCall('post', '/debug', { enabled }, { feedback: 'silent' }));
     await loadAdFilter({ silent: true });
     status.value = { ...status.value, debug_mode: Boolean(enabled) };
   } catch (requestError) {
@@ -298,7 +320,7 @@ async function setDebugMode(enabled) {
 async function clearAdFilterEvents() {
   if (!adEvents.value.length) return
   try {
-    unwrap(await apiCall('post', '/ad-filter/clear'));
+    unwrap(await apiCall('post', '/ad-filter/clear', undefined, { feedback: 'silent' }));
     await loadAdFilter({ silent: true });
     expandedAdEventKey.value = '';
   } catch (requestError) {
@@ -332,8 +354,8 @@ function cancelClearAdFilterEvents() {
 
 async function loadHealthStatus() {
   const [statusResponse, sourceResponse] = await Promise.all([
-    apiCall('get', '/status'),
-    apiCall('get', '/sources'),
+    apiCall('get', '/status', undefined, { feedback: 'silent' }),
+    apiCall('get', '/sources', undefined, { feedback: 'silent' }),
   ]);
   status.value = unwrap(statusResponse);
   sources.value = unwrap(sourceResponse) || [];
@@ -346,6 +368,7 @@ function clearHealthPoll() {
 }
 
 function scheduleHealthPoll() {
+  if (componentUnmounted) return
   if (Date.now() >= healthPollDeadline) {
     error.value = '健康检查仍在后台运行，请稍后点击“立即刷新”查看结果';
     clearHealthPoll();
@@ -356,10 +379,12 @@ function scheduleHealthPoll() {
     try {
       await loadHealthStatus();
     } catch (pollError) {
+      if (componentUnmounted) return
       error.value = pollError?.message || '刷新健康检查状态失败';
       clearHealthPoll();
       return
     }
+    if (componentUnmounted) return
     if (sourceHealth.value.running) scheduleHealthPoll();
     else {
       await load({ silent: true });
@@ -379,7 +404,12 @@ async function setSourceEnabled(source, enabled) {
   busySourceKeys.value = nextBusyKeys;
   error.value = '';
   try {
-    const result = unwrap(await apiCall('post', '/sources/state', { source_key: source.key, enabled }));
+    const result = unwrap(await apiCall(
+      'post',
+      '/sources/state',
+      { source_key: source.key, enabled },
+      { feedback: 'silent' },
+    ));
     await load({ silent: true });
     if (enabled && result?.check_started && sourceHealth.value.running) {
       healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
@@ -406,7 +436,12 @@ async function recheckSource(source) {
   busySourceKeys.value = nextBusyKeys;
   error.value = '';
   try {
-    unwrap(await apiCall('post', '/sources/refresh', { source_key: source.key }));
+    unwrap(await apiCall(
+      'post',
+      '/sources/refresh',
+      { source_key: source.key },
+      { feedback: 'silent' },
+    ));
     await load({ silent: true });
     if (sourceHealth.value.running) {
       healthPollDeadline = Date.now() + HEALTH_POLL_TIMEOUT_MS;
@@ -575,18 +610,38 @@ function formattedSeconds(value) {
   return `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`
 }
 
+function syncHostTheme() {
+  if (typeof document === 'undefined') return
+  hostTheme.value = document.documentElement?.dataset?.theme || '';
+}
+
 onMounted(load);
 onMounted(scheduleAdFilterPoll);
+onMounted(() => {
+  syncHostTheme();
+  if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return
+  themeObserver = new MutationObserver(syncHostTheme);
+  themeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-theme'],
+  });
+});
 onBeforeUnmount(() => {
+  componentUnmounted = true;
   clearHealthPoll();
   if (adFilterPollTimer) clearTimeout(adFilterPollTimer);
   adFilterPollTimer = null;
   if (clearConfirmTimer) clearTimeout(clearConfirmTimer);
   clearConfirmTimer = null;
+  themeObserver?.disconnect();
+  themeObserver = null;
 });
 
 return (_ctx, _cache) => {
-  return (_openBlock(), _createElementBlock("div", _hoisted_1, [
+  return (_openBlock(), _createElementBlock("div", {
+    class: "lunatv-page",
+    "data-host-theme": hostTheme.value
+  }, [
     _createElementVNode("div", _hoisted_2, [
       _cache[7] || (_cache[7] = _createElementVNode("div", null, [
         _createElementVNode("div", { class: "lunatv-eyebrow" }, "THIRD-PARTY CMS / M3U8"),
@@ -698,46 +753,46 @@ return (_ctx, _cache) => {
                 class: "overview-path",
                 title: directoryStatus.value.configured_root || directoryStatus.value.auto_roots?.[0]?.download_path || '未配置'
               }, _toDisplayString(directoryStatus.value.configured_root || directoryStatus.value.auto_roots?.[0]?.download_path || '未配置'), 9, _hoisted_27),
-              _createElementVNode("span", _hoisted_28, "完成后整理 · TMDB " + _toDisplayString(status.value.tmdb_association ? '自动关联' : '未启用'), 1)
+              _cache[15] || (_cache[15] = _createElementVNode("span", { class: "overview-card-meta" }, "完成后整理 · TMDB 由 MoviePilot 原生链关联", -1))
             ]),
-            _createElementVNode("article", _hoisted_29, [
-              _createElementVNode("div", _hoisted_30, [
-                _cache[15] || (_cache[15] = _createElementVNode("span", { class: "overview-label" }, "自动追更", -1)),
-                _createElementVNode("span", _hoisted_31, "每 " + _toDisplayString(subscriptionStatus.value.refresh_minutes || 30) + " 分钟", 1)
+            _createElementVNode("article", _hoisted_28, [
+              _createElementVNode("div", _hoisted_29, [
+                _cache[16] || (_cache[16] = _createElementVNode("span", { class: "overview-label" }, "自动追更", -1)),
+                _createElementVNode("span", _hoisted_30, "每 " + _toDisplayString(subscriptionStatus.value.refresh_minutes || 30) + " 分钟", 1)
               ]),
               _createElementVNode("strong", null, _toDisplayString(followupSummary(subscriptionRefreshStatus.value)), 1),
-              _createElementVNode("span", _hoisted_32, "媒体库同步：" + _toDisplayString(followupSummary(mediaSyncStatus.value)), 1)
+              _createElementVNode("span", _hoisted_31, "媒体库同步：" + _toDisplayString(followupSummary(mediaSyncStatus.value)), 1)
             ])
           ])
         ], 64))
-      : (_openBlock(), _createElementBlock("section", _hoisted_33, [
-          _createElementVNode("div", _hoisted_34, [
+      : (_openBlock(), _createElementBlock("section", _hoisted_32, [
+          _createElementVNode("div", _hoisted_33, [
             _createElementVNode("div", null, [
-              _cache[17] || (_cache[17] = _createElementVNode("div", { class: "page-kicker" }, "HLS / DEBUG LOG", -1)),
-              _createElementVNode("h2", _hoisted_35, [
-                _cache[16] || (_cache[16] = _createTextVNode("广告拦截监控 ", -1)),
+              _cache[18] || (_cache[18] = _createElementVNode("div", { class: "page-kicker" }, "HLS / DEBUG LOG", -1)),
+              _createElementVNode("h2", _hoisted_34, [
+                _cache[17] || (_cache[17] = _createTextVNode("广告拦截监控 ", -1)),
                 _createElementVNode("span", {
                   class: _normalizeClass(['debug-badge', debugModeEnabled.value ? 'is-on' : 'is-off'])
                 }, _toDisplayString(debugModeEnabled.value ? '调试已开启' : '调试已关闭'), 3)
               ]),
-              _cache[18] || (_cache[18] = _createElementVNode("p", null, "本地下载会在 N_m3u8DL-RE 前扫描 HLS 清单；STRM 原始直链不会经过过滤。调试开关只影响日志详细程度，不改变拦截规则。", -1))
+              _cache[19] || (_cache[19] = _createElementVNode("p", null, "本地下载会在 N_m3u8DL-RE 前扫描 HLS 清单；STRM 原始直链不会经过过滤。调试开关只影响日志详细程度，不改变拦截规则。", -1))
             ]),
-            _createElementVNode("div", _hoisted_36, [
-              _cache[20] || (_cache[20] = _createElementVNode("span", { class: "auto-refresh" }, [
+            _createElementVNode("div", _hoisted_35, [
+              _cache[21] || (_cache[21] = _createElementVNode("span", { class: "auto-refresh" }, [
                 _createElementVNode("i", {
                   class: "live-dot",
                   "aria-hidden": "true"
                 }),
                 _createTextVNode("自动更新 · 2.5 秒")
               ], -1)),
-              _createElementVNode("label", _hoisted_37, [
+              _createElementVNode("label", _hoisted_36, [
                 _createElementVNode("input", {
                   type: "checkbox",
                   checked: debugModeEnabled.value,
                   disabled: debugModeBusy.value,
                   onChange: _cache[2] || (_cache[2] = $event => (setDebugMode($event.target.checked)))
-                }, null, 40, _hoisted_38),
-                _cache[19] || (_cache[19] = _createElementVNode("span", null, "调试日志", -1))
+                }, null, 40, _hoisted_37),
+                _cache[20] || (_cache[20] = _createElementVNode("span", null, "调试日志", -1))
               ]),
               (clearConfirming.value)
                 ? (_openBlock(), _createElementBlock(_Fragment, { key: 0 }, [
@@ -758,66 +813,66 @@ return (_ctx, _cache) => {
                     type: "button",
                     disabled: !adEvents.value.length,
                     onClick: requestClearAdFilterEvents
-                  }, "清空记录", 8, _hoisted_39))
+                  }, "清空记录", 8, _hoisted_38))
             ])
           ]),
           (adFilterError.value)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_40, _toDisplayString(adFilterError.value), 1))
+            ? (_openBlock(), _createElementBlock("div", _hoisted_39, _toDisplayString(adFilterError.value), 1))
             : _createCommentVNode("", true),
           _createElementVNode("div", {
             class: _normalizeClass(["ad-monitor-state", { 'is-active': adMonitoringActive.value, 'is-loading': adFilterLoading.value }])
           }, [
-            _cache[22] || (_cache[22] = _createElementVNode("span", {
+            _cache[23] || (_cache[23] = _createElementVNode("span", {
               class: "monitor-icon",
               "aria-hidden": "true"
             }, [
               _createElementVNode("i")
             ], -1)),
-            _createElementVNode("div", _hoisted_41, [
+            _createElementVNode("div", _hoisted_40, [
               _createElementVNode("strong", null, _toDisplayString(adMonitoringActive.value ? '监控中' : (latestAdEvent.value ? '最近扫描已完成' : '等待扫描')), 1),
               _createElementVNode("span", null, _toDisplayString(adMonitorStatus.value), 1)
             ]),
-            _createElementVNode("div", _hoisted_42, [
-              _cache[21] || (_cache[21] = _createElementVNode("span", null, "最近记录", -1)),
+            _createElementVNode("div", _hoisted_41, [
+              _cache[22] || (_cache[22] = _createElementVNode("span", null, "最近记录", -1)),
               _createElementVNode("strong", null, _toDisplayString(adSummary.value.last_scan_at ? formattedTime(adSummary.value.last_scan_at) : '暂无'), 1)
             ])
           ], 2),
-          _createElementVNode("div", _hoisted_43, [
-            _createElementVNode("div", _hoisted_44, [
-              _cache[23] || (_cache[23] = _createElementVNode("span", { class: "ad-metric-label" }, "HLS 扫描", -1)),
+          _createElementVNode("div", _hoisted_42, [
+            _createElementVNode("div", _hoisted_43, [
+              _cache[24] || (_cache[24] = _createElementVNode("span", { class: "ad-metric-label" }, "HLS 扫描", -1)),
               _createElementVNode("strong", null, _toDisplayString(adSummary.value.scan_count || 0), 1),
               _createElementVNode("small", null, "保留最近 " + _toDisplayString(adFilter.value.retained_events || 100) + " 条", 1)
             ]),
-            _createElementVNode("div", _hoisted_45, [
-              _cache[25] || (_cache[25] = _createElementVNode("span", { class: "ad-metric-label" }, "拦截片段", -1)),
+            _createElementVNode("div", _hoisted_44, [
+              _cache[26] || (_cache[26] = _createElementVNode("span", { class: "ad-metric-label" }, "拦截片段", -1)),
               _createElementVNode("strong", null, [
                 _createTextVNode(_toDisplayString(adSummary.value.filtered_segments || 0), 1),
-                _cache[24] || (_cache[24] = _createElementVNode("small", null, " 段", -1))
+                _cache[25] || (_cache[25] = _createElementVNode("small", null, " 段", -1))
               ]),
               _createElementVNode("small", null, _toDisplayString(adSummary.value.blocked_scan_count || 0) + " 次扫描命中", 1)
             ]),
-            _createElementVNode("div", _hoisted_46, [
-              _cache[26] || (_cache[26] = _createElementVNode("span", { class: "ad-metric-label" }, "拦截时长", -1)),
+            _createElementVNode("div", _hoisted_45, [
+              _cache[27] || (_cache[27] = _createElementVNode("span", { class: "ad-metric-label" }, "拦截时长", -1)),
               _createElementVNode("strong", null, _toDisplayString(formattedSeconds(adSummary.value.filtered_seconds)), 1),
-              _cache[27] || (_cache[27] = _createElementVNode("small", null, "按保存记录累计", -1))
+              _cache[28] || (_cache[28] = _createElementVNode("small", null, "按保存记录累计", -1))
             ]),
-            _createElementVNode("div", _hoisted_47, [
-              _cache[29] || (_cache[29] = _createElementVNode("span", { class: "ad-metric-label" }, "命中率", -1)),
+            _createElementVNode("div", _hoisted_46, [
+              _cache[30] || (_cache[30] = _createElementVNode("span", { class: "ad-metric-label" }, "命中率", -1)),
               _createElementVNode("strong", null, [
                 _createTextVNode(_toDisplayString(adSummary.value.scan_count ? Math.round((adSummary.value.blocked_scan_count / adSummary.value.scan_count) * 100) : 0), 1),
-                _cache[28] || (_cache[28] = _createElementVNode("small", null, "%", -1))
+                _cache[29] || (_cache[29] = _createElementVNode("small", null, "%", -1))
               ]),
               _createElementVNode("small", null, _toDisplayString(adBlockedEventCount.value) + " 条有拦截记录", 1)
             ])
           ]),
-          _createElementVNode("div", _hoisted_48, [
-            _createElementVNode("div", _hoisted_49, [
+          _createElementVNode("div", _hoisted_47, [
+            _createElementVNode("div", _hoisted_48, [
               _createElementVNode("div", null, [
-                _cache[30] || (_cache[30] = _createElementVNode("h3", null, "扫描日志", -1)),
+                _cache[31] || (_cache[31] = _createElementVNode("h3", null, "扫描日志", -1)),
                 _createElementVNode("span", null, _toDisplayString(visibleAdEvents.value.length) + " / " + _toDisplayString(adEvents.value.length) + " 条扫描记录 · 点击记录查看调试输出", 1)
               ]),
-              _createElementVNode("div", _hoisted_50, [
-                _createElementVNode("div", _hoisted_51, [
+              _createElementVNode("div", _hoisted_49, [
+                _createElementVNode("div", _hoisted_50, [
                   _createElementVNode("button", {
                     type: "button",
                     class: _normalizeClass({ 'is-active': adEventFilter.value === 'all' }),
@@ -846,18 +901,18 @@ return (_ctx, _cache) => {
               ])
             ]),
             (adFilterLoading.value && !adEvents.value.length)
-              ? (_openBlock(), _createElementBlock("div", _hoisted_52, "正在读取广告拦截记录…"))
+              ? (_openBlock(), _createElementBlock("div", _hoisted_51, "正在读取广告拦截记录…"))
               : (!adEvents.value.length)
-                ? (_openBlock(), _createElementBlock("div", _hoisted_53, [...(_cache[31] || (_cache[31] = [
+                ? (_openBlock(), _createElementBlock("div", _hoisted_52, [...(_cache[32] || (_cache[32] = [
                     _createElementVNode("strong", null, "还没有扫描记录", -1),
                     _createElementVNode("span", null, "下载电视剧后，HLS 扫描结果会自动出现在这里。", -1)
                   ]))]))
                 : (!visibleAdEvents.value.length)
-                  ? (_openBlock(), _createElementBlock("div", _hoisted_54, [...(_cache[32] || (_cache[32] = [
+                  ? (_openBlock(), _createElementBlock("div", _hoisted_53, [...(_cache[33] || (_cache[33] = [
                       _createElementVNode("strong", null, "没有匹配的记录", -1),
                       _createElementVNode("span", null, "换一个筛选条件或清空搜索关键词。", -1)
                     ]))]))
-                  : (_openBlock(), _createElementBlock("div", _hoisted_55, [
+                  : (_openBlock(), _createElementBlock("div", _hoisted_54, [
                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(visibleAdEvents.value, (event) => {
                         return (_openBlock(), _createElementBlock("button", {
                           key: adEventKey(event),
@@ -866,33 +921,33 @@ return (_ctx, _cache) => {
                           "aria-expanded": expandedAdEventKey.value === adEventKey(event),
                           onClick: $event => (toggleAdEvent(event))
                         }, [
-                          _createElementVNode("div", _hoisted_57, [
-                            _createElementVNode("div", _hoisted_58, [
+                          _createElementVNode("div", _hoisted_56, [
+                            _createElementVNode("div", _hoisted_57, [
                               _createElementVNode("span", {
                                 class: _normalizeClass(['ad-event-status', event.filtered_segments ? 'is-blocked' : 'is-clean'])
                               }, _toDisplayString(event.filtered_segments ? '已拦截' : '未发现'), 3),
                               _createElementVNode("strong", null, _toDisplayString(event.title || '未命名任务'), 1),
                               (adEpisodeLabel(event))
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_59, _toDisplayString(adEpisodeLabel(event)), 1))
+                                ? (_openBlock(), _createElementBlock("span", _hoisted_58, _toDisplayString(adEpisodeLabel(event)), 1))
                                 : _createCommentVNode("", true)
                             ]),
-                            _createElementVNode("div", _hoisted_60, [
+                            _createElementVNode("div", _hoisted_59, [
                               _createElementVNode("span", null, _toDisplayString(event.source_name || event.source_key || 'LunaTV'), 1),
                               _createElementVNode("span", null, _toDisplayString(formattedTime(event.timestamp)), 1)
                             ])
                           ]),
-                          _createElementVNode("div", _hoisted_61, [
+                          _createElementVNode("div", _hoisted_60, [
                             _createElementVNode("strong", null, _toDisplayString(event.filtered_segments || 0) + " 段 · " + _toDisplayString(formattedSeconds(event.filtered_seconds)), 1),
                             _createElementVNode("span", null, "CUE " + _toDisplayString(event.cue_segments || 0), 1),
                             _createElementVNode("span", null, "结构 " + _toDisplayString(event.splice_segments || 0), 1),
                             _createElementVNode("span", null, "同资产 " + _toDisplayString(event.same_asset_splice_segments || 0), 1),
                             _createElementVNode("span", null, "正则 " + _toDisplayString(event.regex_segments || 0), 1),
-                            _createElementVNode("span", _hoisted_62, _toDisplayString(expandedAdEventKey.value === adEventKey(event) ? '收起' : '详情'), 1)
+                            _createElementVNode("span", _hoisted_61, _toDisplayString(expandedAdEventKey.value === adEventKey(event) ? '收起' : '详情'), 1)
                           ]),
                           (expandedAdEventKey.value === adEventKey(event))
-                            ? (_openBlock(), _createElementBlock("div", _hoisted_63, [
+                            ? (_openBlock(), _createElementBlock("div", _hoisted_62, [
                                 _createElementVNode("code", null, _toDisplayString(adLogLine(event)), 1),
-                                _createElementVNode("div", _hoisted_64, [
+                                _createElementVNode("div", _hoisted_63, [
                                   _createElementVNode("span", null, "闭合 CUE：" + _toDisplayString(event.cue_segments || 0) + " 段 / " + _toDisplayString(formattedSeconds(event.cue_seconds)), 1),
                                   _createElementVNode("span", null, "结构拼接：" + _toDisplayString(event.splice_segments || 0) + " 段 / " + _toDisplayString(formattedSeconds(event.splice_seconds)), 1),
                                   _createElementVNode("span", null, "同资产插入：" + _toDisplayString(event.same_asset_splice_segments || 0) + " 段 / " + _toDisplayString(formattedSeconds(event.same_asset_splice_seconds)), 1),
@@ -902,38 +957,38 @@ return (_ctx, _cache) => {
                                 ])
                               ]))
                             : _createCommentVNode("", true)
-                        ], 10, _hoisted_56))
+                        ], 10, _hoisted_55))
                       }), 128))
                     ]))
           ])
         ])),
     (activeTab.value === 'sources')
-      ? (_openBlock(), _createElementBlock("section", _hoisted_65, [
-          _createElementVNode("div", _hoisted_66, [
+      ? (_openBlock(), _createElementBlock("section", _hoisted_64, [
+          _createElementVNode("div", _hoisted_65, [
             _createElementVNode("div", null, [
-              _createElementVNode("div", _hoisted_67, [
-                _cache[33] || (_cache[33] = _createTextVNode("资源站 ", -1)),
-                _createElementVNode("span", _hoisted_68, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
+              _createElementVNode("div", _hoisted_66, [
+                _cache[34] || (_cache[34] = _createTextVNode("资源站 ", -1)),
+                _createElementVNode("span", _hoisted_67, _toDisplayString(loading.value ? '…' : sources.value.length), 1)
               ]),
-              _cache[34] || (_cache[34] = _createElementVNode("span", { class: "source-caption" }, "页面读取缓存；来源会按后台健康检查结果参与搜索，单源可单独测试。", -1))
+              _cache[35] || (_cache[35] = _createElementVNode("span", { class: "source-caption" }, "页面读取缓存；来源会按后台健康检查结果参与搜索，单源可单独测试。", -1))
             ]),
-            _createElementVNode("div", _hoisted_69, [
-              _createElementVNode("span", _hoisted_70, [
-                _cache[35] || (_cache[35] = _createElementVNode("i", {
+            _createElementVNode("div", _hoisted_68, [
+              _createElementVNode("span", _hoisted_69, [
+                _cache[36] || (_cache[36] = _createElementVNode("i", {
                   class: "legend-dot is-healthy",
                   "aria-hidden": "true"
                 }, null, -1)),
                 _createTextVNode(_toDisplayString(sourceSummary.value.healthy) + " 正常", 1)
               ]),
-              _createElementVNode("span", _hoisted_71, [
-                _cache[36] || (_cache[36] = _createElementVNode("i", {
+              _createElementVNode("span", _hoisted_70, [
+                _cache[37] || (_cache[37] = _createElementVNode("i", {
                   class: "legend-dot is-pending",
                   "aria-hidden": "true"
                 }, null, -1)),
                 _createTextVNode(_toDisplayString(sourceSummary.value.attention) + " 待关注", 1)
               ]),
-              _createElementVNode("span", _hoisted_72, [
-                _cache[37] || (_cache[37] = _createElementVNode("i", {
+              _createElementVNode("span", _hoisted_71, [
+                _cache[38] || (_cache[38] = _createElementVNode("i", {
                   class: "legend-dot is-pending",
                   "aria-hidden": "true"
                 }, null, -1)),
@@ -946,10 +1001,10 @@ return (_ctx, _cache) => {
                 key: 0,
                 class: _normalizeClass(['health-overview', { 'is-running': sourceHealth.value.running }])
               }, [
-                _createElementVNode("div", _hoisted_73, [
-                  _createElementVNode("div", _hoisted_74, [
-                    _createElementVNode("span", _hoisted_75, _toDisplayString(sourceHealth.value.running ? '正在逐个检查来源' : '来源健康状态'), 1),
-                    _createElementVNode("span", _hoisted_76, _toDisplayString(healthProgressLabel.value), 1)
+                _createElementVNode("div", _hoisted_72, [
+                  _createElementVNode("div", _hoisted_73, [
+                    _createElementVNode("span", _hoisted_74, _toDisplayString(sourceHealth.value.running ? '正在逐个检查来源' : '来源健康状态'), 1),
+                    _createElementVNode("span", _hoisted_75, _toDisplayString(healthProgressLabel.value), 1)
                   ]),
                   _createElementVNode("div", {
                     class: "health-progress-track",
@@ -962,9 +1017,9 @@ return (_ctx, _cache) => {
                     _createElementVNode("span", {
                       style: _normalizeStyle({ width: `${healthProgress.value}%` })
                     }, null, 4)
-                  ], 8, _hoisted_77)
+                  ], 8, _hoisted_76)
                 ]),
-                _cache[38] || (_cache[38] = _createElementVNode("div", {
+                _cache[39] || (_cache[39] = _createElementVNode("div", {
                   class: "health-legend",
                   "aria-label": "健康状态图例"
                 }, [
@@ -993,12 +1048,12 @@ return (_ctx, _cache) => {
               ], 2))
             : _createCommentVNode("", true),
           (loading.value)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_78, "正在读取资源站配置…"))
+            ? (_openBlock(), _createElementBlock("div", _hoisted_77, "正在读取资源站配置…"))
             : (!sources.value.length)
-              ? (_openBlock(), _createElementBlock("div", _hoisted_79, "暂未读取到资源站配置"))
-              : (_openBlock(), _createElementBlock("div", _hoisted_80, [
-                  _createElementVNode("table", _hoisted_81, [
-                    _cache[41] || (_cache[41] = _createElementVNode("thead", null, [
+              ? (_openBlock(), _createElementBlock("div", _hoisted_78, "暂未读取到资源站配置"))
+              : (_openBlock(), _createElementBlock("div", _hoisted_79, [
+                  _createElementVNode("table", _hoisted_80, [
+                    _cache[42] || (_cache[42] = _createElementVNode("thead", null, [
                       _createElementVNode("tr", null, [
                         _createElementVNode("th", { scope: "col" }, "状态"),
                         _createElementVNode("th", { scope: "col" }, "资源名称"),
@@ -1018,17 +1073,17 @@ return (_ctx, _cache) => {
                             _createElementVNode("span", {
                               class: _normalizeClass(['source-state', `is-${sourceVisualStatus(source)}`])
                             }, [
-                              _cache[39] || (_cache[39] = _createElementVNode("i", {
+                              _cache[40] || (_cache[40] = _createElementVNode("i", {
                                 class: "state-dot",
                                 "aria-hidden": "true"
                               }, null, -1)),
                               _createTextVNode(" " + _toDisplayString(source.status_label || '已加载'), 1)
                             ], 2),
-                            _createElementVNode("div", _hoisted_82, [
+                            _createElementVNode("div", _hoisted_81, [
                               _createElementVNode("span", {
                                 class: _normalizeClass(['health-state', `is-${sourceHealthVisualStatus(source)}`])
                               }, _toDisplayString(source.health_label || '未检查'), 3),
-                              _createElementVNode("div", _hoisted_83, [
+                              _createElementVNode("div", _hoisted_82, [
                                 _createElementVNode("span", null, _toDisplayString(source.network_label || '待检查'), 1),
                                 _createElementVNode("span", null, "成功 " + _toDisplayString(source.network_successes || 0) + " 次", 1),
                                 _createElementVNode("span", null, "失败 " + _toDisplayString(source.network_failures || 0) + " 次", 1)
@@ -1038,14 +1093,14 @@ return (_ctx, _cache) => {
                                     key: 0,
                                     class: "source-error",
                                     title: source.last_error
-                                  }, _toDisplayString(source.last_error), 9, _hoisted_84))
+                                  }, _toDisplayString(source.last_error), 9, _hoisted_83))
                                 : _createCommentVNode("", true)
                             ])
                           ]),
                           _createElementVNode("td", null, [
-                            _createElementVNode("div", _hoisted_85, [
-                              _createElementVNode("span", _hoisted_86, _toDisplayString(source.name), 1),
-                              _createElementVNode("span", _hoisted_87, _toDisplayString(source.key), 1)
+                            _createElementVNode("div", _hoisted_84, [
+                              _createElementVNode("span", _hoisted_85, _toDisplayString(source.name), 1),
+                              _createElementVNode("span", _hoisted_86, _toDisplayString(source.key), 1)
                             ])
                           ]),
                           _createElementVNode("td", null, [
@@ -1056,8 +1111,8 @@ return (_ctx, _cache) => {
                                   href: sourceUrl(source),
                                   target: "_blank",
                                   rel: "noopener noreferrer"
-                                }, _toDisplayString(sourceHost(source)), 9, _hoisted_88))
-                              : (_openBlock(), _createElementBlock("span", _hoisted_89, "—"))
+                                }, _toDisplayString(sourceHost(source)), 9, _hoisted_87))
+                              : (_openBlock(), _createElementBlock("span", _hoisted_88, "—"))
                           ]),
                           _createElementVNode("td", null, [
                             _createElementVNode("span", {
@@ -1070,23 +1125,23 @@ return (_ctx, _cache) => {
                             }, _toDisplayString(sourceCheckedLabel(source)), 3)
                           ]),
                           _createElementVNode("td", null, [
-                            _createElementVNode("div", _hoisted_90, [
+                            _createElementVNode("div", _hoisted_89, [
                               _createElementVNode("select", {
                                 class: "source-config-select",
                                 value: source.manual_disabled ? 'disabled' : 'enabled',
                                 disabled: sourceIsBusy(source),
                                 "aria-label": '配置' + (source.name || source.key) + '来源',
                                 onChange: $event => (setSourceConfig(source, $event))
-                              }, [...(_cache[40] || (_cache[40] = [
+                              }, [...(_cache[41] || (_cache[41] = [
                                 _createElementVNode("option", { value: "enabled" }, "配置启用", -1),
                                 _createElementVNode("option", { value: "disabled" }, "配置禁用", -1)
-                              ]))], 40, _hoisted_91),
+                              ]))], 40, _hoisted_90),
                               _createElementVNode("button", {
                                 class: "source-action",
                                 disabled: sourceIsBusy(source),
                                 "aria-label": '测试来源 ' + (source.name || source.key),
                                 onClick: $event => (recheckSource(source))
-                              }, _toDisplayString(sourceIsBusy(source) ? '测试中…' : '测试'), 9, _hoisted_92)
+                              }, _toDisplayString(sourceIsBusy(source) ? '测试中…' : '测试'), 9, _hoisted_91)
                             ])
                           ])
                         ], 2))
@@ -1097,15 +1152,15 @@ return (_ctx, _cache) => {
         ]))
       : _createCommentVNode("", true),
     (activeTab.value === 'sources')
-      ? (_openBlock(), _createElementBlock("section", _hoisted_93, [...(_cache[42] || (_cache[42] = [
-          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-0ecedf58><div class=\"section-title\" data-v-0ecedf58>使用说明</div><span class=\"source-caption\" data-v-0ecedf58>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-0ecedf58><p data-v-0ecedf58><strong data-v-0ecedf58>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-0ecedf58><strong data-v-0ecedf58>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-0ecedf58><strong data-v-0ecedf58>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-0ecedf58><strong data-v-0ecedf58>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-0ecedf58><strong data-v-0ecedf58>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div>", 2)
+      ? (_openBlock(), _createElementBlock("section", _hoisted_92, [...(_cache[43] || (_cache[43] = [
+          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-d70a80ea><div class=\"section-title\" data-v-d70a80ea>使用说明</div><span class=\"source-caption\" data-v-d70a80ea>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-d70a80ea><p data-v-d70a80ea><strong data-v-d70a80ea>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-d70a80ea><strong data-v-d70a80ea>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-d70a80ea><strong data-v-d70a80ea>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-d70a80ea><strong data-v-d70a80ea>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-d70a80ea><strong data-v-d70a80ea>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div>", 2)
         ]))]))
       : _createCommentVNode("", true)
-  ]))
+  ], 8, _hoisted_1))
 }
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0ecedf58"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d70a80ea"]]);
 
 export { AppPage as default };
