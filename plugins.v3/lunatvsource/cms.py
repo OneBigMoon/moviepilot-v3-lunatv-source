@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .classification import normalize_cms_class_names
 from .naming import normalize_media_title
 from .proxy import (
@@ -197,13 +197,18 @@ def _json_get(
     url: str,
     timeout: float,
     allowed_private_ranges: Iterable[str] = (),
+    deadline: Optional[float] = None,
 ) -> Any:
-    payload, _ = _fetch_public_url(
+    fetch_args = (
         url,
         timeout,
         _JSON_RESPONSE_BYTES + 1,
         tuple(allowed_private_ranges or ()),
     )
+    if deadline is None:
+        payload, _ = _fetch_public_url(*fetch_args)
+    else:
+        payload, _ = _fetch_public_url(*fetch_args, deadline=deadline)
     if len(payload) > _JSON_RESPONSE_BYTES:
         raise ValueError("CMS JSON response too large")
     return json.loads(payload.decode("utf-8", errors="replace"))
@@ -459,7 +464,22 @@ def _fetch_public_url(
         proxy_url=proxy_url,
     )
     try:
-        return response.read(max(1, int(limit)) + 1)[:limit], final_url
+        remaining = max(1, int(limit)) + 1
+        chunks: List[bytes] = []
+        while remaining > 0:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("public URL response deadline exceeded")
+            chunk_limit = min(65536, remaining)
+            chunk = response.read(chunk_limit)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("public URL response deadline exceeded")
+            if len(chunk) < chunk_limit:
+                break
+        return b"".join(chunks)[:limit], final_url
     finally:
         connection.close()
 
@@ -942,9 +962,16 @@ def _media_type(item: Mapping[str, Any]) -> str:
     if any(token in value for token in ("动漫", "动画", "纪录")):
         title = _text(item.get("vod_name"))
         play_url = _text(item.get("vod_play_url"))
+        play_labels = (
+            entry.split("$", 1)[0]
+            for group in play_url.split("$$$")
+            for entry in group.split("#")
+            if "$" in entry
+        )
         if (
             _SEASON_RE.search(title)
             or re.search(rf"第\s*{_NUMBER_PATTERN}\s*[集话]", title)
+            or any(_EPISODE_RE.search(label) for label in play_labels)
             or "#" in play_url
         ):
             return "tv"
@@ -1382,16 +1409,48 @@ class AppleCmsClient:
     def _deadline_expired(deadline: Optional[float]) -> bool:
         return deadline is not None and time.monotonic() >= deadline
 
-    def _request(self, source: CmsSource, **params: Any) -> Mapping[str, Any]:
+    def _request(
+        self,
+        source: CmsSource,
+        deadline: Optional[float] = None,
+        **params: Any,
+    ) -> Mapping[str, Any]:
         query = urllib.parse.urlencode(
             {key: value for key, value in params.items() if value not in (None, "")}
         )
         separator = "&" if "?" in source.api else "?"
         url = f"{source.api}{separator}{query}" if query else source.api
-        payload = _json_get(url, self.timeout, self.allowed_private_ranges)
+        effective_deadline = deadline
+        if effective_deadline is None:
+            effective_deadline = getattr(self, "_active_deadline", None)
+        if effective_deadline is None:
+            payload = _json_get(url, self.timeout, self.allowed_private_ranges)
+        else:
+            payload = _json_get(
+                url,
+                self.timeout,
+                self.allowed_private_ranges,
+                deadline=effective_deadline,
+            )
         if not isinstance(payload, Mapping):
             raise ValueError("CMS 响应不是 JSON 对象")
         return payload
+
+    def _request_for_deadline(
+        self,
+        source: CmsSource,
+        deadline: Optional[float],
+        **params: Any,
+    ) -> Mapping[str, Any]:
+        previous = getattr(self, "_active_deadline", None)
+        self._active_deadline = deadline
+        try:
+            return self._request(source, **params)
+        finally:
+            if previous is None:
+                self.__dict__.pop("_active_deadline", None)
+            else:
+                self._active_deadline = previous
 
     def verify_search(self, source: CmsSource, query: str = "1") -> None:
         """Verify that a source implements the Apple CMS search response shape.
@@ -1598,13 +1657,13 @@ class AppleCmsClient:
         try:
             if self._deadline_expired(deadline):
                 return []
-            payload = self._request(source, **list_params)
+            payload = self._request_for_deadline(source, deadline, **list_params)
             items = self._items(payload)
             if not items:
                 if self._deadline_expired(deadline):
                     return []
                 list_params["pages"] = 1
-                payload = self._request(source, **list_params)
+                payload = self._request_for_deadline(source, deadline, **list_params)
                 items = self._items(payload)
         except Exception:
             # A single third-party source must not block the rest.

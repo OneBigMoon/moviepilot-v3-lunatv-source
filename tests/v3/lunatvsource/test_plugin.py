@@ -7083,3 +7083,348 @@ def test_record_native_history_ignores_database_errors(monkeypatch, tmp_path: Pa
     )
 
     plugin._record_native_history(task, str(tmp_path / "movie.mp4"))
+
+
+def test_media_info_fields_use_tmdb_series_year_for_tv_season_rows():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    season_row = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="42",
+        title="数字积木 第3季",
+        year="2018",
+        media_type="tv",
+        remark="",
+        episodes=(CmsEpisode(3, 1, "第1集", "https://video.example/1.m3u8"),),
+    )
+
+    fields = plugin._media_info_fields(
+        season_row,
+        {"status": "matched", "year": "2017", "tmdb_id": 136395},
+    )
+
+    # 电视剧命名年必须是作品首播年，否则整理链会把各季落进不同年份目录。
+    assert fields["title"] == "数字积木"
+    assert fields["year"] == "2017"
+    assert fields["title_year"] == "数字积木 (2017)"
+
+
+def test_media_info_fields_keep_cms_year_without_tmdb_match():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    season_row = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="42",
+        title="数字积木 第3季",
+        year="2018",
+        media_type="tv",
+        remark="",
+    )
+
+    fields = plugin._media_info_fields(season_row, {"status": "unmatched"})
+
+    assert fields["year"] == "2018"
+
+
+def test_media_info_fields_keep_movie_row_year():
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    movie = CmsResult(
+        source_key="demo",
+        source_name="演示源",
+        vod_id="7",
+        title="示例电影",
+        year="2024",
+        media_type="movie",
+        remark="",
+    )
+
+    fields = plugin._media_info_fields(
+        movie,
+        {"status": "matched", "year": "2013", "tmdb_id": 1},
+    )
+
+    assert fields["year"] == "2024"
+
+
+def test_manual_download_maps_tv_year_to_tmdb_series_year(monkeypatch, tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    lookup_titles = []
+
+    def fake_associate(result, include_candidates=True):
+        lookup_titles.append((result.title, result.year, result.media_type))
+        return {"status": "matched", "year": "2017"}
+
+    monkeypatch.setattr(plugin, "_associate_tmdb", fake_associate)
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    response = plugin.api_download(
+        {
+            "url": "https://example.test/s03e01.m3u8",
+            "title": "数字积木 第3季",
+            "year": "2018",
+            "media_type": "tv",
+            "season": 3,
+            "episode": 1,
+        }
+    )
+
+    assert response["success"] is True
+    assert lookup_titles == [("数字积木 第3季", "2018", "tv")]
+    tasks = plugin._queue.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["title"] == "数字积木"
+    assert tasks[0]["year"] == "2017"
+
+
+def test_manual_download_keeps_cms_year_when_tmdb_unmatched(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(
+        plugin,
+        "_associate_tmdb",
+        lambda *_args, **_kwargs: {"status": "unmatched"},
+    )
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    response = plugin.api_download(
+        {
+            "url": "https://example.test/s03e01.m3u8",
+            "title": "数字积木 第3季",
+            "year": "2018",
+            "media_type": "tv",
+            "season": 3,
+            "episode": 1,
+        }
+    )
+
+    assert response["success"] is True
+    tasks = plugin._queue.list_tasks()
+    assert tasks[0]["year"] == "2018"
+
+
+def test_manual_download_skips_tmdb_lookup_for_manual_url_without_title(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("未提供标题时不得发起 TMDB 查询")
+
+    monkeypatch.setattr(plugin, "_associate_tmdb", unexpected)
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    response = plugin.api_download({"url": "https://example.test/manual.m3u8"})
+
+    assert response["success"] is True
+
+
+def test_inject_nfo_movie_set_appends_collection_once(tmp_path: Path):
+    nfo_path = tmp_path / "玩具总动员 (1995).nfo"
+    nfo_path.write_text(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        "<movie>\n  <title>玩具总动员</title>\n</movie>\n",
+        encoding="utf-8",
+    )
+
+    assert plugin_module.inject_nfo_movie_set(nfo_path, "玩具总动员系列", 94602)
+    content = nfo_path.read_text(encoding="utf-8")
+    assert "<set>" in content
+    assert "<name>玩具总动员系列</name>" in content
+    assert "<collectionnumber>94602</collectionnumber>" in content
+    assert content.index("<set>") < content.index("</movie>")
+
+    assert not plugin_module.inject_nfo_movie_set(nfo_path, "另一个合集", None)
+    assert "另一个合集" not in nfo_path.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.lunatv.tmp"))
+
+
+def test_inject_nfo_movie_set_skips_non_movie_nfo(tmp_path: Path):
+    nfo_path = tmp_path / "tvshow.nfo"
+    nfo_path.write_text("<tvshow>\n  <title>示例剧</title>\n</tvshow>\n", encoding="utf-8")
+
+    assert not plugin_module.inject_nfo_movie_set(nfo_path, "某合集", 1)
+    assert "<set>" not in nfo_path.read_text(encoding="utf-8")
+
+
+def test_native_movie_transfer_enriches_collection_nfo(monkeypatch, tmp_path: Path):
+    plugin, task, transfer_chain = _native_movie_transfer_test_setup(
+        monkeypatch, tmp_path, "copy"
+    )
+    library_dir = tmp_path / "library" / "测试电影 (2026)"
+    library_dir.mkdir(parents=True)
+    dest = library_dir / "测试电影 (2026).mp4"
+    dest.write_bytes(b"organized")
+    nfo_path = library_dir / "测试电影 (2026).nfo"
+    nfo_path.write_text(
+        "<movie>\n  <title>测试电影</title>\n</movie>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(plugin, "_transfer_dest_path", lambda _output: dest)
+    monkeypatch.setattr(
+        plugin, "_movie_collection_info", lambda _task: ("玩具总动员系列", 94602)
+    )
+
+    output = tmp_path / "movie.mp4"
+    output.write_bytes(b"movie")
+    assert plugin._native_transfer(task, str(output)) == "moviepilot"
+
+    finish_signal = threading.Event()
+    for _ in range(200):
+        if not plugin._collection_enrich_running:
+            finish_signal.set()
+            break
+        finish_signal.wait(0.01)
+    assert finish_signal.is_set()
+    content = nfo_path.read_text(encoding="utf-8")
+    assert "<name>玩具总动员系列</name>" in content
+    assert "<collectionnumber>94602</collectionnumber>" in content
+
+
+def test_native_movie_transfer_skips_collection_enrichment_for_tv(
+    monkeypatch, tmp_path: Path
+):
+    plugin, task, transfer_chain = _native_movie_transfer_test_setup(
+        monkeypatch, tmp_path, "copy"
+    )
+    tv_task = SimpleNamespace(
+        mode="download",
+        media_type="tv",
+        title="测试剧集",
+        year="2026",
+        root=str(tmp_path),
+        source_key="cms-demo",
+        media_id="cms-demo:42",
+        host_media_source="themoviedb",
+        host_media_id="136395",
+        season=1,
+        episode=1,
+    )
+    scheduled = []
+    monkeypatch.setattr(
+        plugin, "_schedule_movie_collection_enrichment", lambda *_args: scheduled.append(True)
+    )
+    output = tmp_path / "episode.mp4"
+    output.write_bytes(b"episode")
+
+    assert plugin._native_transfer(tv_task, str(output)) == "moviepilot"
+    assert scheduled == []
+
+
+def test_enrich_movie_collection_gives_up_without_transfer_history(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    attempts = []
+
+    def flaky_dest(_output):
+        attempts.append(True)
+        return None
+
+    monkeypatch.setattr(plugin, "_transfer_dest_path", flaky_dest)
+    monkeypatch.setattr(
+        plugin, "_COLLECTION_NFO_ATTEMPTS", 3, raising=False
+    )
+    sleeps = []
+    monkeypatch.setattr(
+        plugin_module.time, "sleep", lambda seconds: sleeps.append(seconds)
+    )
+    task = SimpleNamespace(media_type="movie", title="测试电影", year="2026")
+
+    plugin._enrich_movie_collection(task, str(tmp_path / "movie.mp4"))
+
+    assert len(attempts) == 3
+    assert sleeps == [5.0, 5.0]
+
+
+def test_enrich_movie_collection_stops_when_history_unavailable(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    attempts = []
+
+    def unavailable(_output):
+        attempts.append(True)
+        raise plugin_module._TransferHistoryUnavailable("no oper")
+
+    monkeypatch.setattr(plugin, "_transfer_dest_path", unavailable)
+    monkeypatch.setattr(
+        plugin_module.time, "sleep", lambda seconds: pytest.fail("不应重试")
+    )
+    task = SimpleNamespace(media_type="movie", title="测试电影", year="2026")
+
+    plugin._enrich_movie_collection(task, str(tmp_path / "movie.mp4"))
+
+    assert len(attempts) == 1
+
+
+def test_enrich_movie_collection_waits_for_complete_nfo_write(
+    monkeypatch, tmp_path: Path
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    dest = tmp_path / "library" / "测试电影 (2026)" / "测试电影 (2026).mp4"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"organized")
+    nfo_path = dest.with_name(f"{dest.stem}.nfo")
+    nfo_path.write_text(
+        "<movie>\n  <title>测试电影</title>\n", encoding="utf-8"
+    )  # 刮削器半写：缺少闭合标签
+    monkeypatch.setattr(plugin, "_transfer_dest_path", lambda _output: dest)
+    monkeypatch.setattr(
+        plugin, "_movie_collection_info", lambda _task: ("玩具总动员系列", 94602)
+    )
+    sleeps = []
+
+    def finish_partial_write(_seconds):
+        sleeps.append(_seconds)
+        nfo_path.write_text(
+            "<movie>\n  <title>测试电影</title>\n</movie>\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(plugin_module.time, "sleep", finish_partial_write)
+    task = SimpleNamespace(media_type="movie", title="测试电影", year="2026")
+
+    plugin._enrich_movie_collection(task, str(tmp_path / "movie.mp4"))
+
+    assert len(sleeps) == 1
+    content = nfo_path.read_text(encoding="utf-8")
+    assert "<name>玩具总动员系列</name>" in content
+
+
+def test_movie_collection_info_does_not_cache_failed_lookup(monkeypatch):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    calls = []
+
+    class FakeMediaChain:
+        def recognize_media(self, **_kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                raise RuntimeError("TMDB 抖动")
+            media = SimpleNamespace(
+                tmdb_info={
+                    "belongs_to_collection": {"id": 94602, "name": "玩具总动员系列"}
+                }
+            )
+            return media
+
+    class FakeMetaInfo:
+        def __init__(self, title=None, year=None):
+            self.title = title
+            self.year = year
+
+    monkeypatch.setattr(plugin_module, "_HostMediaChain", FakeMediaChain)
+    monkeypatch.setattr(plugin_module, "_HostMetaInfo", FakeMetaInfo)
+    task = SimpleNamespace(media_type="movie", title="玩具总动员", year="1995")
+
+    assert plugin._movie_collection_info(task) == ("", None)
+    assert plugin._movie_collection_info(task) == ("玩具总动员系列", 94602)
+    assert len(calls) == 2

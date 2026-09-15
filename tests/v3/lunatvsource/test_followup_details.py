@@ -823,6 +823,77 @@ def test_subscription_refresh_keeps_native_tv_identity_across_cms_season_years(
     assert tasks[0]["host_media_id"] == "123"
 
 
+@pytest.mark.parametrize(
+    ("season", "available_episodes"),
+    ((2, 48), (3, 39), (4, 39), (5, 38), (6, 1)),
+)
+def test_subscription_refresh_maps_cms_title_variants_to_jojo_seasons(
+    monkeypatch, tmp_path: Path, season: int, available_episodes: int
+):
+    """CMS JOJO rows have story-arc titles and no explicit season marker."""
+
+    source = CmsSource("cms-demo", "演示源", "https://cms.example/vod")
+
+    def row(vod_id: str, title: str, year: str, count: int) -> CmsResult:
+        return _result_from_item(
+            source,
+            {
+                "vod_id": vod_id,
+                "vod_name": title,
+                "vod_year": year,
+                "type_name": "日韩动漫",
+                "vod_play_url": "#".join(
+                    f"第{episode}集$https://example.test/{vod_id}-e{episode:02d}.m3u8"
+                    for episode in range(1, count + 1)
+                ),
+            },
+        )
+
+    rows = [
+        row("s01", "JOJO的奇妙冒险", "2012", 26),
+        row("s02-a", "JOJO的奇妙冒险 星尘斗士", "2014", 24),
+        row("s02-b", "JOJO的奇妙冒险 星尘斗士 埃及篇", "2015", 24),
+        row("s03", "JOJO的奇妙冒险 不灭钻石", "2016", 39),
+        row("s04", "JOJO的奇妙冒险 黄金之风", "2018", 39),
+        row("s05-a", "JOJO的奇妙冒险 石之海", "2021", 12),
+        row("s05-b", "JOJO的奇妙冒险 石之海 Part.2", "2022", 12),
+        row("s05-c", "JOJO的奇妙冒险 石之海 Part.3", "2022", 14),
+        row("s06", "JOJO的奇妙冒险 飙马野郎", "2026", 1),
+    ]
+    subscribe = SimpleNamespace(
+        state="R",
+        name="JOJO的奇妙冒险",
+        year="2012",
+        type="电视剧",
+        season=season,
+        media_source="themoviedb",
+        media_id="jojo-series",
+        save_path=str(tmp_path),
+    )
+    _install_subscription_operator(monkeypatch, subscribe)
+
+    class Client:
+        @staticmethod
+        def search(_query, **_kwargs):
+            return rows
+
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True, "download_root": str(tmp_path)})
+    monkeypatch.setattr(plugin, "_client", lambda: Client())
+    monkeypatch.setattr(plugin, "_prepare_result", lambda result: (result, {}))
+    monkeypatch.setattr(plugin, "_probe_resource_urls", lambda _urls: {})
+    monkeypatch.setattr(plugin, "_start_queue", lambda: None)
+
+    response = plugin.refresh_subscriptions()
+    tasks = plugin._queue.list_tasks()
+
+    assert response["queued"] == available_episodes
+    assert sorted(task["episode"] for task in tasks) == list(
+        range(1, available_episodes + 1)
+    )
+    assert {task["season"] for task in tasks} == {season}
+
+
 def test_subscription_refresh_honors_native_start_and_manual_total_episode(
     monkeypatch, tmp_path: Path
 ):

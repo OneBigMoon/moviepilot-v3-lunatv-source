@@ -20,7 +20,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from .cms import _fetch_public_url, _request_public_url, probe_stream_height
+from .cms import (
+    _fetch_public_url,
+    _request_public_url,
+    probe_stream_height,
+)
 
 from .m3u8_engine import (
     M3U8EngineCancelled,
@@ -206,7 +210,7 @@ def _mpegts_payload_offset(data: bytes) -> int:
 
     if not data.startswith(b"\xff\xd8\xff"):
         return 0
-    limit = max(0, min(len(data) - 376, 4096))
+    limit = max(0, min(len(data) - 377, 4096))
     for offset in range(limit + 1):
         if data[offset] == 0x47 and data[offset + 188] == 0x47 and data[offset + 376] == 0x47:
             return offset

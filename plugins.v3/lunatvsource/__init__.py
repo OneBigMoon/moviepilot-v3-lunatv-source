@@ -15,11 +15,13 @@ except ImportError:  # pragma: no cover - MoviePilot production runs on Linux.
 import json
 import base64
 import hashlib
+import hmac
 import inspect
 import logging
 import math
 import sys
 import asyncio
+import os
 import weakref
 from collections import deque
 from contextvars import ContextVar
@@ -28,9 +30,11 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, NamedTuple, Optional, Tuple
+from xml.sax.saxutils import escape as _xml_escape
 
 try:  # MoviePilot V3 runtime import
     from app.plugins import _PluginBase
@@ -1202,13 +1206,86 @@ def _source_candidate_media_key(entry: Dict[str, Any]) -> Tuple[Any, ...]:
     )
 
 
+def _video_file_path(value: str) -> Optional[Path]:
+    """Return the path only when it points at an existing local video file."""
+    if not value:
+        return None
+    path = Path(value)
+    try:
+        if path.is_file() and path.suffix.casefold() in {
+            ".mp4",
+            ".mkv",
+            ".ts",
+            ".m2ts",
+            ".mov",
+            ".m4v",
+            ".avi",
+            ".webm",
+        }:
+            return path
+    except OSError:
+        return None
+    return None
+
+
+class _TransferHistoryUnavailable(RuntimeError):
+    """宿主整理历史操作器缺失，合集补写无法进行，不应重试。"""
+
+
+def nfo_write_complete(nfo_path: Path) -> bool:
+    """Return True when the NFO exists and already carries its closing tag.
+
+    The host scraper writes NFO files in place, so a freshly created file can
+    still be mid-write; injecting into a truncated document would be lost when
+    the scraper finishes its own write.
+    """
+    try:
+        raw = nfo_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "</movie>" in raw.casefold()
+
+
+def inject_nfo_movie_set(nfo_path: Path, name: str, tmdb_id: Optional[int]) -> bool:
+    """把 Kodi 风格的 ``<set>`` 合集节点补进电影 NFO；已有合集信息时不动。
+
+    MoviePilot 的刮削器不会写 ``<set>``，绿联等按 NFO 分组合集的媒体库因此
+    无法把同系列电影归到一起。这里只做幂等追加，交由调用方保证落盘时机。
+    """
+    try:
+        raw = nfo_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    if re.search(r"<set(?:\s|/?>)", raw, re.IGNORECASE):
+        return False
+    close_index = raw.casefold().rfind("</movie>")
+    if close_index < 0:
+        return False
+    lines = [f"    <name>{_xml_escape(name)}</name>"]
+    if tmdb_id:
+        lines.append(f"    <collectionnumber>{int(tmdb_id)}</collectionnumber>")
+    block = "  <set>\n" + "\n".join(lines) + "\n  </set>\n"
+    updated = raw[:close_index] + block + raw[close_index:]
+    temp_path = nfo_path.with_name(nfo_path.name + ".lunatv.tmp")
+    try:
+        temp_path.write_text(updated, encoding="utf-8")
+        os.replace(temp_path, nfo_path)
+    except OSError:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 class LunaTVSource(_PluginBase):
     """第三方苹果 CMS/m3u8 订阅下载插件。"""
 
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.106"
+    plugin_version = "0.4.108"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1224,6 +1301,9 @@ class LunaTVSource(_PluginBase):
     _tmdb_cache: Dict[str, Dict[str, Any]]
     _resource_search_lock: threading.RLock
     _resource_search_cache: Dict[str, Tuple[float, List[Any]]]
+    _collection_enrich_lock: threading.Lock
+    _collection_enrich_running: set[str]
+    _movie_collection_cache: Dict[str, Tuple[str, Optional[int]]]
     _source_config_origin: str
     _source_config_error: str
 
@@ -1241,6 +1321,9 @@ class LunaTVSource(_PluginBase):
         self._tmdb_cache = {}
         self._resource_search_lock = threading.RLock()
         self._resource_search_cache = {}
+        self._collection_enrich_lock = threading.Lock()
+        self._collection_enrich_running = set()
+        self._movie_collection_cache = {}
         self._source_config_origin = "未加载"
         self._source_config_error = ""
         self._queue_lock_file: Optional[Any] = None
@@ -3633,11 +3716,17 @@ class LunaTVSource(_PluginBase):
 
         association = association or {}
         title = normalize_media_title(result.title)
-        title_year = f"{title} ({result.year})" if result.year else title
+        # 命名年必须与作品身份一致：CMS 每季行常写该季的播出年，直接沿用会让
+        # 整理链把同一部剧的各季落进不同年份目录，绿联/Emby 便出现同剧多条目。
+        # 电视剧在 TMDB 关联成功时统一改用作品首播年；电影行年份即作品年。
+        year = result.year or None
+        if result.media_type == "tv" and association.get("status") == "matched":
+            year = str(association.get("year") or "").strip() or year
+        title_year = f"{title} ({year})" if year else title
         fields: Dict[str, Any] = {
             "type": "电视剧" if result.media_type == "tv" else "电影",
             "title": title,
-            "year": result.year or None,
+            "year": year,
             "title_year": title_year,
             "media_source": self._host_media_source(),
             "media_id": f"{result.source_key}:{result.vod_id}",
@@ -4162,7 +4251,8 @@ class LunaTVSource(_PluginBase):
                 "query": query,
                 "message": _safe_error_message(exc, "TMDB 关联失败"),
             }
-        self._store_tmdb_cache_entry(cache_key, association)
+        if association.get("status") != "error":
+            self._store_tmdb_cache_entry(cache_key, association)
         return association
 
     def _store_tmdb_cache_entry(
@@ -4499,12 +4589,142 @@ class LunaTVSource(_PluginBase):
                         time.sleep(0.05)
                     if source_path.exists():
                         return "fallback:move-source-still-exists"
+                if task.media_type == "movie" and _bool(
+                    self._config.get("generate_nfo"), False
+                ):
+                    # 宿主刮削器不写 <set>，绿联合集页会一直是空的；整理
+                    # 成功后异步补写电影 NFO，不阻塞下载队列。
+                    self._schedule_movie_collection_enrichment(task, output)
                 return "moviepilot"
             self._logger.warning("MoviePilot 原生整理未完成，保留直写文件：%s", message)
             return f"fallback:{_safe_error_message(message, '整理未完成')}"
         except Exception as exc:
             self._logger.warning("MoviePilot 原生整理失败，保留直写文件：%s", exc)
             return f"fallback:{_safe_error_message(exc, '整理失败')}"
+
+    _COLLECTION_NFO_ATTEMPTS = 12
+    _COLLECTION_NFO_INTERVAL_SECONDS = 5.0
+    _MOVIE_COLLECTION_CACHE_MAX = 200
+
+    def _schedule_movie_collection_enrichment(
+        self, task: DownloadTask, output: str
+    ) -> None:
+        """整理成功后把 TMDB 合集补写进电影 NFO，供绿联/Emby 合集页分组。"""
+        key = str(output or "")
+        if not key:
+            return
+        with self._collection_enrich_lock:
+            if key in self._collection_enrich_running:
+                return
+            self._collection_enrich_running.add(key)
+
+        def runner() -> None:
+            try:
+                self._enrich_movie_collection(task, output)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._logger.debug("电影合集 NFO 补写失败：%s", exc)
+            finally:
+                with self._collection_enrich_lock:
+                    self._collection_enrich_running.discard(key)
+
+        try:
+            threading.Thread(
+                target=runner,
+                name="lunatvsource-collection-nfo",
+                daemon=True,
+            ).start()
+        except Exception:
+            with self._collection_enrich_lock:
+                self._collection_enrich_running.discard(key)
+
+    def _enrich_movie_collection(self, task: DownloadTask, output: str) -> None:
+        nfo_path: Optional[Path] = None
+        for attempt in range(self._COLLECTION_NFO_ATTEMPTS):
+            if attempt:
+                time.sleep(self._COLLECTION_NFO_INTERVAL_SECONDS)
+            try:
+                dest = self._transfer_dest_path(output)
+            except _TransferHistoryUnavailable as exc:
+                self._logger.debug("整理历史不可用，跳过合集补写：%s", exc)
+                return
+            if dest is None:
+                # 宿主刮削由整理事件异步执行，目标文件和历史记录都可能晚于
+                # 本次返回落盘；有界重试后放弃，等待下次整理同片时再补。
+                continue
+            candidate = dest.with_name(f"{dest.stem}.nfo")
+            if nfo_write_complete(candidate):
+                nfo_path = candidate
+                break
+        if nfo_path is None:
+            return
+        name, tmdb_id = self._movie_collection_info(task)
+        if not name:
+            return
+        if inject_nfo_movie_set(nfo_path, name, tmdb_id):
+            self._logger.info(
+                "已补写电影合集 NFO：%s -> %s", nfo_path.name, name
+            )
+
+    def _transfer_dest_path(self, output: str) -> Optional[Path]:
+        """从宿主整理历史回查源文件对应的媒体库目标文件。"""
+        try:
+            from app.db.oper.transferhistory import TransferHistoryOper
+        except Exception as exc:
+            raise _TransferHistoryUnavailable(str(exc)) from exc
+        oper = TransferHistoryOper()
+        try:
+            lookup = getattr(oper, "get_success_by_src", None)
+            if callable(lookup):
+                history = lookup(str(output), "local")
+            else:
+                # 早期 V3 只有基础查询；status 为 False 才代表整理失败。
+                history = oper.get_by_src(str(output), "local")
+                if history is not None and getattr(history, "status", True) is False:
+                    history = None
+        except Exception as exc:
+            self._logger.debug("读取整理历史失败，跳过合集补写：%s", exc)
+            return None
+        dest = str(getattr(history, "dest", "") or "").strip()
+        return _video_file_path(dest)
+
+    def _movie_collection_info(self, task: DownloadTask) -> Tuple[str, Optional[int]]:
+        """查询电影所属 TMDB 合集，返回 ``(合集名, 合集 ID)``。"""
+        title = normalize_search_title(str(getattr(task, "title", "") or ""))
+        year = str(getattr(task, "year", "") or "")
+        if not title:
+            return "", None
+        cache_key = f"{title}|{year}"
+        with self._collection_enrich_lock:
+            cached = self._movie_collection_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        collection: Tuple[str, Optional[int]] = ("", None)
+        if _HostMediaChain is not None and _HostMetaInfo is not None:
+            try:
+                media = _HostMediaChain().recognize_media(
+                    meta=self._host_meta_info(title, year),
+                    mtype=self._host_media_type("movie"),
+                    media_source=self._tmdb_source(),
+                    cache=True,
+                )
+                belongs = (getattr(media, "tmdb_info", None) or {}).get(
+                    "belongs_to_collection"
+                ) or {}
+                name = str(belongs.get("name") or "").strip()
+                belongs_id = belongs.get("id")
+                if name and belongs_id:
+                    collection = (name, int(belongs_id))
+            except Exception as exc:
+                self._logger.debug("TMDB 合集查询失败 title=%s: %s", title, exc)
+        with self._collection_enrich_lock:
+            # 空结果不缓存：单次 TMDB 失败不应让该电影永久丢失合集补写机会；
+            # 宿主 recognize_media 自带 cache=True，重复查询不会放大请求量。
+            if collection != ("", None):
+                self._movie_collection_cache[cache_key] = collection
+            overflow = len(self._movie_collection_cache) - self._MOVIE_COLLECTION_CACHE_MAX
+            for stale in list(self._movie_collection_cache)[: max(0, overflow)]:
+                self._movie_collection_cache.pop(stale, None)
+        return collection
 
     def _discard_superseded_task(self, queue: Any, task: DownloadTask) -> int:
         """Drop queued rows for an episode the host library already holds.
@@ -6028,10 +6248,34 @@ class LunaTVSource(_PluginBase):
                 fragment="",
             ).geturl()
             media_id = f"manual:{hashlib.sha256(normalized_url.encode('utf-8')).hexdigest()}"
+        task_title = str(payload.get("title") or "未命名")
+        task_year = str(payload.get("year") or "")
+        if (
+            media_type == "tv"
+            and task_title.strip()
+            and task_title != "未命名"
+            and not str(payload.get("host_media_id") or "").strip()
+        ):
+            # 手动下载与订阅刷新对齐：电视剧统一改用 TMDB 关联的作品首播年，
+            # 避免按 CMS 行的播出年把各季落进不同目录，绿联出现同剧多条目。
+            association = self._associate_tmdb(
+                CmsResult(
+                    source_key=media_id.split(":", 1)[0] or PLUGIN_MEDIA_SOURCE,
+                    source_name="",
+                    vod_id=media_id.split(":", 1)[-1],
+                    title=task_title,
+                    year=task_year,
+                    media_type="tv",
+                    remark="",
+                ),
+                include_candidates=False,
+            )
+            if association.get("status") == "matched":
+                task_year = str(association.get("year") or "").strip() or task_year
         task = DownloadTask.from_episode(
             episode,
-            title=normalize_media_title(str(payload.get("title") or "未命名")),
-            year=str(payload.get("year") or ""),
+            title=normalize_media_title(task_title),
+            year=task_year,
             media_type=media_type,
             root=root,
             mode=str(payload.get("mode") or self._config.get("mode") or "download"),
@@ -6296,6 +6540,162 @@ class LunaTVSource(_PluginBase):
         ):
             return False
         return True
+
+    @staticmethod
+    def _subscription_title_variant_suffix(
+        result_title: str,
+        subscription_title: str,
+    ) -> Optional[str]:
+        """Return a CMS story-arc suffix belonging to the subscribed title."""
+
+        requested = normalize_search_title(subscription_title).strip()
+        candidate = normalize_search_title(result_title).strip()
+        requested_folded = requested.casefold()
+        candidate_folded = candidate.casefold()
+        if not requested_folded or candidate_folded == requested_folded:
+            return "" if requested_folded else None
+        if not candidate_folded.startswith(requested_folded):
+            return None
+        remainder = candidate[len(requested) :]
+        separators = " \t:：·•・∙-_—–/|"
+        if not remainder or remainder[0] not in separators:
+            return None
+        suffix = remainder.strip(separators).casefold()
+        return suffix or None
+
+    @classmethod
+    def _map_subscription_title_variant_seasons(
+        cls,
+        prepared_results: List[Tuple[CmsResult, Dict[str, Any]]],
+        *,
+        title: str,
+        year: str,
+        requested_season: int,
+    ) -> List[Tuple[CmsResult, Dict[str, Any]]]:
+        """Map unlabelled CMS story arcs to seasons for one native TV series.
+
+        Some CMS providers publish a series as ``剧名 篇章名`` rows instead of
+        carrying Sxx markers.  When the same source also includes the exact
+        premiere-title row, the ordered title variants form a safe season
+        family.  Related part rows are merged and their episode numbers are
+        continued before the normal subscription ranking runs.
+        """
+
+        if requested_season <= 1:
+            return prepared_results
+        canonical_title = normalize_search_title(title).strip()
+        if not canonical_title:
+            return prepared_results
+        canonical_year_match = re.search(r"(?:19|20)\d{2}", str(year or ""))
+        canonical_year = (
+            canonical_year_match.group(0) if canonical_year_match else str(year or "").strip()
+        )
+        mapped = list(prepared_results)
+        by_source: Dict[
+            Tuple[str, str], List[Tuple[int, str, int]]
+        ] = {}
+        for index, (result, _association) in enumerate(mapped):
+            if result.media_type != "tv" or _has_explicit_tv_season(result):
+                continue
+            suffix = cls._subscription_title_variant_suffix(result.title, canonical_title)
+            result_year = re.search(r"(?:19|20)\d{2}", str(result.year or ""))
+            if suffix is None or result_year is None or not result.episodes:
+                continue
+            by_source.setdefault(
+                (str(result.source_key), str(result.source_name)), []
+            ).append((index, suffix, int(result_year.group(0))))
+
+        separators = " \t:：·•・∙-_—–/|."
+
+        def suffix_prefix(prefix: str, value: str) -> bool:
+            if prefix == value:
+                return True
+            return bool(
+                prefix
+                and value.startswith(prefix)
+                and value[len(prefix) : len(prefix) + 1] in separators
+            )
+
+        for members in by_source.values():
+            exact = [member for member in members if member[1] == ""]
+            if not exact:
+                continue
+            if canonical_year and not any(
+                str(member[2]) == canonical_year for member in exact
+            ):
+                continue
+            suffixes = {suffix for _index, suffix, _year in members}
+            roots: Dict[str, str] = {}
+            for suffix in suffixes:
+                if not suffix:
+                    roots[suffix] = ""
+                    continue
+                prefixes = [
+                    candidate
+                    for candidate in suffixes
+                    if candidate and suffix_prefix(candidate, suffix)
+                ]
+                roots[suffix] = min(prefixes, key=lambda value: (len(value), value))
+
+            grouped: Dict[str, List[Tuple[int, str, int]]] = {}
+            for member in members:
+                grouped.setdefault(roots[member[1]], []).append(member)
+            if requested_season > len(grouped) or len(grouped) < 2:
+                continue
+            ordered_roots = sorted(
+                grouped,
+                key=lambda root: (
+                    root != "",
+                    min(member[2] for member in grouped[root]),
+                    root,
+                ),
+            )
+            for season, root in enumerate(ordered_roots, start=1):
+                variants: Dict[str, List[Tuple[int, str, int]]] = {}
+                for member in grouped[root]:
+                    variants.setdefault(member[1], []).append(member)
+                offset = 0
+                for suffix in sorted(
+                    variants,
+                    key=lambda value: (
+                        min(member[2] for member in variants[value]),
+                        value,
+                    ),
+                ):
+                    variant_max = offset
+                    for index, _suffix, _result_year in variants[suffix]:
+                        result, association = mapped[index]
+                        episodes = tuple(
+                            replace(
+                                episode,
+                                season=season,
+                                episode=(
+                                    int(episode.episode)
+                                    if int(episode.episode) > offset
+                                    else offset + max(1, int(episode.episode))
+                                ),
+                                season_known=True,
+                            )
+                            for episode in result.episodes
+                        )
+                        if episodes:
+                            variant_max = max(
+                                variant_max,
+                                max(int(episode.episode) for episode in episodes),
+                            )
+                        mapped[index] = (
+                            replace(
+                                result,
+                                title=canonical_title,
+                                year=canonical_year or result.year,
+                                episodes=episodes,
+                                season_range=(season, season),
+                                season_ambiguous=False,
+                            ),
+                            association,
+                        )
+                    offset = variant_max
+        return mapped
 
     @staticmethod
     def _subscription_episode_bounds(
@@ -6569,6 +6969,13 @@ class LunaTVSource(_PluginBase):
                             )
                         break
                 if is_season_subscription:
+                    if identity_source != PLUGIN_MEDIA_SOURCE and identity_id:
+                        prepared_results = self._map_subscription_title_variant_seasons(
+                            prepared_results,
+                            title=normalized_title,
+                            year=subscription_year,
+                            requested_season=subscription_season,
+                        )
                     associations = {
                         (result.source_key, result.vod_id): association
                         for result, association in prepared_results
@@ -7838,12 +8245,18 @@ class LunaTVSource(_PluginBase):
     def _decode_resource_token(content: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(content, str) or not content.startswith("magnet:"):
             return None
-        encoded = (urllib.parse.parse_qs(urllib.parse.urlparse(content).query).get("x.lunatv") or [""])[0]
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(content).query)
+        encoded = (query.get("x.lunatv") or [""])[0]
+        digest = (query.get("xt") or [""])[0]
         if not encoded:
             return None
         try:
             encoded += "=" * (-len(encoded) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
+            raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+            expected = f"urn:btih:{hashlib.sha1(raw).hexdigest()}"
+            if not hmac.compare_digest(digest.casefold(), expected):
+                return None
+            payload = json.loads(raw.decode("utf-8"))
             return payload if isinstance(payload, dict) else None
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
             return None
@@ -8359,6 +8772,8 @@ class LunaTVSource(_PluginBase):
         association: Dict[str, Any] = {}
         association_context: Optional[CmsResult] = None
         association_match_titles: Tuple[str, ...] = ()
+        association_tv_has_season_family = False
+        association_duplicate_urls: set[str] = set()
         if results and not (
             requested_media_type == "movie" and use_target_media_identity
         ):
@@ -8383,6 +8798,34 @@ class LunaTVSource(_PluginBase):
                 association_context,
                 include_candidates=False,
             )
+            association_title_matches = [
+                result
+                for result in results
+                if result.media_type == association_context.media_type
+                and any(
+                    self._subscription_result_matches(
+                        result,
+                        {},
+                        title=title,
+                        year="",
+                        identity_source="",
+                        identity_id="",
+                    )
+                    for title in association_match_titles
+                )
+            ]
+            if association_context.media_type == "tv":
+                association_tv_has_season_family = (
+                    len(_explicit_tv_season_numbers(association_title_matches)) >= 2
+                )
+            url_counts: Dict[str, int] = {}
+            for result in association_title_matches:
+                for episode in result.episodes:
+                    if episode.url:
+                        url_counts[episode.url] = url_counts.get(episode.url, 0) + 1
+            association_duplicate_urls = {
+                url for url, count in url_counts.items() if count > 1
+            }
         # TV resources are presented as one native download item per
         # source/season.  The enclosure carries the ordered episode list and
         # ``download`` expands it back into the plugin's download queue.  This
@@ -8422,7 +8865,7 @@ class LunaTVSource(_PluginBase):
 
         for result in results:
             result_association = association
-            if not use_target_media_identity and not (
+            association_title_match = bool(
                 association_context
                 and result.media_type == association_context.media_type
                 and any(
@@ -8430,16 +8873,44 @@ class LunaTVSource(_PluginBase):
                         result,
                         {},
                         title=title,
-                        year=str(
-                            association.get("year") or association_context.year
-                            if association.get("status") == "matched"
-                            else association_context.year
+                        year="",
+                        identity_source="",
+                        identity_id="",
+                    )
+                    for title in association_match_titles
+                )
+            )
+            association_year_match = bool(
+                association_title_match
+                and any(
+                    self._subscription_result_matches(
+                        result,
+                        {},
+                        title=title,
+                        year=(
+                            ""
+                            if association_tv_has_season_family
+                            else str(
+                                association.get("year")
+                                or association_context.year
+                            )
                         ),
                         identity_source="",
                         identity_id="",
                     )
                     for title in association_match_titles
                 )
+            )
+            duplicate_asset_match = bool(
+                association_title_match
+                and any(
+                    episode.url in association_duplicate_urls
+                    for episode in result.episodes
+                    if episode.url
+                )
+            )
+            if not use_target_media_identity and not (
+                association_year_match or duplicate_asset_match
             ):
                 result_association = {}
             result = self._apply_resource_association(result, result_association)
@@ -8509,8 +8980,8 @@ class LunaTVSource(_PluginBase):
                     group_key = (
                         result.source_key,
                         result.source_name,
-                        normalize_media_title(result.title),
-                        result.year,
+                        group_title,
+                        group_year,
                         season,
                         season_variant,
                     )
@@ -8967,6 +9438,29 @@ class LunaTVSource(_PluginBase):
             return "LunaTVSource", None, None, "LunaTV 下载参数无效"
         raw_episodes = episodes if isinstance(episodes, list) else payload.get("episodes")
         entries = raw_episodes if isinstance(raw_episodes, list) and raw_episodes else [payload]
+        canonical_tv_year = ""
+        payload_media_type = _media_type_value(payload.get("media_type"))
+        payload_title = str(payload.get("title") or "").strip()
+        if (
+            payload_media_type == "tv"
+            and payload_title
+            and not str(payload.get("host_media_id") or "").strip()
+        ):
+            association = self._associate_tmdb(
+                CmsResult(
+                    source_key=str(payload.get("source_key") or "").strip()
+                    or PLUGIN_MEDIA_SOURCE,
+                    source_name=str(payload.get("source_name") or ""),
+                    vod_id=str(payload.get("media_id") or "").split(":", 1)[-1],
+                    title=payload_title,
+                    year=str(payload.get("year") or ""),
+                    media_type="tv",
+                    remark="",
+                ),
+                include_candidates=False,
+            )
+            if association.get("status") == "matched":
+                canonical_tv_year = str(association.get("year") or "").strip()
         enqueued_ids: List[str] = []
         duplicate_count = 0
         invalid_count = 0
@@ -9012,7 +9506,13 @@ class LunaTVSource(_PluginBase):
             task = DownloadTask.from_episode(
                 episode,
                 title=normalize_media_title(str(entry.get("title") or payload.get("title") or "未命名")),
-                year=str(entry.get("year") or payload.get("year") or ""),
+                year=(
+                    canonical_tv_year
+                    if canonical_tv_year
+                    and _media_type_value(entry.get("media_type") or payload.get("media_type"))
+                    == "tv"
+                    else str(entry.get("year") or payload.get("year") or "")
+                ),
                 media_type=_media_type_value(entry.get("media_type") or payload.get("media_type")),
                 root=root,
                 mode=str(self._config.get("mode") or "download"),
