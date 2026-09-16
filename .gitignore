@@ -3,3 +3,6 @@
 __pycache__/
 *.py[cod]
 plugins.v3/lunatvsource/node_modules/
+lunatvsource-*.tar.gz
+lunatvsource_v*.zip
+lunatvsource_v*.zip.sha256

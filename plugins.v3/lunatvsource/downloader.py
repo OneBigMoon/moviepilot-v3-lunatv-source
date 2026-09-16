@@ -430,15 +430,19 @@ class DownloadTask:
         return f"{host_source}:{host_id}"
 
     @property
-    def identity_key(self) -> str:
-        media_identity = self._host_media_identity() or str(self.media_id or "").strip()
-        source_identity = self.source_identity.strip() or _task_source_identity(
+    def stable_source_identity(self) -> str:
+        """Keep the original source stable after automatic failover."""
+        return str(self.source_identity or "").strip() or _task_source_identity(
             self.source_key,
             self.source_name,
             self.source_sensitive,
         )
+
+    @property
+    def identity_key(self) -> str:
+        media_identity = self._host_media_identity() or str(self.media_id or "").strip()
         return (
-            f"{source_identity}|{media_identity}|"
+            f"{self.stable_source_identity}|{media_identity}|"
             f"{self.season}|{self.episode}|{self.mode}"
         )
 
@@ -3076,20 +3080,97 @@ class DownloadQueue(_SerialDownloadQueue):
             return f"invalid:{task.task_id}"
         return os.path.normcase(str(destination))
 
+    @staticmethod
+    def _concurrency_group_key(task: DownloadTask) -> tuple[str, ...]:
+        """Group TV episodes so parallel slots prefer different seasons."""
+        if str(task.media_type or "").strip().casefold() != "tv":
+            return ("task", str(task.task_id or ""))
+        media_identity = task._host_media_identity() or str(task.media_id or "").strip()
+        if not media_identity:
+            media_identity = "|".join(
+                (
+                    str(task.title or "").strip(),
+                    str(task.year or "").strip(),
+                )
+            )
+        try:
+            season = str(int(task.season))
+        except (TypeError, ValueError):
+            season = str(task.season or "")
+        return (
+            "tv",
+            task.stable_source_identity,
+            media_identity,
+            season,
+            str(task.mode or "").strip(),
+            str(task.root or "").strip(),
+        )
+
+    @staticmethod
+    def _task_claim_count(task: DownloadTask) -> int:
+        try:
+            attempts = max(0, int(task.attempts or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts:
+            return attempts
+        return 0 if str(task.state or "").lower() in {"pending", "paused"} else 1
+
     def _next_claimable_task(
         self,
         tasks: List[DownloadTask],
     ) -> Optional[DownloadTask]:
         active_destinations = set(self._active_destinations.values())
-        return next(
+        claimable = [
+            item
+            for item in tasks
+            if item.state == "pending"
+            and self._destination_key(item) not in active_destinations
+        ]
+        if not claimable:
+            return None
+        active_ids = set(self._active)
+        active_groups = {
+            self._concurrency_group_key(item)
+            for item in tasks
+            if item.task_id in active_ids
+        }
+        preferred = [
+            item
+            for item in claimable
+            if self._concurrency_group_key(item) not in active_groups
+        ]
+        if not preferred:
+            return claimable[0]
+        first_non_tv = next(
             (
-                item
-                for item in tasks
-                if item.state == "pending"
-                and self._destination_key(item) not in active_destinations
+                index
+                for index, item in enumerate(preferred)
+                if str(item.media_type or "").strip().casefold() != "tv"
             ),
-            None,
+            len(preferred),
         )
+        tv_candidates = preferred[:first_non_tv]
+        if not tv_candidates:
+            return preferred[0]
+        group_claim_counts: Dict[tuple[str, ...], int] = {}
+        for item in tasks:
+            if str(item.media_type or "").strip().casefold() != "tv":
+                continue
+            group_key = self._concurrency_group_key(item)
+            group_claim_counts[group_key] = (
+                group_claim_counts.get(group_key, 0) + self._task_claim_count(item)
+            )
+        return min(
+            enumerate(tv_candidates),
+            key=lambda indexed: (
+                group_claim_counts.get(
+                    self._concurrency_group_key(indexed[1]),
+                    0,
+                ),
+                indexed[0],
+            ),
+        )[1]
 
     @property
     def _control_event(self) -> threading.Event:

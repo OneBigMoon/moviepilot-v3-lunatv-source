@@ -51,6 +51,7 @@ python3 -m compileall plugins.v3/lunatvsource
 cd plugins.v3/lunatvsource && npm ci && npm run build
 cd ../..
 python3 .github/scripts/check_federation_css.py
+python3 .github/scripts/build_release.py
 git diff --check
 ```
 
@@ -60,7 +61,7 @@ git diff --check
 
 1. 修改 Python 或配置合同后运行 `python3 -m pytest tests/v3/lunatvsource` 和 `python3 -m compileall plugins.v3/lunatvsource`。
 2. 修改 Vue 后在 `plugins.v3/lunatvsource` 执行 `npm ci`、`npm run build`，再运行联邦 CSS 门禁，并把新的 `dist` 产物一起提交。
-3. 发布时同步 `LunaTVSource.plugin_version`、`package.v3.json`、插件 `package.json`/`package-lock.json` 和 `history` 顶部记录；不要把版本号写死在测试里。
+3. 发布时同步 `LunaTVSource.plugin_version`、`package.v3.json`、插件 `package.json`/`package-lock.json` 和 `history` 顶部记录，再用 `.github/scripts/build_release.py` 生成根目录布局、固定时间戳及标准权限的可重复 ZIP；不要把版本号写死在测试里。
 4. 发布前在真实 MoviePilot V3 宿主验证安装、启动、保存配置、重载、停用、原生搜索、下载入队、停止任务和媒体库可见性；单元测试不能替代这一步。
 5. 新增宿主调用优先使用 `app.sdk`、`app.chain.*` 或 `app.db.oper.*`；兼容旧宿主的内部导入必须单独隔离，并且不得把异常原文返回到 API `message` 或状态字段。
 

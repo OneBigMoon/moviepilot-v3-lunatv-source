@@ -27,6 +27,29 @@ def make_task(task_id: str, root: Path) -> DownloadTask:
     )
 
 
+def make_tv_task(
+    task_id: str,
+    root: Path,
+    *,
+    season: int,
+    episode: int,
+) -> DownloadTask:
+    return DownloadTask(
+        task_id=task_id,
+        source_key="lunatv",
+        media_id="site:shared-show",
+        title="多季测试剧",
+        year="2026",
+        media_type="tv",
+        season=season,
+        episode=episode,
+        url=f"https://example.test/s{season:02d}e{episode:02d}.m3u8",
+        root=str(root),
+        host_media_source="themoviedb",
+        host_media_id="12345",
+    )
+
+
 def wait_until(predicate, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -60,6 +83,141 @@ def test_queue_runs_bounded_parallel_tasks_and_leaves_third_pending(tmp_path: Pa
     assert "c" not in started
     release.set()
     wait_until(lambda: queue.summary()["completed"] == 3)
+
+
+def test_queue_spreads_parallel_slots_across_tv_seasons(tmp_path: Path):
+    data = {}
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        max_concurrent_tasks=2,
+    )
+    for task in (
+        make_tv_task("s03e01", tmp_path, season=3, episode=1),
+        make_tv_task("s03e02", tmp_path, season=3, episode=2),
+        make_tv_task("s05e01", tmp_path, season=5, episode=1),
+    ):
+        assert queue.enqueue(task)
+
+    started: set[str] = set()
+    release = threading.Event()
+    started_lock = threading.Lock()
+
+    def execute(task: DownloadTask) -> str:
+        with started_lock:
+            started.add(task.task_id)
+        assert release.wait(2)
+        return str(tmp_path / f"{task.task_id}.mp4")
+
+    queue._execute = execute  # type: ignore[method-assign]
+    assert queue.wake()
+    wait_until(lambda: len(started) == 2)
+    assert started == {"s03e01", "s05e01"}
+    release.set()
+    wait_until(lambda: queue.summary()["completed"] == 3)
+
+
+def test_queue_fills_parallel_slots_when_only_one_tv_season_is_pending(
+    tmp_path: Path,
+):
+    data = {}
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        max_concurrent_tasks=2,
+    )
+    for episode in (1, 2, 3):
+        assert queue.enqueue(
+            make_tv_task(
+                f"s03e{episode:02d}",
+                tmp_path,
+                season=3,
+                episode=episode,
+            )
+        )
+
+    started: set[str] = set()
+    release = threading.Event()
+    started_lock = threading.Lock()
+
+    def execute(task: DownloadTask) -> str:
+        with started_lock:
+            started.add(task.task_id)
+        assert release.wait(2)
+        return str(tmp_path / f"{task.task_id}.mp4")
+
+    queue._execute = execute  # type: ignore[method-assign]
+    assert queue.wake()
+    wait_until(lambda: len(started) == 2)
+    assert started == {"s03e01", "s03e02"}
+    release.set()
+    wait_until(lambda: queue.summary()["completed"] == 3)
+
+
+def test_queue_rotates_refilled_slot_to_a_third_tv_season(tmp_path: Path):
+    data = {}
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        max_concurrent_tasks=2,
+    )
+    for task in (
+        make_tv_task("s01e01", tmp_path, season=1, episode=1),
+        make_tv_task("s01e02", tmp_path, season=1, episode=2),
+        make_tv_task("s01e03", tmp_path, season=1, episode=3),
+        make_tv_task("s02e01", tmp_path, season=2, episode=1),
+        make_tv_task("s03e01", tmp_path, season=3, episode=1),
+    ):
+        assert queue.enqueue(task)
+
+    started: list[str] = []
+    started_lock = threading.Lock()
+    release_first = threading.Event()
+    release_rest = threading.Event()
+
+    def execute(task: DownloadTask) -> str:
+        with started_lock:
+            started.append(task.task_id)
+        if task.task_id == "s01e01":
+            assert release_first.wait(2)
+        else:
+            assert release_rest.wait(2)
+        return str(tmp_path / f"{task.task_id}.mp4")
+
+    queue._execute = execute  # type: ignore[method-assign]
+    assert queue.wake()
+    wait_until(lambda: len(started) == 2)
+    assert set(started[:2]) == {"s01e01", "s02e01"}
+
+    release_first.set()
+    wait_until(lambda: len(started) == 3)
+    assert started[2] == "s03e01"
+    assert "s01e02" not in started
+
+    release_rest.set()
+    wait_until(lambda: queue.summary()["completed"] == 5)
+
+
+def test_queue_keeps_movie_fifo_when_head_task_is_a_retry(tmp_path: Path):
+    data = {}
+    queue = DownloadQueue(
+        data.get,
+        data.__setitem__,
+        lambda *_: None,
+        max_concurrent_tasks=2,
+    )
+    retry = make_task("retry-first", tmp_path)
+    retry.attempts = 1
+    assert queue.enqueue(retry)
+    assert queue.enqueue(make_task("new-second", tmp_path))
+
+    claimed = queue._claim_next()
+
+    assert claimed is not None
+    assert claimed[0].task_id == "retry-first"
 
 
 def test_queue_serializes_tasks_that_share_one_destination(tmp_path: Path):

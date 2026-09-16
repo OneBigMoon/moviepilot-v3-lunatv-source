@@ -52,22 +52,11 @@ jobs:
           checksum_path="${zip_path}.sha256"
           entries_path="$RUNNER_TEMP/lunatvsource_zip_entries.txt"
           vendor_dir="$RUNNER_TEMP/lunatvsource_vendor"
-          rm -f "$zip_path" "$checksum_path" "$entries_path"
+          rm -f "$entries_path"
           rm -rf "$vendor_dir"
-          (
-            cd plugins.v3/lunatvsource
-            zip -qr "$zip_path" . \
-              -x 'node_modules/*' '*/node_modules/*' \
-              '.git/*' '*/.git/*' \
-              '__pycache__/*' '*/__pycache__/*' '*.pyc' '*.pyo' \
-              '.pytest_cache/*' '*/.pytest_cache/*' \
-              '.mypy_cache/*' '*/.mypy_cache/*' \
-              '.ruff_cache/*' '*/.ruff_cache/*' \
-              '.DS_Store' '*/.DS_Store'
-          )
+          python .github/scripts/build_release.py --output-dir "$RUNNER_TEMP"
           (
             cd "$(dirname "$zip_path")"
-            sha256sum "$(basename "$zip_path")" > "$(basename "$checksum_path")"
             sha256sum -c "$(basename "$checksum_path")"
           )
           unzip -t "$zip_path"
@@ -79,6 +68,7 @@ jobs:
           required_files=(
             __init__.py
             ai.py
+            classification.py
             cms.py
             downloader.py
             m3u8_engine.py

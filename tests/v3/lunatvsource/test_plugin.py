@@ -4134,7 +4134,7 @@ def test_active_queue_tasks_project_to_native_download_list_and_filter(monkeypat
     assert pending_torrent.name == "排队电视剧"
     assert pending_torrent.save_path == "/downloads/tv"
     assert pending_torrent.season_episode == "第2季 · 共1集 · 已下载0/1"
-    assert pending_torrent.left_time == "已下载 0/1 集"
+    assert pending_torrent.left_time == "等待下载 · 已下载 0/1 集"
     assert _field(pending_torrent.media, "season") == "第2季 · 共1集 · 已下载0/1"
     assert _field(pending_torrent.media, "episode") is None
     assert _field(pending_torrent.media, "media_source") == "themoviedb"
@@ -4229,7 +4229,7 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
     assert season_one.title == "整季测试剧 第1季（共3集）"
     assert season_one.name == "整季测试剧"
     assert season_one.season_episode == "第1季 · 共3集 · 已下载1/3"
-    assert season_one.left_time == "已下载 1/3 集"
+    assert season_one.left_time == "等待下载 · 已下载 1/3 集"
     assert season_one.progress == pytest.approx(50.0)
     assert _field(season_one.media, "season") == "第1季 · 共3集 · 已下载1/3"
     assert _field(season_one.media, "episode") is None
@@ -4258,6 +4258,102 @@ def test_tv_season_projects_one_row_and_native_controls_apply_to_whole_season(
         "season-1-pending",
         "season-1-paused",
     }
+
+
+def test_tv_season_projection_stays_one_row_after_source_failover(tmp_path: Path):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    common = {
+        "media_id": "primary:show",
+        "title": "换源测试剧",
+        "year": "2026",
+        "media_type": "tv",
+        "season": 2,
+        "root": str(tmp_path),
+        "host_media_source": "themoviedb",
+        "host_media_id": "98765",
+        "state": "pending",
+    }
+    plugin.save_data(
+        plugin._queue.DATA_KEY,
+        [
+            DownloadTask(
+                task_id="primary-episode",
+                source_key="primary",
+                episode=1,
+                url="https://primary.test/s02e01.m3u8",
+                **common,
+            ).to_dict(),
+            DownloadTask(
+                task_id="failed-over-episode",
+                source_key="backup",
+                source_identity="primary",
+                source_name="备用源",
+                episode=2,
+                url="https://backup.test/s02e02.m3u8",
+                **common,
+            ).to_dict(),
+        ],
+    )
+
+    torrents = plugin.list_torrents(downloader="LunaTVSource")
+
+    assert len(torrents) == 1
+    assert torrents[0].title == "换源测试剧 第2季（共2集）"
+    assert torrents[0].season_episode == "第2季 · 共2集 · 已下载0/2"
+
+
+def test_pending_season_waiting_state_ignores_other_season_finalizing(
+    monkeypatch,
+    tmp_path: Path,
+):
+    plugin = LunaTVSource()
+    plugin.init_plugin({"enabled": True})
+    plugin.save_data(
+        plugin._queue.DATA_KEY,
+        [
+            DownloadTask(
+                task_id="finalizing-season-one",
+                source_key="primary",
+                media_id="primary:show",
+                title="跨季整理测试剧",
+                year="2026",
+                media_type="tv",
+                season=1,
+                episode=1,
+                url="https://primary.test/s01e01.m3u8",
+                root=str(tmp_path),
+                host_media_source="themoviedb",
+                host_media_id="24680",
+                state="completed",
+            ).to_dict(),
+            DownloadTask(
+                task_id="pending-season-two",
+                source_key="primary",
+                media_id="primary:show",
+                title="跨季整理测试剧",
+                year="2026",
+                media_type="tv",
+                season=2,
+                episode=1,
+                url="https://primary.test/s02e01.m3u8",
+                root=str(tmp_path),
+                host_media_source="themoviedb",
+                host_media_id="24680",
+                state="pending",
+            ).to_dict(),
+        ],
+    )
+    monkeypatch.setattr(
+        plugin._queue,
+        "finalizing_task_ids",
+        lambda: {"finalizing-season-one"},
+    )
+
+    torrents = plugin.list_torrents(downloader="LunaTVSource")
+    pending = next(torrent for torrent in torrents if torrent.hash == "pending-season-two")
+
+    assert pending.left_time == "等待下载 · 已下载 0/1 集"
 
 
 def test_native_resume_wakes_serial_queue(monkeypatch, tmp_path: Path):

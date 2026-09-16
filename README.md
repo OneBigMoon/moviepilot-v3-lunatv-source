@@ -75,6 +75,7 @@ python3 -m compileall plugins.v3/lunatvsource
 npm --prefix plugins.v3/lunatvsource ci
 npm --prefix plugins.v3/lunatvsource run build
 python3 .github/scripts/check_federation_css.py
+python3 .github/scripts/build_release.py
 git diff --check
 ```
 
@@ -82,7 +83,7 @@ git diff --check
 
 - 发布前必须通过 `.github/workflows/ci.yml`：完整测试、Python 编译、前端生产构建，以及 `dist` 已提交且可重复生成。
 - 发布标签必须严格等于 `LunaTVSource_v<package.v3.json 中的版本>`；例如 `0.4.61` 只能使用 `LunaTVSource_v0.4.61`，标签与清单不一致时 CI 会拒绝。
-- 为兼容 MoviePilot 的 Release 安装路径，同名发布还应附带小写资产 `lunatvsource_v<version>.zip`（例如 `lunatvsource_v0.4.61.zip`）；压缩包根目录直接放插件文件，不再套一层 `lunatvsource/` 目录。
+- 为兼容 MoviePilot 的 Release 安装路径，使用 `python3 .github/scripts/build_release.py` 生成小写资产 `lunatvsource_v<version>.zip` 及校验文件；压缩包根目录直接放插件文件，不套 `lunatvsource/` 目录，并统一文件 `0644`、目录 `0755` 权限。
 - MoviePilot 更新后先核对插件版本、工作台最近追更/同步状态，再用一集新增内容验证“下载 → 原生整理 → 订阅进度递增 → Emby/Jellyfin 可见”的完整链路。
 - 回滚前先停用插件，保留队列、缓存和已完成文件；不要删除持久化数据，也不要移动或覆盖旧标签。
 - 回滚采用向前修复：撤销有问题的发布提交，提升一个补丁版本，重新通过同一 CI 后创建新的更高版本标签。这样 MoviePilot 能正常识别更新，历史版本和队列数据仍可追踪。
