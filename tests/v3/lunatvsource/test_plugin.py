@@ -1403,7 +1403,7 @@ def test_resource_torrents_targets_native_identity_for_tv_and_movie(monkeypatch)
         media_year="2013",
     )
     assert len(movie_items) == 1
-    assert movie_items[0].title == "進擊的巨人 (2013) · 未知"
+    assert movie_items[0].title == "進擊的巨人 (2013)"
     assert movie_items[0].media_source == "anilist"
     assert movie_items[0].media_id == "anilist:anime_123"
     movie_payload = plugin._decode_resource_token(movie_items[0].enclosure)
@@ -1855,9 +1855,9 @@ def test_resource_torrents_label_and_prefer_verified_resolution(monkeypatch):
 
     assert [item.site_name for item in items] == ["高清源 · 1080P · 128ms", "标清源 · 480P · 320ms"]
     assert [item.pri_order for item in items] == [108, 48]
-    assert items[0].title.endswith("· 1080P")
-    assert items[0].description == "LunaTV · 1080P · m3u8"
-    assert "1080P" not in items[0].labels
+    assert not items[0].title.endswith("· 1080P")
+    assert items[0].description == "LunaTV · m3u8"
+    assert "1080P" in items[0].labels
     assert "128ms" in items[0].labels
     assert items[0].uploadvolumefactor == 1.0
     assert items[0].downloadvolumefactor == 1.0
@@ -3072,9 +3072,9 @@ def test_resource_torrents_sort_actual_heights_and_keep_ties_stable(monkeypatch)
     for item in items:
         payload = plugin._decode_resource_token(item.enclosure)
         quality = payload["resolution"]
-        assert item.title.endswith(f"· {quality}")
-        assert quality in item.description
-        assert quality not in item.labels
+        assert not item.title.endswith(f"· {quality}")
+        assert quality not in item.description
+        assert quality in item.labels
         assert item.pri_order == plugin_module._resource_sort_priority(
             payload["resolution_height"]
         )

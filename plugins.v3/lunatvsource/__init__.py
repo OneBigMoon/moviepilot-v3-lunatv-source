@@ -1285,7 +1285,7 @@ class LunaTVSource(_PluginBase):
     plugin_name = "LunaTV 资源订阅"
     plugin_desc = "接入 LunaTV/MoonTV 苹果 CMS 资源，复用 MoviePilot 原生搜索、订阅、目录、整理与媒体库链路。"
     plugin_icon = "https://raw.githubusercontent.com/OneBigMoon/moviepilot-v3-lunatv-source/master/icons/lunatvsource.png"
-    plugin_version = "0.4.109"
+    plugin_version = "0.4.111"
     plugin_author = "OneBigMoon"
     author_url = "https://github.com/OneBigMoon"
     plugin_config_prefix = "lunatvsource_"
@@ -1840,7 +1840,7 @@ class LunaTVSource(_PluginBase):
                     segment_thread_count=self._config["segment_thread_count"],
                     allowed_private_ranges=self._probe_allowed_private_ranges(),
                     ad_filter_regex=self._config["hls_ad_filter_regex"],
-                    download_proxy=self._config["download_proxy"],
+            download_proxy=self._effective_download_proxy(),
                     on_ad_scan=self._record_ad_scan,
                 )
             except Exception:
@@ -1892,6 +1892,23 @@ class LunaTVSource(_PluginBase):
     def get_state(self) -> bool:
         return self._enabled
 
+    def _effective_download_proxy(self) -> str:
+        override = str(self._config.get("download_proxy") or "").strip()
+        if override:
+            return override
+        try:
+            from app.sdk.config import settings
+
+            value = str(settings.PROXY_HOST or "").strip()
+        except Exception:
+            return ""
+        try:
+            parse_proxy_url(value)
+        except ValueError as exc:
+            self._logger.warning("MoviePilot 全局代理配置无效，下载将直连：%s", exc)
+            return ""
+        return value
+
     @staticmethod
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """仅在安装目录存在联邦入口时启用 Vue 工作台。"""
@@ -1916,7 +1933,7 @@ class LunaTVSource(_PluginBase):
                     "type": "info" if root else "warning",
                     "variant": "tonal",
                     "text": (
-                        f"已启用，下载目录：{root}。任务按设置并发执行，完成后可刷新 Emby。"
+                        f"已启用，下载目录：{root}。任务按设置并发执行，完成后可刷新绿联云影音等已配置媒体服务器。"
                         if root
                         else "未找到下载目录。可在插件设置填写目录，或在 MoviePilot 目录设置中配置本地下载目录。"
                     ),
@@ -2186,7 +2203,7 @@ class LunaTVSource(_PluginBase):
                             "model": "download_proxy",
                             "label": "下载代理（可选）",
                             "placeholder": "http://192.168.1.2:7890 或 socks5://192.168.1.2:7890",
-                            "hint": "仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。",
+                        "hint": "留空使用 MoviePilot 全局代理；填写时覆盖全局设置。作用于媒体分片和 N_m3u8DL-RE 的 GitHub 下载。",
                             "persistentHint": True,
                         },
                     },
@@ -2281,8 +2298,8 @@ class LunaTVSource(_PluginBase):
                         "props": {
                             "model": "mediaserver_name",
                             "label": "完成后刷新媒体服务器（可选）",
-                            "placeholder": "Emby",
-                            "hint": "留空则刷新所有已启用媒体服务器；播放仍在 Emby/Jellyfin 页面完成。",
+                            "placeholder": "绿联云影音",
+                            "hint": "先在 MoviePilot 添加并启用绿联影视，再填写同名服务器；留空刷新所有已启用服务器。整理后的文件和 NFO 由绿联影视中心读取。",
                             "persistentHint": True,
                         },
                     },
@@ -2410,7 +2427,7 @@ class LunaTVSource(_PluginBase):
                             "model": "download_proxy",
                             "label": "下载代理（可选）",
                             "placeholder": "http://192.168.1.2:7890 或 socks5://192.168.1.2:7890",
-                            "hint": "仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。",
+                        "hint": "留空使用 MoviePilot 全局代理；填写时覆盖全局设置。作用于媒体分片和 N_m3u8DL-RE 的 GitHub 下载。",
                             "persistentHint": True,
                         },
                     },
@@ -2493,8 +2510,8 @@ class LunaTVSource(_PluginBase):
                         "props": {
                             "model": "mediaserver_name",
                             "label": "完成后刷新媒体服务器（可选）",
-                            "placeholder": "留空刷新所有已启用服务器，例如 Emby",
-                            "hint": "仅控制完成后的同步目标，播放仍在 Emby/Jellyfin 页面完成。",
+                            "placeholder": "填写 MoviePilot 中的服务器名称，例如绿联云影音",
+                            "hint": "先在 MoviePilot 添加并启用绿联影视，再填写同名服务器；留空刷新所有已启用服务器。整理后的文件和 NFO 由绿联影视中心读取。",
                             "persistentHint": True,
                         },
                     },
@@ -3983,7 +4000,21 @@ class LunaTVSource(_PluginBase):
             ),
             reverse=True,
         )
-        return [(result, association) for result, association, _ in cards]
+        unique_cards = {}
+        for result, association, _ in cards:
+            key = (
+                result.media_type,
+                normalize_media_title(result.title).casefold(),
+                result.year,
+                result.season_range if result.media_type == "tv" else (),
+            )
+            existing = unique_cards.get(key)
+            if existing is None or (
+                not (existing[0].poster_path or existing[1].get("poster_path"))
+                and (result.poster_path or association.get("poster_path"))
+            ):
+                unique_cards[key] = (result, association)
+        return list(unique_cards.values())
 
     def _sdk_media_info(
         self,
@@ -5203,7 +5234,10 @@ class LunaTVSource(_PluginBase):
                 )
                 all_succeeded = False
                 continue
-            if result is False:
+            if result is False or (
+                _enum_value(getattr(service, "type", "")) == "ugreen"
+                and result is not True
+            ):
                 self._logger.warning("媒体服务器 %s 未接受媒体库刷新请求", name)
                 all_succeeded = False
                 continue
@@ -5762,11 +5796,12 @@ class LunaTVSource(_PluginBase):
         }
 
     def api_status(self) -> Any:
+        download_proxy = self._effective_download_proxy()
         queue = self._queue or DownloadQueue(
             lambda _key, default=None: default,
             lambda *_: None,
             self._notify,
-            download_proxy=self._config.get("download_proxy", ""),
+            download_proxy=download_proxy,
         )
         directories = self._system_directory_infos()
         configured_root = str(self._config.get("download_root") or "").strip()
@@ -5808,10 +5843,10 @@ class LunaTVSource(_PluginBase):
                         "segment_thread_count",
                         DEFAULT_SEGMENT_THREAD_COUNT,
                     ),
-                    "proxy_enabled": bool(self._config.get("download_proxy")),
+                    "proxy_enabled": bool(download_proxy),
                     "proxy_endpoint": (
-                        parse_proxy_url(self._config.get("download_proxy", "")).redacted
-                        if self._config.get("download_proxy")
+                        parse_proxy_url(download_proxy).redacted
+                        if download_proxy
                         else ""
                     ),
                 },
@@ -9285,20 +9320,19 @@ class LunaTVSource(_PluginBase):
                 title = f"{title} ({row['year']})"
             if payload["media_type"] == "tv":
                 title = f"{title} S{int(payload['season']):02d}E{int(payload['episode']):02d}"
-            title = f"{title} · {quality}"
             latency_ms = self._probe_latency_ms(row["probe_url"]) if height > 0 else 0
             payload["latency_ms"] = latency_ms
             payload["page_url"] = row["page_url"]
             payload["episode_count"] = 1
             site_name = f"{row['site_name']} · {quality}"
-            labels = ["LunaTV", "m3u8"]
+            labels = ["LunaTV", "m3u8", quality]
             if latency_ms:
                 site_name = f"{site_name} · {latency_ms}ms"
                 labels.append(f"{latency_ms}ms")
             torrents.append(build_torrent(
                 site_name=site_name,
                 title=title,
-                description=f"LunaTV · {quality} · m3u8",
+                description="LunaTV · m3u8",
                 media_source=payload["host_media_source"],
                 media_id=payload["host_media_id"],
                 enclosure=self._resource_token(payload),

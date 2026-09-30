@@ -8,6 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
@@ -471,6 +472,37 @@ def test_segment_proxy_forwards_range_through_http_proxy(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize(
+    "override,global_proxy,expected_host",
+    [
+        ("", "http://user:secret@192.100.2.2:7890", "192.100.2.2"),
+        ("http://custom.example:7890", "http://global.example:7890", "custom.example"),
+        ("", "", None),
+        ("", "invalid", None),
+    ],
+)
+def test_plugin_download_proxy_inherits_moviepilot_default(
+    monkeypatch, override, global_proxy, expected_host
+):
+    monkeypatch.setitem(
+        sys.modules, "app.sdk.config",
+        SimpleNamespace(settings=SimpleNamespace(PROXY_HOST=global_proxy)),
+    )
+    plugin = LunaTVSource()
+    try:
+        plugin.init_plugin({"download_proxy": override})
+        proxy = plugin._queue._download_proxy
+        assert (proxy.host if proxy else None) == expected_host
+        assert plugin._config["download_proxy"] == override
+        status = plugin.api_status()["data"]["download_settings"]
+        assert status["proxy_enabled"] == bool(expected_host)
+        assert "secret" not in str(status)
+        plugin._queue = None
+        assert plugin.api_status()["data"]["download_settings"] == status
+    finally:
+        plugin.stop_service()
 
 
 def test_download_queue_and_status_keep_proxy_secret_private(tmp_path: Path):

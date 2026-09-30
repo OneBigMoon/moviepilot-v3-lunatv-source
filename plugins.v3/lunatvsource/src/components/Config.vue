@@ -311,7 +311,7 @@ onBeforeUnmount(() => {
           v-model="config.download_proxy"
           label="下载代理（可选）"
           placeholder="http://192.168.1.2:7890 或 socks5://192.168.1.2:7890"
-          hint="仅代理媒体分片和 N_m3u8DL-RE 的 GitHub 下载；留空直连。"
+          hint="留空使用 MoviePilot 全局代理；填写时覆盖全局设置。作用于媒体分片和 N_m3u8DL-RE 的 GitHub 下载。"
           persistent-hint
           variant="outlined"
         />
@@ -408,8 +408,8 @@ onBeforeUnmount(() => {
         <VTextField
           v-model="config.mediaserver_name"
           label="完成后刷新媒体服务器（可选）"
-          placeholder="留空刷新所有已启用服务器，例如 Emby"
-          hint="仅控制下载完成后的同步目标，播放仍在 Emby/Jellyfin 页面完成。"
+          placeholder="填写 MoviePilot 中的服务器名称，例如绿联云影音"
+          hint="先在 MoviePilot 媒体服务器中添加并启用绿联影视；此处填写同名服务器，留空刷新所有已启用服务器。整理后的文件和 NFO 由绿联影视中心读取。"
           persistent-hint
           variant="outlined"
         />

@@ -57,8 +57,8 @@ def test_search_movie_resources_are_sorted_and_download_queues_highest_resolutio
     )
 
     assert [item.title for item in resources] == [
-        "示例电影 · 1080P",
-        "示例电影 · 480P",
+        "示例电影",
+        "示例电影",
     ]
     assert [item.pri_order for item in resources] == [108, 48]
     assert [
