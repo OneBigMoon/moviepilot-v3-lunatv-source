@@ -1005,7 +1005,6 @@ def test_queue_persists_active_engine_progress(tmp_path: Path):
 
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg")
 
 
 

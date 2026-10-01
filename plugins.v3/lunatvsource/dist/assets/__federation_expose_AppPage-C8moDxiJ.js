@@ -646,7 +646,7 @@ return (_ctx, _cache) => {
       _cache[7] || (_cache[7] = _createElementVNode("div", null, [
         _createElementVNode("div", { class: "lunatv-eyebrow" }, "THIRD-PARTY CMS / M3U8"),
         _createElementVNode("h1", null, "LunaTV 资源订阅"),
-        _createElementVNode("p", null, "接入 MoviePilot 原生搜索、订阅与下载；播放继续交给既有 Emby。")
+        _createElementVNode("p", null, "接入 MoviePilot 原生搜索、订阅与下载；播放交给已配置的媒体服务器。")
       ], -1)),
       _createElementVNode("div", _hoisted_3, [
         _createElementVNode("span", _hoisted_4, " 并发上限：" + _toDisplayString(downloadSettings.value.max_concurrent_tasks || 2) + " 任务 × " + _toDisplayString(downloadSettings.value.segment_thread_count || 16) + " 分片 ", 1),
@@ -1153,7 +1153,7 @@ return (_ctx, _cache) => {
       : _createCommentVNode("", true),
     (activeTab.value === 'sources')
       ? (_openBlock(), _createElementBlock("section", _hoisted_92, [...(_cache[43] || (_cache[43] = [
-          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-d70a80ea><div class=\"section-title\" data-v-d70a80ea>使用说明</div><span class=\"source-caption\" data-v-d70a80ea>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-d70a80ea><p data-v-d70a80ea><strong data-v-d70a80ea>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-d70a80ea><strong data-v-d70a80ea>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-d70a80ea><strong data-v-d70a80ea>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-d70a80ea><strong data-v-d70a80ea>媒体库</strong>：目录内没有正在下载的缓存文件后才显示完整文件夹；完成后可请求 Emby/Jellyfin 刷新。</p><p data-v-d70a80ea><strong data-v-d70a80ea>播放</strong>：插件不内置 m3u8 播放器，播放仍由已有 Emby/Jellyfin 页面负责。</p></div>", 2)
+          _createStaticVNode("<div class=\"section-heading help-heading\" data-v-e00a90fe><div class=\"section-title\" data-v-e00a90fe>使用说明</div><span class=\"source-caption\" data-v-e00a90fe>常用规则与处理方式</span></div><div class=\"help-grid\" data-v-e00a90fe><p data-v-e00a90fe><strong data-v-e00a90fe>目录</strong>：目录留空时按媒体类型读取 MoviePilot 的本地目录；填写插件目录则优先使用插件目录。</p><p data-v-e00a90fe><strong data-v-e00a90fe>多季合集</strong>：有明确季号或 TMDB 季集数能完整对应时才会自动分季；无法确认时会暂停，避免错放。</p><p data-v-e00a90fe><strong data-v-e00a90fe>自动追更</strong>：MoviePilot 活跃电视剧订阅会定期重新搜索；已完成和正在下载的集数会跳过，只排队新增集。</p><p data-v-e00a90fe><strong data-v-e00a90fe>媒体库</strong>：下载完成并整理后，可请求绿联影视、Emby 或 Jellyfin 刷新；扫描是否接受和作品是否可见会分别核对。</p><p data-v-e00a90fe><strong data-v-e00a90fe>播放</strong>：播放由已配置的媒体服务器负责。</p></div>", 2)
         ]))]))
       : _createCommentVNode("", true)
   ], 8, _hoisted_1))
@@ -1161,6 +1161,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-d70a80ea"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e00a90fe"]]);
 
 export { AppPage as default };
